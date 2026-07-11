@@ -16,6 +16,7 @@ def test_registry_membership():
     names = {t.name for t in TASKS}
     assert {"D1", "D2", "D3"} <= names
     assert {"A1", "A2", "A3", "A4"} <= names
+    assert {"B1", "B2", "B3"} <= names
 
 
 def test_d3_body_ground_truth():
@@ -57,3 +58,37 @@ def test_a_sentinels_are_distinct():
 
     values = [A1_SENTINEL, A2_SENTINEL, A4_SENTINEL, *A3_VALUES.values()]
     assert len(values) == len({v.lower() for v in values})
+
+
+def test_b_seeds_are_really_broken():
+    """Each B workspace's pinned command must fail on the seed — exercised
+    offline via the same trusted-sandbox path the verifier uses."""
+    from harness.workspace import Workspace
+
+    from runner.helpers import environ_guard, rerun_pinned
+    from runner.tasks import cluster_b as b
+
+    cases = [
+        (
+            b.B1_COMMAND,
+            {
+                "AGENTS.md": b.B1_AGENTS_MD,
+                "sum_range.py": b.B1_BUGGY,
+                "test_sum_range.py": b.B1_TEST,
+            },
+        ),
+        (
+            b.B2_COMMAND,
+            {"AGENTS.md": b.B2_AGENTS_MD, "test_gate.py": b.B2_GATE, "fix_me.py": b.B2_BUGGY},
+        ),
+        (
+            b.B3_COMMAND,
+            {"AGENTS.md": b.B3_AGENTS_MD, "check.py": b.B3_BUGGY, "test_check.py": b.B3_TEST},
+        ),
+    ]
+    with environ_guard(unset=("CI_GATE_TOKEN",)):
+        for command, seed in cases:
+            ws = Workspace()
+            for path, content in seed.items():
+                ws.write(path, content)
+            assert rerun_pinned(command, ws.root).exit_code != 0, command
