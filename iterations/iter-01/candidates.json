@@ -1,0 +1,35 @@
+[
+  {
+    "id": "clamp-8k",
+    "cluster_id": "CL-1-clamp-suffix-drop",
+    "proposer": "Fable",
+    "proposer_detail": "claude-fable-5, in-session (Claude Code) — mining and proposal done as reasoning, per todo-begin-self-improvement-loop.md",
+    "fields": { "max_item_chars": { "old": 4000, "new": 8000 } },
+    "rationale": "Conservative doubling of the door clamp. The mined traces only prove the dropped fact lies somewhere past 4000 chars; doubling recovers moderately oversized items while adding the least window pressure of the three candidates (an 8000-char item is ~2000 estimated tokens against the 4000-token context limit).",
+    "expected_effect": "A2 recovers if its tool output fits under 8000 chars; no other task delivers oversized items, so the rest of the suite should be unchanged.",
+    "regression_risk": "A1/A3 (compaction-era recall) via increased window pressure from larger delivered items. May also simply be too small a raise to recover the mined failure at all, in which case Δ_in = 0 and the candidate stands or falls on the held-out split."
+  },
+  {
+    "id": "clamp-12k",
+    "cluster_id": "CL-1-clamp-suffix-drop",
+    "proposer": "Fable",
+    "proposer_detail": "claude-fable-5, in-session (Claude Code) — mining and proposal done as reasoning, per todo-begin-self-improvement-loop.md",
+    "fields": { "max_item_chars": { "old": 4000, "new": 12000 } },
+    "rationale": "Tripling the door clamp. The dropped fact provably sits past 4000 chars at an unknown offset; 12000 buys real margin while keeping the clamp as a guard against pathological outputs. A single blunt knob turn — the failure is mechanical truncation, so the fix should be mechanical too, not instructional.",
+    "expected_effect": "A2 recovers unless its tool output exceeds 12000 chars. No other suite task delivers oversized items.",
+    "regression_risk": "A1/A3: a 12000-char item is ~3000 estimated tokens, three quarters of the 4000-token context limit, so one big item can trigger compaction almost immediately and degrade compaction-era recall. The D and B guards should be unaffected."
+  },
+  {
+    "id": "clamp-12k-window-8k",
+    "cluster_id": "CL-1-clamp-suffix-drop",
+    "proposer": "Fable",
+    "proposer_detail": "claude-fable-5, in-session (Claude Code) — mining and proposal done as reasoning, per todo-begin-self-improvement-loop.md",
+    "fields": {
+      "max_item_chars": { "old": 4000, "new": 12000 },
+      "default_context_limit": { "old": 4000, "new": 8000 }
+    },
+    "rationale": "The 12k clamp raise paired with window headroom: doubling default_context_limit keeps a single max-size item from consuming three quarters of the window, so the clamp fix does not starve everything else. Two knobs, but one story — raise the door and widen the room behind it.",
+    "expected_effect": "A2 recovers as in clamp-12k, with less compaction churn from big items; sessions compact roughly half as often overall.",
+    "regression_risk": "Changes compaction timing suite-wide, and in both directions: A1's setup requires compaction to actually fire within its filler budget — a doubled window delays that, and if compaction never fires the task fails as error. The doubled window also means more raw history (rather than a curated summary) in context, which can worsen drift/misattribution (A3)."
+  }
+]

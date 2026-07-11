@@ -1,0 +1,38 @@
+{
+  "candidate_id": "clamp-8k",
+  "label": "cand-clamp-8k",
+  "accepted": true,
+  "delta_in": 0.0,
+  "delta_ho": 0.19999999999999996,
+  "per_task": {
+    "A1": 0.0,
+    "A2": 0.0,
+    "A3": 0.0,
+    "A4": 1.0,
+    "B1": 0.0,
+    "B2": 0.0,
+    "B3": 0.0,
+    "C1": 0.0,
+    "C2": 0.0,
+    "C3": 0.0,
+    "D1": 0.0,
+    "D2": 0.0,
+    "D3": 0.0
+  },
+  "baseline_fingerprint": {
+    "gemma_sha": "edac4be03bbcd6db7c4c23531f612e7de408f4bb",
+    "gemma_dirty": false,
+    "dirty_sha": null,
+    "config_version": 1,
+    "model": "google/gemma-4-26b-a4b",
+    "runner_sha": "1e472769814a24b19bab3e433a53f681d0a6fc052ee22ad53df388a2815b818a"
+  },
+  "candidate_fingerprint": {
+    "gemma_sha": "edac4be03bbcd6db7c4c23531f612e7de408f4bb",
+    "gemma_dirty": true,
+    "dirty_sha": "e419fba78ac9bffb363d325ea29d8fbc3237be24b63cad903c72c64a2c59740f",
+    "config_version": 2,
+    "model": "google/gemma-4-26b-a4b",
+    "runner_sha": "1e472769814a24b19bab3e433a53f681d0a6fc052ee22ad53df388a2815b818a"
+  }
+}

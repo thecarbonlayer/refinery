@@ -1,0 +1,13 @@
+[
+  {
+    "id": "CL-1-clamp-suffix-drop",
+    "mechanism": "Door clamp truncates oversized items by keeping the prefix and dropping the tail (limits.py clamp(), max_item_chars=4000); any fact past the clamp boundary never enters the model's window.",
+    "tasks": ["A2"],
+    "hypothesis": "A2's tool result exceeds max_item_chars with the answer on its final line, so the answer is deterministically dropped at the door. The model detects the truncation and honestly declines to guess in all three attempts (tool_called=True each time) — the failure is the harness's, not the model's. No prompt-wording edit can recover data that never enters the window; the operative knob is max_item_chars.",
+    "evidence": [
+      "A2 attempt 0: reply='The provided log snippet does not contain the final line with a rollout password. The log ends abruptly with a truncated sequence of heartbeat messages.'",
+      "A2 attempt 1: reply='The provided log does not contain a rollout password. The last visible line is a truncated timestamp.'",
+      "A2 attempt 2: reply='The provided log snippet does not contain the final line with a rollout password. ... I cannot determine the password from the information provided.'"
+    ]
+  }
+]

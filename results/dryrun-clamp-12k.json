@@ -1,0 +1,42 @@
+{
+  "fingerprint": {
+    "gemma_sha": "edac4be03bbcd6db7c4c23531f612e7de408f4bb",
+    "gemma_dirty": true,
+    "dirty_sha": "f603b6ca09f9cfe141fcd0de55feee5abcc2cf1590357fd1efc0aa84d66d0b2b",
+    "config_version": 2,
+    "model": "google/gemma-4-26b-a4b",
+    "runner_sha": "1e472769814a24b19bab3e433a53f681d0a6fc052ee22ad53df388a2815b818a"
+  },
+  "tasks": {
+    "A1": {
+      "split": "held_in",
+      "cluster": "A",
+      "expected_baseline": "fail",
+      "attempts": 1,
+      "passes": 1,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass"
+      ]
+    },
+    "A2": {
+      "split": "held_in",
+      "cluster": "A",
+      "expected_baseline": "fail",
+      "attempts": 1,
+      "passes": 1,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass"
+      ]
+    }
+  },
+  "summary": {
+    "held_in_rate": 1.0,
+    "held_out_rate": 0.0
+  },
+  "filter": [
+    "A1",
+    "A2"
+  ]
+}
