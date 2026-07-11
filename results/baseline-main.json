@@ -2,8 +2,10 @@
   "fingerprint": {
     "gemma_sha": "edac4be03bbcd6db7c4c23531f612e7de408f4bb",
     "gemma_dirty": false,
+    "dirty_sha": null,
     "config_version": 1,
-    "model": "google/gemma-4-26b-a4b"
+    "model": "google/gemma-4-26b-a4b",
+    "runner_sha": "f02e31e8cd18fcb4831054d69b5fd8957425afbbad7f1097ae8854da62d6d621"
   },
   "tasks": {
     "A1": {
