@@ -21,6 +21,14 @@ A2_SENTINEL = "K4Q7-ROLLOUT-9Z"
 A3_VALUES = {"A": "ALPHA-CODE-D4T", "B": "BRAVO-CODE-M7Q", "C": "CHARLIE-CODE-X2R"}
 A4_SENTINEL = "ZQ-PASS-77KD"
 A1_MAX_FILLER_TURNS = 22
+# The clamp value the A2/A4 fixtures were sized against, pinned at AUTHORING
+# time (config v1's max_item_chars, 2026-07-10) — hard constraint 5. The setup
+# assertions below must compare against THIS, never the live harness value: the
+# live value is the editable knob under test, and a fixture check that read it
+# would error out precisely the candidates that raise the clamp enough to pass
+# (verifier behavior depending on the editable surface — the coupling hard
+# constraint 2 forbids). Found by iteration 1's dry-run.
+AUTHORED_CLAMP = 4000
 
 
 def _plain_agent(**kwargs):
@@ -92,11 +100,10 @@ def _a2_log() -> str:
 
 
 def run_a2() -> Attempt:
-    from harness.limits import MAX_ITEM_CHARS
     from harness.tools import Tool, ToolRegistry
 
     log = _a2_log()
-    assert len(log) > MAX_ITEM_CHARS, "authoring bug: log must exceed the clamp"
+    assert len(log) > AUTHORED_CLAMP, "authoring bug: log must exceed the baseline clamp"
     tools = ToolRegistry()
     tools.register(
         Tool(
@@ -152,14 +159,12 @@ def run_a3() -> Attempt:
 
 
 def run_a4() -> Attempt:
-    from harness.limits import MAX_ITEM_CHARS
-
     d = Path(mkdtemp(prefix="a4-"))
     filler = "\n".join(
         f"note {i:03d}: rollout checklist item {i} reviewed and signed off" for i in range(120)
     )
     body = filler + f"\n\n## Final section\nThe rollout password is {A4_SENTINEL}.\n"
-    assert len(body) > MAX_ITEM_CHARS, "authoring bug: file must exceed the clamp"
+    assert len(body) > AUTHORED_CLAMP, "authoring bug: file must exceed the baseline clamp"
     notes = d / "notes.txt"
     notes.write_text(body)
     a = _plain_agent()

@@ -109,14 +109,14 @@ def test_d3_body_never_contains_answer_token():
 
 
 def test_a2_log_exceeds_clamp():
-    """The REAL A2 fixture (same builder run_a2 uses) must exceed the clamp —
-    a duplicated copy here could drift and leave the task vacuous."""
-    from harness.limits import MAX_ITEM_CHARS
-
-    from runner.tasks.cluster_a import A2_SENTINEL, _a2_log
+    """The REAL A2 fixture (same builder run_a2 uses) must exceed the AUTHORED
+    clamp — a duplicated copy here could drift and leave the task vacuous.
+    Compared against the authoring-time pin, never the live harness value: the
+    live value is the editable knob under test (see AUTHORED_CLAMP)."""
+    from runner.tasks.cluster_a import A2_SENTINEL, AUTHORED_CLAMP, _a2_log
 
     log = _a2_log()
-    assert len(log) > MAX_ITEM_CHARS
+    assert len(log) > AUTHORED_CLAMP
     assert log.rstrip().endswith(A2_SENTINEL)
 
 
