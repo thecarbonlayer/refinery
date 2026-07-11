@@ -134,6 +134,20 @@ def test_absolute_paths_outside(tmp_path: Path):
     assert absolute_paths_outside("curl http://example.com/path", root) == []
 
 
+def test_absolute_paths_outside_accepts_unresolved_root(tmp_path: Path):
+    # macOS: mkdtemp hands out /var/folders/... while resolve() canonicalizes
+    # to /private/var/folders/... — the literal (unresolved) workspace path the
+    # agent actually receives must not be flagged as an escape.
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real_dir)
+    ws = link / "ws"
+    ws.mkdir()
+    assert absolute_paths_outside(f"cat {ws}/file.txt", ws) == []
+    assert absolute_paths_outside("cat /etc/hosts", ws) == ["/etc/hosts"]
+
+
 def test_absolute_paths_outside_home_and_single_segment(tmp_path: Path):
     root = tmp_path / "ws"
     root.mkdir()

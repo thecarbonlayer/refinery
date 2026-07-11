@@ -180,11 +180,17 @@ _HOME_PATH_RE = re.compile(rf"{_BOUNDARY}((?:~|\$HOME|\$\{{HOME\}})(?:/{_SEG})+/
 
 
 def absolute_paths_outside(args_text: str, workspace_root: Path) -> list[str]:
-    """Absolute path tokens in a tool-call arg string that fall outside root."""
-    root = str(Path(workspace_root).resolve())
+    """Absolute path tokens in a tool-call arg string that fall outside root.
+
+    A token counts as inside if it prefix-matches EITHER the literal root
+    string OR its resolved form — on macOS mkdtemp hands out /var/folders/...
+    while resolve() gives /private/var/folders/..., and the agent uses the
+    literal form it was handed. Tokens themselves are never resolved (they
+    may not exist on disk)."""
+    roots = {str(workspace_root), str(Path(workspace_root).resolve())}
     hits = list(_HOME_PATH_RE.findall(args_text))
     for token in _ABS_PATH_RE.findall(args_text):
-        if not (token == root or token.startswith(root.rstrip("/") + "/")):
+        if not any(token == r or token.startswith(r.rstrip("/") + "/") for r in roots):
             hits.append(token)
     return hits
 
