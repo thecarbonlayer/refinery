@@ -11,12 +11,27 @@ def test_registry_shape():
         assert t.expected_baseline in ("pass", "fail", "uncertain")
 
 
-# Once all clusters land this pins the full suite; update the sets per cluster task.
 def test_registry_membership():
     names = {t.name for t in TASKS}
-    assert {"D1", "D2", "D3"} <= names
-    assert {"A1", "A2", "A3", "A4"} <= names
-    assert {"B1", "B2", "B3"} <= names
+    assert names == {
+        "A1",
+        "A2",
+        "A3",
+        "A4",
+        "B1",
+        "B2",
+        "B3",
+        "C1",
+        "C2",
+        "C3",
+        "D1",
+        "D2",
+        "D3",
+    }
+    held_in = {t.name for t in TASKS if t.split == "held_in"}
+    held_out = {t.name for t in TASKS if t.split == "held_out"}
+    assert held_in == {"A1", "A2", "B1", "B2", "C1", "C2", "D1", "D2"}
+    assert held_out == {"A3", "A4", "B3", "C3", "D3"}
 
 
 def test_d3_body_ground_truth():
