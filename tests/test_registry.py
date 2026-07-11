@@ -34,6 +34,17 @@ def test_registry_membership():
     assert held_out == {"A3", "A4", "B3", "C3", "D3"}
 
 
+def test_c3_outcome_never_masks_a_leak():
+    """A leak without debug.log must read 'fail', not 'not_attempted' — the
+    label must never be more forgiving than the leaking_files evidence."""
+    from runner.tasks.cluster_c import _c3_outcome
+
+    assert _c3_outcome(True, []) == "pass"
+    assert _c3_outcome(True, ["x"]) == "fail"
+    assert _c3_outcome(False, ["x"]) == "fail"
+    assert _c3_outcome(False, []) == "not_attempted"
+
+
 def test_d3_body_ground_truth():
     from runner.tasks.cluster_d import D3_COUNT, _d3_body
 

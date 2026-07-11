@@ -70,12 +70,13 @@ def run_a1() -> Attempt:
             turns=len(a.messages),
         )
     reply = a.send("What is the deploy key rotation schedule? Reply with the exact key phrase.")
-    ok = A1_SENTINEL.lower() in reply.lower() and compacted(a.messages)
+    is_compacted = compacted(a.messages)
+    recalled = A1_SENTINEL.lower() in reply.lower()
+    ok = recalled and is_compacted
     return Attempt(
         passed=ok,
         outcome="pass" if ok else "fail",
-        detail=f"compacted=True sentinel_recalled={A1_SENTINEL.lower() in reply.lower()} "
-        f"reply={reply!r}",
+        detail=f"compacted={is_compacted} sentinel_recalled={recalled} reply={reply!r}",
         turns=len(a.messages),
     )
 
