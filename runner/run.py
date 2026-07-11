@@ -11,6 +11,7 @@ promotion by another name).
 from __future__ import annotations
 
 import json
+import os
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -30,13 +31,25 @@ class TaskResult:
         return (sum(1 for r in self.records if r["passed"]) / n) if n else 0.0
 
 
-def load_done(jsonl_path: Path) -> dict[tuple[str, int], dict]:
+def load_done(jsonl_path: Path, log=print) -> dict[tuple[str, int], dict]:
     done: dict[tuple[str, int], dict] = {}
     if jsonl_path.is_file():
-        for line in jsonl_path.read_text().splitlines():
-            if line.strip():
+        lines = jsonl_path.read_text().splitlines()
+        last = len(lines)
+        for lineno, line in enumerate(lines, start=1):
+            if not line.strip():
+                continue
+            try:
                 rec = json.loads(line)
-                done[(rec["task"], rec["attempt"])] = rec
+            except json.JSONDecodeError as e:
+                if lineno == last:
+                    # A torn final line just means the last attempt didn't land
+                    # on disk; it will be re-run. Mid-file corruption is worse
+                    # than a resumability problem — refuse to guess.
+                    log(f"  warning: skipping malformed final line of {jsonl_path}")
+                    continue
+                raise ValueError(f"malformed JSONL at line {lineno} of {jsonl_path}: {e}") from e
+            done[(rec["task"], rec["attempt"])] = rec
     return done
 
 
@@ -53,10 +66,21 @@ def run_task(
     result = TaskResult(spec)
     for i in range(n):
         if (spec.name, i) in done:
-            result.records.append(done[(spec.name, i)])
+            rec = done[(spec.name, i)]
+            if (
+                rec["gemma_sha"] != fingerprint["gemma_sha"]
+                or rec["config_version"] != fingerprint["config_version"]
+            ):
+                raise RuntimeError(
+                    f"resume mismatch: {jsonl_path} holds records from a different "
+                    f"harness state (record {rec['gemma_sha']}/v{rec['config_version']} "
+                    f"vs current {fingerprint['gemma_sha']}/v{fingerprint['config_version']}); "
+                    f"use a fresh --label"
+                )
+            result.records.append(rec)
             log(
                 f"  {spec.name} attempt {i + 1}/{n}: (resumed) "
-                f"{'PASS' if done[(spec.name, i)]['passed'] else 'FAIL'}"
+                f"{'PASS' if rec['passed'] else 'FAIL'}"
             )
             continue
         t0 = time.monotonic()
@@ -80,9 +104,14 @@ def run_task(
         }
         with jsonl_path.open("a") as f:
             f.write(json.dumps(rec) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
         result.records.append(rec)
         log(
             f"  {spec.name} attempt {i + 1}/{n}: "
             f"{'PASS' if att.passed else 'FAIL'} ({att.outcome}, {rec['duration_s']}s)"
         )
+    orphaned = sum(1 for task, idx in done if task == spec.name and idx >= n)
+    if orphaned:
+        log(f"  {spec.name}: {orphaned} prior record(s) with attempt index >= {n} ignored")
     return result

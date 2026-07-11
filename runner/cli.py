@@ -14,7 +14,7 @@ def main() -> None:
 
     run_p = sub.add_parser("run", help="run the task suite against the current dist/gemma checkout")
     run_p.add_argument("--label", required=True, help="results file stem (results/<label>.json[l])")
-    run_p.add_argument("--only", nargs="*", default=None, help="task names to run (default: all)")
+    run_p.add_argument("--only", nargs="+", default=None, help="task names to run (default: all)")
     run_p.add_argument(
         "--attempts",
         type=int,
