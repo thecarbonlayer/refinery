@@ -60,6 +60,38 @@ def test_load_done_tolerates_malformed_final_line(tmp_path):
     assert set(done) == {("A1", 0)}
 
 
+def test_load_done_truncates_torn_final_line_so_appends_stay_well_formed(tmp_path):
+    jsonl = tmp_path / "r.jsonl"
+    good = json.dumps(_record()) + "\n"
+    fragment = '{"task": "A1", "attempt"'
+    jsonl.write_text(good + fragment)  # torn write: no trailing newline
+    lines: list[str] = []
+    done = load_done(jsonl, log=lines.append)
+    assert set(done) == {("A1", 0)}
+    assert any("dropped" in line for line in lines)
+    # the fragment must be gone from the file, which now ends in a clean newline
+    content = jsonl.read_text()
+    assert fragment not in content
+    assert content == good
+    # simulate run_task's append of a fresh record — must not fuse with anything
+    with jsonl.open("a") as f:
+        f.write(json.dumps(_record(attempt=1)) + "\n")
+    done2 = load_done(jsonl, log=lambda *a: None)  # no ValueError
+    assert set(done2) == {("A1", 0), ("A1", 1)}
+
+
+def test_load_done_restores_newline_on_valid_final_line_missing_it(tmp_path):
+    jsonl = tmp_path / "r.jsonl"
+    # write torn exactly at the newline boundary: record is valid, newline gone
+    jsonl.write_text(json.dumps(_record()))
+    done = load_done(jsonl, log=lambda *a: None)
+    assert set(done) == {("A1", 0)}
+    assert jsonl.read_text().endswith("\n")
+    with jsonl.open("a") as f:
+        f.write(json.dumps(_record(attempt=1)) + "\n")
+    assert set(load_done(jsonl, log=lambda *a: None)) == {("A1", 0), ("A1", 1)}
+
+
 def test_load_done_raises_on_malformed_nonfinal_line(tmp_path):
     jsonl = tmp_path / "r.jsonl"
     jsonl.write_text('{"broken\n' + json.dumps(_record()) + "\n")

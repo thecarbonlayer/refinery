@@ -32,25 +32,50 @@ class TaskResult:
 
 
 def load_done(jsonl_path: Path, log=print) -> dict[tuple[str, int], dict]:
+    """Invariant on return: the file ends with a clean newline (or is empty),
+    so subsequent appends can never fuse onto a torn fragment."""
     done: dict[tuple[str, int], dict] = {}
     if jsonl_path.is_file():
-        lines = jsonl_path.read_text().splitlines()
+        lines = jsonl_path.read_bytes().decode().splitlines(keepends=True)
         last = len(lines)
+        offset = 0  # byte offset of the start of the current line
         for lineno, line in enumerate(lines, start=1):
             if not line.strip():
+                offset += len(line.encode())
                 continue
             try:
                 rec = json.loads(line)
             except json.JSONDecodeError as e:
                 if lineno == last:
                     # A torn final line just means the last attempt didn't land
-                    # on disk; it will be re-run. Mid-file corruption is worse
-                    # than a resumability problem — refuse to guess.
-                    log(f"  warning: skipping malformed final line of {jsonl_path}")
+                    # on disk; it will be re-run. Truncate the fragment so the
+                    # next append starts on a fresh line instead of fusing with
+                    # it. Mid-file corruption is worse than a resumability
+                    # problem — refuse to guess.
+                    with jsonl_path.open("r+b") as f:
+                        f.truncate(offset)
+                    log(
+                        f"  warning: dropped malformed final line of {jsonl_path} "
+                        f"(torn write; fragment truncated from the file)"
+                    )
                     continue
                 raise ValueError(f"malformed JSONL at line {lineno} of {jsonl_path}: {e}") from e
             done[(rec["task"], rec["attempt"])] = rec
+            offset += len(line.encode())
+        if lines and not lines[-1].endswith("\n") and json_final_line_valid(lines[-1]):
+            # Valid final record whose trailing newline was torn off: keep the
+            # record, restore the newline so the invariant holds for appends.
+            with jsonl_path.open("a") as f:
+                f.write("\n")
     return done
+
+
+def json_final_line_valid(line: str) -> bool:
+    try:
+        json.loads(line)
+    except json.JSONDecodeError:
+        return False
+    return True
 
 
 def run_task(
