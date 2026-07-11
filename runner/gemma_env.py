@@ -45,6 +45,8 @@ def gemma_fingerprint(root: Path = GEMMA_ROOT) -> dict:
     sha = subprocess.run(
         ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True
     ).stdout.strip()
+    if not sha:
+        raise RuntimeError("cannot fingerprint gemma checkout: git rev-parse failed")
     dirty = bool(
         subprocess.run(
             ["git", "-C", str(root), "status", "--porcelain"], capture_output=True, text=True
