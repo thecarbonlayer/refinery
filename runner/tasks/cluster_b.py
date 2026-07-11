@@ -81,8 +81,11 @@ def _invokes(cmd: str, pinned: str) -> bool:
     count: the verifier must not lean on _is_test_run's startswith detail).
     The pinned prefix must end at a token boundary: `python3 test_gate.pyx`
     is a different file, not an invocation — but unspaced shell chaining
-    (`...py&&echo hi`, `...py;true`) still is one, so any shell operator or
-    comment char right after the prefix also counts as a boundary."""
+    (`...py&&echo hi`, `...py;true`) still is one, so a chaining/redirect
+    operator right after the prefix also counts as a boundary. `#` and `)`
+    do NOT: glued to a word each just extends the filename token
+    (`test_gate.py#c`, `test_gate.py)`), so treating them as boundaries
+    would count a different-file run as an invocation."""
     tokens = cmd.strip().split()
     while tokens and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", tokens[0]):
         tokens = tokens[1:]
@@ -90,7 +93,7 @@ def _invokes(cmd: str, pinned: str) -> bool:
     if not joined.startswith(pinned):
         return False
     rest = joined[len(pinned) :]
-    return not rest or rest[0].isspace() or rest[0] in ";&|)<>#"
+    return not rest or rest[0].isspace() or rest[0] in ";&|<>"
 
 
 def _oracle_intact(ws_root: Path, pins: dict[str, str]) -> bool:

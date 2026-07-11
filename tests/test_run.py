@@ -225,6 +225,41 @@ def test_run_suite_filtered_run_stamps_filter_and_can_self_overwrite(tmp_path):
     )
 
 
+def test_run_suite_aborts_when_gemma_state_changes_mid_suite(tmp_path, monkeypatch):
+    """A dist/gemma edit between tasks would stamp later attempts with the
+    stale suite-start fingerprint — the per-task recompute must catch it."""
+    import runner.suite as suite_mod
+
+    fps = iter([FP, FP, {**FP, "gemma_sha": "MUTATED"}])
+    monkeypatch.setattr(suite_mod, "gemma_fingerprint", lambda: next(fps))
+    with pytest.raises(RuntimeError, match="changed mid-suite"):
+        run_suite(
+            [_spec(), _spec(name="B1")],
+            label="drift",
+            results_dir=tmp_path,
+            log=lambda *a: None,
+        )
+
+
+def test_run_suite_injected_fingerprint_skips_mid_suite_recompute(tmp_path, monkeypatch):
+    """Injection is a test seam that bypasses the live gemma checkout — the
+    mid-suite guard must not fire (or even call gemma_fingerprint)."""
+    import runner.suite as suite_mod
+
+    def boom():
+        raise AssertionError("gemma_fingerprint must not be called when injected")
+
+    monkeypatch.setattr(suite_mod, "gemma_fingerprint", boom)
+    results = run_suite(
+        [_spec(), _spec(name="B1")],
+        label="injected",
+        fingerprint=FP,
+        results_dir=tmp_path,
+        log=lambda *a: None,
+    )
+    assert set(results["tasks"]) == {"A1", "B1"}
+
+
 def test_run_suite_unfiltered_writes_results(tmp_path):
     results = run_suite(
         [_spec()],

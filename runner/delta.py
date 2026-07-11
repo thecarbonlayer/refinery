@@ -56,6 +56,12 @@ def delta(baseline: dict, candidate: dict) -> dict:
     # one read of each fingerprint, used for every parity gate and the echo
     base_fp = baseline.get("fingerprint", {})
     cand_fp = candidate.get("fingerprint", {})
+    # presence gate: two fingerprint-less results would pass every parity
+    # check below on None==None — unattributed measurements prove nothing.
+    if not base_fp or not cand_fp:
+        raise ValueError(
+            "results file lacks a fingerprint — refusing to compare unattributed measurements"
+        )
     # model parity: a Δ across models measures the model swap, not the edit.
     base_model = base_fp.get("model")
     cand_model = cand_fp.get("model")

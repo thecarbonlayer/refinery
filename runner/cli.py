@@ -8,6 +8,16 @@ import json
 from pathlib import Path
 
 
+def positive_int(value: str) -> int:
+    """argparse type for --attempts: `--attempts 0` would silently fall back
+    to the per-split defaults (`attempts or spec.attempts`) and a negative
+    would run zero attempts — both must fail at parse time."""
+    n = int(value)
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"attempts must be >= 1, got {n}")
+    return n
+
+
 def validate_only(only: list[str], tasks) -> list[str]:
     """Unknown task names in --only, sorted. A typo must error up front —
     run_suite would otherwise happily run an empty filtered suite."""
@@ -23,7 +33,7 @@ def main() -> None:
     run_p.add_argument("--only", nargs="+", default=None, help="task names to run (default: all)")
     run_p.add_argument(
         "--attempts",
-        type=int,
+        type=positive_int,
         default=None,
         help="override attempt count (default: 3 held-in / 5 held-out)",
     )

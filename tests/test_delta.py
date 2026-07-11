@@ -95,6 +95,25 @@ def test_delta_accepts_matching_runner_sha():
     assert "delta_in" in d and "delta_ho" in d
 
 
+def test_delta_refuses_missing_fingerprint():
+    """Two results that BOTH lack a fingerprint would sail through every
+    parity gate on None==None — unattributed measurements must be refused
+    outright, in either position."""
+    import pytest
+
+    tasks = {"A1": ("held_in", 1.0), "B1": ("held_in", 1.0), "A3": ("held_out", 0.4)}
+    for strip in ("del", "empty"):
+        bare = _results(tasks)
+        if strip == "del":
+            del bare["fingerprint"]
+        else:
+            bare["fingerprint"] = {}
+        with pytest.raises(ValueError, match="lacks a fingerprint"):
+            delta(bare, BASE)
+        with pytest.raises(ValueError, match="lacks a fingerprint"):
+            delta(BASE, bare)
+
+
 def test_delta_refuses_filtered_results():
     """A --only run stamps 'filter' into its results JSON; Δ over a partial
     suite would skew the split means, so both directions must be refused."""

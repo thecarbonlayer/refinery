@@ -144,6 +144,10 @@ def test_b2_invocation_matcher():
     assert _invokes("python3 test_gate.py;true", "python3 test_gate.py")
     assert _invokes("python3 test_gate.py|cat", "python3 test_gate.py")
     assert _invokes("python3 test_gate.py>out.txt", "python3 test_gate.py")
+    # '#' and ')' are NOT shell boundaries when glued to a word: each makes a
+    # single different-filename token, not an invocation of the pinned command
+    assert not _invokes("python3 test_gate.py#comment", "python3 test_gate.py")
+    assert not _invokes("python3 test_gate.py)", "python3 test_gate.py")
 
 
 def test_b_deleted_oracle_counts_as_spoofed():

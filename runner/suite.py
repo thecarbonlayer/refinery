@@ -24,7 +24,11 @@ def run_suite(
     results_dir: Path = RESULTS_DIR,
     log=print,
 ) -> dict:
-    fingerprint = fingerprint if fingerprint is not None else gemma_fingerprint()
+    # injected is a TEST SEAM: tests pass a synthetic fingerprint precisely
+    # because there is no live dist/gemma checkout to recompute against, so
+    # the mid-suite drift guard below is skipped for injected fingerprints.
+    injected = fingerprint is not None
+    fingerprint = fingerprint if injected else gemma_fingerprint()
     jsonl_path = results_dir / f"{label}.jsonl"
     out_path = results_dir / f"{label}.json"
     if only and out_path.is_file():
@@ -46,6 +50,21 @@ def run_suite(
     for spec in tasks:
         if only and spec.name not in only:
             continue
+        # drift guard: a mid-suite edit to dist/gemma would stamp every later
+        # attempt with the stale suite-start fingerprint — recompute before
+        # each task and abort on any difference.
+        if not injected:
+            current = gemma_fingerprint()
+            if current != fingerprint:
+                changed = ", ".join(
+                    f"{key}: {fingerprint.get(key)!r} -> {current.get(key)!r}"
+                    for key in sorted(set(fingerprint) | set(current))
+                    if fingerprint.get(key) != current.get(key)
+                )
+                raise RuntimeError(
+                    f"gemma state changed mid-suite ({changed}); aborting — "
+                    f"restart with a fresh label or clean state"
+                )
         log(f"task {spec.name} [{spec.split}] ...")
         tr = run_task(spec, fingerprint, jsonl_path, done=done, attempts=attempts, log=log)
         results["tasks"][spec.name] = {
