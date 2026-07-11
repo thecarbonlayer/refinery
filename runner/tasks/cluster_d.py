@@ -49,7 +49,15 @@ def _calculator_agent():
 
 
 def _number_in(needle: str, text: str) -> bool:
+    # Accepts comma/space digit grouping but not scientific notation — accepted
+    # limitation; the dual tool-result assertion keeps it safe in practice.
     return needle in text.replace(",", "").replace(" ", "")
+
+
+def _last_int(text: str) -> str | None:
+    """The last integer token in the text — the model's stated final answer."""
+    nums = re.findall(r"\d+", text)
+    return nums[-1] if nums else None
 
 
 def run_d1() -> Attempt:
@@ -83,17 +91,22 @@ def run_d2() -> Attempt:
 def _d3_body() -> str:
     """Exactly D3_COUNT lines containing TODO (one per line, so `grep -c` agrees
     with str.count — the obvious correct method must agree with the truth),
-    interleaved with TODO-free lines."""
+    interleaved with TODO-free lines. Line labels start at 101 and any label
+    containing the answer token (123) is skipped, so a verbose model quoting
+    file content can never smuggle the correct answer into its reply."""
     lines: list[str] = []
     placed = 0
-    for i in range(60):
-        if i % 2 == 0 and placed < D3_COUNT:
-            lines.append(f"line {i:02d}: TODO revisit handler {i} after the migration")
+    for i in range(101, 161):
+        if str(D3_COUNT) in str(i):
+            continue  # label would contain the answer token
+        if i % 2 == 1 and placed < D3_COUNT:
+            lines.append(f"line {i}: TODO revisit handler {i} after the migration")
             placed += 1
         else:
-            lines.append(f"line {i:02d}: handler {i} reviewed, no action needed")
+            lines.append(f"line {i}: handler {i} reviewed, no action needed")
     body = "\n".join(lines) + "\n"
     assert body.count("TODO") == D3_COUNT, "authoring bug: ground truth drifted"
+    assert str(D3_COUNT) not in body, "authoring bug: answer token leaked into fixture"
     return body
 
 
@@ -123,11 +136,13 @@ def run_d3() -> Attempt:
         "How many times does the substring TODO appear in tasks.txt? "
         "Count exactly and reply with just the number."
     )
-    ok = re.search(rf"\b{D3_COUNT}\b", reply) is not None
+    # Anchor to the model's stated answer: the LAST integer in the reply must
+    # be the count (a mere `\b23\b` scan would pass on quoted file content).
+    ok = _last_int(reply) == str(D3_COUNT)
     return Attempt(
         passed=ok,
         outcome="pass" if ok else "fail",
-        detail=f"expected={D3_COUNT} reply={reply!r}",
+        detail=f"expected={D3_COUNT} last_int={_last_int(reply)!r} reply={reply!r}",
         approvals=approvals,
         turns=len(a.messages),
     )
