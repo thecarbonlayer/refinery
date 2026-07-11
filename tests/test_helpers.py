@@ -176,6 +176,20 @@ def test_arg_texts_decodes_json_string_values(tmp_path: Path):
     )
 
 
+def test_arg_texts_decodes_json_string_keys(tmp_path: Path):
+    """A slash-escaped path in KEY position must not evade the scan —
+    '{"\\/etc\\/hosts": true}' has no string values at all."""
+    from runner.helpers import arg_texts
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    raw = '{"\\/etc\\/hosts": true}'
+    texts = arg_texts(raw)
+    assert any(absolute_paths_outside(t, root) == ["/etc/hosts"] for t in texts), (
+        "decoded key /etc/hosts must be visible to the scan"
+    )
+
+
 def test_arg_texts_handles_nested_json_and_non_json():
     from runner.helpers import arg_texts
 

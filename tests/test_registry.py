@@ -139,6 +139,11 @@ def test_b2_invocation_matcher():
     assert _invokes("python3 test_gate.py --verbose", "python3 test_gate.py")
     # boundary after the pinned prefix: a longer filename must not count
     assert not _invokes("python3 test_gate.pyx", "python3 test_gate.py")
+    # unspaced shell chaining is still an invocation of the pinned command
+    assert _invokes("python3 test_gate.py&&echo hi", "python3 test_gate.py")
+    assert _invokes("python3 test_gate.py;true", "python3 test_gate.py")
+    assert _invokes("python3 test_gate.py|cat", "python3 test_gate.py")
+    assert _invokes("python3 test_gate.py>out.txt", "python3 test_gate.py")
 
 
 def test_b_deleted_oracle_counts_as_spoofed():

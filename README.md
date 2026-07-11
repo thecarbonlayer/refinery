@@ -29,6 +29,9 @@ state); aggregates land in results/<label>.json. Partial runs (--only) are
 stamped with a "filter" field and refuse to overwrite a full run's JSON.
 `delta` refuses filtered inputs, mismatched per-task attempt counts, and
 mismatched models by design — a Δ is only meaningful like-for-like.
+Results are also stamped with `runner_sha` (the verifier's own version);
+deltas across different runner versions are refused, so re-measure the
+baseline after changing runner code.
 
 To measure a different harness state: check out the branch in dist/gemma
 (the editable dependency points at that working tree), run with a new label,

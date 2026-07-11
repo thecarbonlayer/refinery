@@ -42,8 +42,30 @@ def make_provider():
 
 
 def _git(root: Path, *args: str) -> str:
-    """Raw stdout of a git command against ``root`` (seam for offline tests)."""
-    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True).stdout
+    """Raw stdout of a git command against ``root`` (seam for offline tests).
+
+    A failing git command must RAISE, never return '' — an empty `status
+    --porcelain` from a failed run would stamp a dirty tree as clean."""
+    proc = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)} failed in {root}: {proc.stderr.strip()}")
+    return proc.stdout
+
+
+RUNNER_ROOT = Path(__file__).resolve().parent
+
+
+def runner_sha(root: Path = RUNNER_ROOT) -> str:
+    """Content identity of the runner package itself — the verifier's version.
+
+    Results are only comparable when the SAME verifier produced them: a
+    verifier fix silently shifts pass fractions, so every result is stamped
+    with this sha and both resume and delta gate on it. Hash covers every
+    .py file's relative posix path AND bytes (a rename or an edit both count)."""
+    h = hashlib.sha256()
+    for p in sorted(root.rglob("*.py")):
+        h.update(p.relative_to(root).as_posix().encode() + b"\0" + p.read_bytes() + b"\0")
+    return h.hexdigest()
 
 
 def gemma_fingerprint(root: Path = GEMMA_ROOT) -> dict:
@@ -72,4 +94,5 @@ def gemma_fingerprint(root: Path = GEMMA_ROOT) -> dict:
         "dirty_sha": dirty_sha,
         "config_version": CONFIG.version,
         "model": make_provider().model,
+        "runner_sha": runner_sha(),
     }

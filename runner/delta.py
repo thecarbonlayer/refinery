@@ -53,13 +53,23 @@ def delta(baseline: dict, candidate: dict) -> dict:
             "sample-size mismatch — rerun candidate with matching attempts: "
             + ", ".join(mismatched)
         )
+    # one read of each fingerprint, used for every parity gate and the echo
+    base_fp = baseline.get("fingerprint", {})
+    cand_fp = candidate.get("fingerprint", {})
     # model parity: a Δ across models measures the model swap, not the edit.
-    base_model = baseline["fingerprint"].get("model")
-    cand_model = candidate["fingerprint"].get("model")
+    base_model = base_fp.get("model")
+    cand_model = cand_fp.get("model")
     if base_model != cand_model:
         raise ValueError(
             f"model mismatch: baseline ran {base_model!r}, candidate ran {cand_model!r} "
             f"— Δ across models is meaningless"
+        )
+    # verifier parity: the runner IS part of the measurement apparatus; a Δ
+    # across runner versions measures the verifier change, not the edit.
+    if base_fp.get("runner_sha") != cand_fp.get("runner_sha"):
+        raise ValueError(
+            "verifier version mismatch — results were produced by different "
+            "runner versions; re-measure"
         )
     d_in = split_rate(candidate, "held_in") - split_rate(baseline, "held_in")
     d_ho = split_rate(candidate, "held_out") - split_rate(baseline, "held_out")
@@ -68,8 +78,8 @@ def delta(baseline: dict, candidate: dict) -> dict:
         for name in sorted(base_names)
     }
     return {
-        "baseline_fingerprint": baseline.get("fingerprint", {}),
-        "candidate_fingerprint": candidate.get("fingerprint", {}),
+        "baseline_fingerprint": base_fp,
+        "candidate_fingerprint": cand_fp,
         "delta_in": d_in,
         "delta_ho": d_ho,
         "per_task": per_task,

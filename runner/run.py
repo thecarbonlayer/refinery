@@ -96,21 +96,26 @@ def run_task(
             # predates dirty_sha; very old ones may lack model) must hit this
             # friendly error, not a KeyError. A record with no dirty_sha key
             # compares as None — which only matches a clean current tree; that
-            # is the correct strictness.
+            # is the correct strictness. A record with no runner_sha can never
+            # resume (None never matches a real sha): the verifier that made
+            # it is unknown, so it gets re-recorded under a fresh label.
             if (
                 rec["gemma_sha"] != fingerprint["gemma_sha"]
                 or rec["config_version"] != fingerprint["config_version"]
                 or rec.get("model") != fingerprint["model"]
                 or rec.get("gemma_dirty") != fingerprint["gemma_dirty"]
                 or rec.get("dirty_sha") != fingerprint["dirty_sha"]
+                or rec.get("runner_sha") != fingerprint["runner_sha"]
             ):
                 raise RuntimeError(
                     f"resume mismatch: {jsonl_path} holds records from a different "
                     f"harness state (record {rec['gemma_sha']}/v{rec['config_version']}/"
                     f"{rec.get('model')}/dirty={rec.get('gemma_dirty')}:"
-                    f"{rec.get('dirty_sha')} vs current {fingerprint['gemma_sha']}/"
+                    f"{rec.get('dirty_sha')}/runner={rec.get('runner_sha')} vs current "
+                    f"{fingerprint['gemma_sha']}/"
                     f"v{fingerprint['config_version']}/{fingerprint['model']}/"
-                    f"dirty={fingerprint['gemma_dirty']}:{fingerprint['dirty_sha']}); "
+                    f"dirty={fingerprint['gemma_dirty']}:{fingerprint['dirty_sha']}/"
+                    f"runner={fingerprint['runner_sha']}); "
                     f"use a fresh --label"
                 )
             result.records.append(rec)

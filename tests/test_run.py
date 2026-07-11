@@ -12,6 +12,7 @@ FP = {
     "dirty_sha": None,
     "config_version": 1,
     "model": "gemma",
+    "runner_sha": "runnersha1",
 }
 
 
@@ -102,6 +103,26 @@ def test_resume_legacy_record_without_dirty_sha_matches_clean_tree_only(tmp_path
     dirty_fp = {**FP, "gemma_dirty": True, "dirty_sha": "deadbeef"}
     with pytest.raises(RuntimeError, match="resume mismatch"):
         run_task(_spec(), dirty_fp, jsonl, log=lambda *a: None)
+
+
+def test_resume_refuses_different_runner_sha(tmp_path):
+    """Records measured by a different runner (verifier) version must not
+    blend with fresh attempts — the verifier itself is part of the identity."""
+    jsonl = tmp_path / "r.jsonl"
+    jsonl.write_text(json.dumps(_record(runner_sha="other-runner")) + "\n")
+    with pytest.raises(RuntimeError, match="resume mismatch"):
+        run_task(_spec(), FP, jsonl, log=lambda *a: None)
+
+
+def test_resume_refuses_legacy_record_without_runner_sha(tmp_path):
+    """A record predating the runner_sha field can't attest which verifier
+    produced it — refuse; it gets re-recorded under a fresh label."""
+    jsonl = tmp_path / "r.jsonl"
+    rec = _record()
+    del rec["runner_sha"]
+    jsonl.write_text(json.dumps(rec) + "\n")
+    with pytest.raises(RuntimeError, match="resume mismatch"):
+        run_task(_spec(), FP, jsonl, log=lambda *a: None)
 
 
 def test_resume_accepts_matching_fingerprint(tmp_path):

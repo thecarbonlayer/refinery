@@ -1,12 +1,19 @@
 from runner.delta import acceptance, delta
 
 
-def _results(tasks: dict[str, tuple[str, float]], model: str = "gemma") -> dict:
+def _results(
+    tasks: dict[str, tuple[str, float]], model: str = "gemma", runner_sha: str = "rsha1"
+) -> dict:
     """Minimal results-JSON shape: name -> (split, pass_fraction). Attempts
     mirror the real suite (3 held_in, 5 held_out) so parity checks pass."""
     attempts = {"held_in": 3, "held_out": 5}
     return {
-        "fingerprint": {"gemma_sha": "abc", "config_version": 1, "model": model},
+        "fingerprint": {
+            "gemma_sha": "abc",
+            "config_version": 1,
+            "model": model,
+            "runner_sha": runner_sha,
+        },
         "tasks": {
             name: {"split": split, "pass_fraction": frac, "attempts": attempts[split]}
             for name, (split, frac) in tasks.items()
@@ -62,6 +69,30 @@ def test_delta_refuses_mismatched_models():
     )
     with pytest.raises(ValueError, match="gemma.*other-model"):
         delta(BASE, cand)
+
+
+def test_delta_refuses_mismatched_runner_sha():
+    """Results measured by two different verifier versions are not
+    like-for-like — a verifier fix would masquerade as a harness Δ."""
+    import pytest
+
+    cand = _results(
+        {"A1": ("held_in", 1.0), "B1": ("held_in", 1.0), "A3": ("held_out", 0.4)},
+        runner_sha="rsha2",
+    )
+    with pytest.raises(ValueError, match="verifier version mismatch"):
+        delta(BASE, cand)
+    # legacy results with no runner_sha at all vs a stamped one: also refused
+    legacy = _results({"A1": ("held_in", 1.0), "B1": ("held_in", 1.0), "A3": ("held_out", 0.4)})
+    del legacy["fingerprint"]["runner_sha"]
+    with pytest.raises(ValueError, match="verifier version mismatch"):
+        delta(legacy, BASE)
+
+
+def test_delta_accepts_matching_runner_sha():
+    cand = _results({"A1": ("held_in", 1.0), "B1": ("held_in", 1.0), "A3": ("held_out", 0.4)})
+    d = delta(BASE, cand)
+    assert "delta_in" in d and "delta_ho" in d
 
 
 def test_delta_refuses_filtered_results():

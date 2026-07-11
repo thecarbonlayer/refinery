@@ -184,7 +184,11 @@ def arg_texts(raw: str) -> list[str]:
         if isinstance(value, str):
             strings.append(value)
         elif isinstance(value, dict):
-            for v in value.values():
+            # keys too: '{"\\/etc\\/hosts": true}' puts the escaped path in
+            # key position, where a values-only walk would never see it.
+            for k, v in value.items():
+                if isinstance(k, str):
+                    strings.append(k)
                 collect(v)
         elif isinstance(value, list):
             for v in value:
