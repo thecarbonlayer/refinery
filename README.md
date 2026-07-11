@@ -1,4 +1,4 @@
-# harness-editor — task-suite runner + Δ measurement
+# harness-editor — task-suite runner + Δ measurement + the self-improvement loop
 
 The measurement half of the self-evolving-harness project: runs the 13-task
 suite (docs/research/self-evolving-harness/task-suite-v2.md) against a live
@@ -37,6 +37,25 @@ To measure a different harness state: check out the branch in dist/gemma
 (the editable dependency points at that working tree), run with a new label,
 then `delta` the two JSONs.
 
+## The loop (mine -> propose -> validate -> PR)
+
+`loop/` is the pipeline half: the mining and proposal steps are done by the
+proposer model directly as reasoning (Fable, in-session, for iteration 1 —
+see docs/research/self-evolving-harness/todo-begin-self-improvement-loop.md)
+and land as fixed JSON artifacts in `iterations/<iter>/` (`clusters.json`,
+`candidates.json`); only validation and the branch+PR step are code. A
+candidate is applied to the dist/gemma WORKING TREE (never committed — a
+rejected candidate leaves no trace there), the suite runs in a fresh
+subprocess (config values bind at import), the edit is reverted, and the
+acceptance rule `Δ_in ≥ 0, Δ_ho ≥ 0, max > 0` decides. Accepted edits each get
+their own branch off `self-improvement` in dist/gemma and a PR targeting it
+(explicit base — never `main`), with the evidence (cluster, knobs, per-task Δ,
+provenance) in the body. The pipeline never merges.
+
+    uv run python -m loop.cli dry-run  --iteration iter-01 --candidate clamp-12k --tasks A2 D1
+    uv run python -m loop.cli validate --iteration iter-01 [--candidate clamp-12k]
+    uv run python -m loop.cli pr       --iteration iter-01 --candidate clamp-12k
+
 ## Layout
 
 - runner/tasks/ — the 13 task specs (mechanical verifiers only; sentinels,
@@ -45,8 +64,9 @@ then `delta` the two JSONs.
 - runner/helpers.py — approve-and-log approver (flag (d)-2), environ guard,
   transcript/hash utilities
 - results/ — committed measurement artifacts
-- ../harness-editor/loop/ (future) — the mine→propose→validate pipeline,
-  which imports runner.suite / runner.delta
+- loop/ — the validate→branch→PR pipeline (imports runner.suite / runner.delta)
+- iterations/ — per-iteration artifacts: mining notes, clusters, candidates,
+  validation records (rejected candidates included — they are the honest bulk)
 
 ## Offline tests
 
