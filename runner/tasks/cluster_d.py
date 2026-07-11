@@ -87,7 +87,7 @@ def _d3_body() -> str:
     lines: list[str] = []
     placed = 0
     for i in range(60):
-        if i % 3 == 0 and placed < D3_COUNT:
+        if i % 2 == 0 and placed < D3_COUNT:
             lines.append(f"line {i:02d}: TODO revisit handler {i} after the migration")
             placed += 1
         else:
