@@ -81,15 +81,21 @@ def run_a1() -> Attempt:
     )
 
 
-def run_a2() -> Attempt:
-    from harness.limits import MAX_ITEM_CHARS
-    from harness.tools import Tool, ToolRegistry
-
+def _a2_log() -> str:
+    """A2's oversized rollout log (needle on the FINAL line). Module-level so
+    the clamp regression test exercises THIS fixture, not a drifting copy."""
     heartbeats = "\n".join(
         f"2026-07-10T02:{i % 60:02d}:{(7 * i) % 60:02d} INFO worker-{i % 8} heartbeat ok seq={i}"
         for i in range(160)
     )
-    log = heartbeats + f"\nFINAL: the rollout password is {A2_SENTINEL}\n"
+    return heartbeats + f"\nFINAL: the rollout password is {A2_SENTINEL}\n"
+
+
+def run_a2() -> Attempt:
+    from harness.limits import MAX_ITEM_CHARS
+    from harness.tools import Tool, ToolRegistry
+
+    log = _a2_log()
     assert len(log) > MAX_ITEM_CHARS, "authoring bug: log must exceed the clamp"
     tools = ToolRegistry()
     tools.register(

@@ -25,7 +25,14 @@ def acceptance(delta_in: float, delta_ho: float) -> dict:
 
 def delta(baseline: dict, candidate: dict) -> dict:
     """Compare two results JSONs (same task set required — a candidate that
-    dropped a task would silently skew the split mean)."""
+    dropped a task would silently skew the split mean). Filtered (--only)
+    results are refused outright: a partial suite skews both split means."""
+    for label, res in (("baseline", baseline), ("candidate", candidate)):
+        if "filter" in res:
+            raise ValueError(
+                f"refusing to compute Δ from filtered (partial) results: "
+                f"{label} was produced with --only {res['filter']}"
+            )
     base_names = set(baseline["tasks"])
     cand_names = set(candidate["tasks"])
     if base_names != cand_names:

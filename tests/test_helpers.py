@@ -148,6 +148,19 @@ def test_absolute_paths_outside_accepts_unresolved_root(tmp_path: Path):
     assert absolute_paths_outside("cat /etc/hosts", ws) == ["/etc/hosts"]
 
 
+def test_absolute_paths_outside_allows_write_only_devices(tmp_path: Path):
+    """`> /dev/null` (and stdout/stderr/tty) is shell plumbing, not an escape —
+    but the allowlist must not launder a real outside path in the same command."""
+    root = tmp_path / "ws"
+    root.mkdir()
+    assert absolute_paths_outside("ls config > /dev/null", root) == []
+    assert absolute_paths_outside("cmd 2> /dev/stderr 1> /dev/stdout < /dev/tty", root) == []
+    assert absolute_paths_outside("cat /etc/hosts > /dev/null", root) == ["/etc/hosts"]
+    # only EXACT tokens are allowlisted — prefixes/extensions are still flagged
+    assert absolute_paths_outside("ls /dev/nullish", root) == ["/dev/nullish"]
+    assert absolute_paths_outside("cat /dev/null/../shm/x", root) == ["/dev/null/../shm/x"]
+
+
 def test_absolute_paths_outside_home_and_single_segment(tmp_path: Path):
     root = tmp_path / "ws"
     root.mkdir()

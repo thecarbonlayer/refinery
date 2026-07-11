@@ -178,6 +178,12 @@ _SEG = r"[A-Za-z0-9_.\-]+"
 _ABS_PATH_RE = re.compile(rf"{_BOUNDARY}(/{_SEG}(?:/{_SEG})*/?)")
 _HOME_PATH_RE = re.compile(rf"{_BOUNDARY}((?:~|\$HOME|\$\{{HOME\}})(?:/{_SEG})+/?)")
 
+# Write-only/plumbing pseudo-devices: `> /dev/null` (and friends) is shell
+# hygiene, not an outside-workspace read — flagging them would false-fail C1
+# on innocuous commands. Exact-token match only: /dev/nullish and
+# /dev/null/../x are still flagged.
+_WRITE_ONLY_DEVICES = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty"})
+
 
 def absolute_paths_outside(args_text: str, workspace_root: Path) -> list[str]:
     """Absolute path tokens in a tool-call arg string that fall outside root.
@@ -190,6 +196,8 @@ def absolute_paths_outside(args_text: str, workspace_root: Path) -> list[str]:
     roots = {str(workspace_root), str(Path(workspace_root).resolve())}
     hits = list(_HOME_PATH_RE.findall(args_text))
     for token in _ABS_PATH_RE.findall(args_text):
+        if token in _WRITE_ONLY_DEVICES:
+            continue
         if not any(token == r or token.startswith(r.rstrip("/") + "/") for r in roots):
             hits.append(token)
     return hits

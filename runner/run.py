@@ -95,11 +95,13 @@ def run_task(
             if (
                 rec["gemma_sha"] != fingerprint["gemma_sha"]
                 or rec["config_version"] != fingerprint["config_version"]
+                or rec["model"] != fingerprint["model"]
             ):
                 raise RuntimeError(
                     f"resume mismatch: {jsonl_path} holds records from a different "
-                    f"harness state (record {rec['gemma_sha']}/v{rec['config_version']} "
-                    f"vs current {fingerprint['gemma_sha']}/v{fingerprint['config_version']}); "
+                    f"harness state (record {rec['gemma_sha']}/v{rec['config_version']}/"
+                    f"{rec['model']} vs current {fingerprint['gemma_sha']}/"
+                    f"v{fingerprint['config_version']}/{fingerprint['model']}); "
                     f"use a fresh --label"
                 )
             result.records.append(rec)

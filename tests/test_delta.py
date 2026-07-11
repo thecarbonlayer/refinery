@@ -37,3 +37,16 @@ def test_delta_refuses_mismatched_task_sets():
     cand = _results({"A1": ("held_in", 1.0)})
     with pytest.raises(ValueError):
         delta(BASE, cand)
+
+
+def test_delta_refuses_filtered_results():
+    """A --only run stamps 'filter' into its results JSON; Δ over a partial
+    suite would skew the split means, so both directions must be refused."""
+    import pytest
+
+    filtered = _results({"A1": ("held_in", 1.0), "B1": ("held_in", 1.0), "A3": ("held_out", 0.4)})
+    filtered["filter"] = ["A1"]
+    with pytest.raises(ValueError, match="filtered"):
+        delta(filtered, BASE)
+    with pytest.raises(ValueError, match="filtered"):
+        delta(BASE, filtered)

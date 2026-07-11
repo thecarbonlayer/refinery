@@ -45,6 +45,15 @@ def test_resume_refuses_stale_fingerprint(tmp_path):
         run_task(_spec(), FP, jsonl, log=lambda *a: None)
 
 
+def test_resume_refuses_different_model(tmp_path):
+    """Same gemma sha + config but a different model is still a different
+    harness state — resuming across a model swap would blend fractions."""
+    jsonl = tmp_path / "r.jsonl"
+    jsonl.write_text(json.dumps(_record(model="other-model")) + "\n")
+    with pytest.raises(RuntimeError, match="resume mismatch.*other-model"):
+        run_task(_spec(), FP, jsonl, log=lambda *a: None)
+
+
 def test_resume_accepts_matching_fingerprint(tmp_path):
     jsonl = tmp_path / "r.jsonl"
     jsonl.write_text(json.dumps(_record()) + "\n")

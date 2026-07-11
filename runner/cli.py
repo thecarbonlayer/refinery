@@ -8,6 +8,12 @@ import json
 from pathlib import Path
 
 
+def validate_only(only: list[str], tasks) -> list[str]:
+    """Unknown task names in --only, sorted. A typo must error up front —
+    run_suite would otherwise happily run an empty filtered suite."""
+    return sorted(set(only) - {t.name for t in tasks})
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="runner")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -31,6 +37,13 @@ def main() -> None:
         from runner.suite import run_suite
         from runner.tasks import TASKS
 
+        if args.only:
+            unknown = validate_only(args.only, TASKS)
+            if unknown:
+                parser.error(
+                    f"unknown task name(s) in --only: {', '.join(unknown)} "
+                    f"(valid: {', '.join(t.name for t in TASKS)})"
+                )
         results = run_suite(
             TASKS,
             label=args.label,
