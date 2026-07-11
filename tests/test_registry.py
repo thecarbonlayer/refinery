@@ -137,6 +137,8 @@ def test_b2_invocation_matcher():
     )
     assert not _invokes("cat test_gate.py", "python3 test_gate.py")
     assert _invokes("python3 test_gate.py --verbose", "python3 test_gate.py")
+    # boundary after the pinned prefix: a longer filename must not count
+    assert not _invokes("python3 test_gate.pyx", "python3 test_gate.py")
 
 
 def test_b_deleted_oracle_counts_as_spoofed():

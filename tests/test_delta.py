@@ -1,12 +1,15 @@
 from runner.delta import acceptance, delta
 
 
-def _results(tasks: dict[str, tuple[str, float]]) -> dict:
-    """Minimal results-JSON shape: name -> (split, pass_fraction)."""
+def _results(tasks: dict[str, tuple[str, float]], model: str = "gemma") -> dict:
+    """Minimal results-JSON shape: name -> (split, pass_fraction). Attempts
+    mirror the real suite (3 held_in, 5 held_out) so parity checks pass."""
+    attempts = {"held_in": 3, "held_out": 5}
     return {
-        "fingerprint": {"gemma_sha": "abc", "config_version": 1},
+        "fingerprint": {"gemma_sha": "abc", "config_version": 1, "model": model},
         "tasks": {
-            name: {"split": split, "pass_fraction": frac} for name, (split, frac) in tasks.items()
+            name: {"split": split, "pass_fraction": frac, "attempts": attempts[split]}
+            for name, (split, frac) in tasks.items()
         },
         "summary": {},
     }
@@ -36,6 +39,28 @@ def test_delta_refuses_mismatched_task_sets():
 
     cand = _results({"A1": ("held_in", 1.0)})
     with pytest.raises(ValueError):
+        delta(BASE, cand)
+
+
+def test_delta_refuses_mismatched_attempt_counts():
+    """A candidate re-measured with fewer attempts is a different sample size;
+    blending it into a Δ would compare fractions of unequal precision."""
+    import pytest
+
+    cand = _results({"A1": ("held_in", 1.0), "B1": ("held_in", 1.0), "A3": ("held_out", 0.4)})
+    cand["tasks"]["A1"]["attempts"] = 1
+    with pytest.raises(ValueError, match="sample-size mismatch.*A1"):
+        delta(BASE, cand)
+
+
+def test_delta_refuses_mismatched_models():
+    import pytest
+
+    cand = _results(
+        {"A1": ("held_in", 1.0), "B1": ("held_in", 1.0), "A3": ("held_out", 0.4)},
+        model="other-model",
+    )
+    with pytest.raises(ValueError, match="gemma.*other-model"):
         delta(BASE, cand)
 
 

@@ -10,6 +10,7 @@ WHICH harness state produced a given result (git SHA + config version stamp).
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 from pathlib import Path
@@ -40,23 +41,35 @@ def make_provider():
     return Provider.from_env()
 
 
+def _git(root: Path, *args: str) -> str:
+    """Raw stdout of a git command against ``root`` (seam for offline tests)."""
+    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True).stdout
+
+
 def gemma_fingerprint(root: Path = GEMMA_ROOT) -> dict:
-    """Attribute a run to a harness state: git SHA (+dirty), config version, model."""
-    sha = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True
-    ).stdout.strip()
+    """Attribute a run to a harness state: git SHA (+dirty), config version, model.
+
+    A dirty flag alone has no content identity — two different uncommitted
+    edits at the same SHA would be indistinguishable — so a dirty tree also
+    carries ``dirty_sha``: sha256 over `status --porcelain` + `diff HEAD`
+    (untracked files appear in the status text, so they perturb the hash even
+    though the diff misses them). Clean tree -> ``dirty_sha`` is None."""
+    sha = _git(root, "rev-parse", "HEAD").strip()
     if not sha:
         raise RuntimeError("cannot fingerprint gemma checkout: git rev-parse failed")
-    dirty = bool(
-        subprocess.run(
-            ["git", "-C", str(root), "status", "--porcelain"], capture_output=True, text=True
-        ).stdout.strip()
+    status = _git(root, "status", "--porcelain")
+    dirty = bool(status.strip())
+    dirty_sha = (
+        hashlib.sha256((status + _git(root, "diff", "HEAD")).encode()).hexdigest()
+        if dirty
+        else None
     )
     from harness.harness_config import CONFIG
 
     return {
         "gemma_sha": sha,
         "gemma_dirty": dirty,
+        "dirty_sha": dirty_sha,
         "config_version": CONFIG.version,
         "model": make_provider().model,
     }

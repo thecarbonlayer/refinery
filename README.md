@@ -27,6 +27,8 @@ skipping finished attempts; records are pinned to the dist/gemma SHA + config
 version they measured, and a resume refuses records from a different harness
 state); aggregates land in results/<label>.json. Partial runs (--only) are
 stamped with a "filter" field and refuse to overwrite a full run's JSON.
+`delta` refuses filtered inputs, mismatched per-task attempt counts, and
+mismatched models by design — a Δ is only meaningful like-for-like.
 
 To measure a different harness state: check out the branch in dist/gemma
 (the editable dependency points at that working tree), run with a new label,

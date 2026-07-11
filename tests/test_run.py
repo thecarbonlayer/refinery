@@ -6,7 +6,13 @@ from runner.run import load_done, run_task
 from runner.spec import Attempt, TaskSpec
 from runner.suite import run_suite
 
-FP = {"gemma_sha": "abc123", "gemma_dirty": False, "config_version": 1, "model": "gemma"}
+FP = {
+    "gemma_sha": "abc123",
+    "gemma_dirty": False,
+    "dirty_sha": None,
+    "config_version": 1,
+    "model": "gemma",
+}
 
 
 def _spec(name="A1", split="held_in", passed=True):
@@ -52,6 +58,50 @@ def test_resume_refuses_different_model(tmp_path):
     jsonl.write_text(json.dumps(_record(model="other-model")) + "\n")
     with pytest.raises(RuntimeError, match="resume mismatch.*other-model"):
         run_task(_spec(), FP, jsonl, log=lambda *a: None)
+
+
+def test_resume_refuses_different_dirty_state(tmp_path):
+    """Same SHA but a different dirty-tree content identity is a different
+    harness state — two uncommitted edits at one SHA must not blend."""
+    jsonl = tmp_path / "r.jsonl"
+    jsonl.write_text(json.dumps(_record(gemma_dirty=True, dirty_sha="deadbeef")) + "\n")
+    with pytest.raises(RuntimeError, match="resume mismatch"):
+        run_task(_spec(), FP, jsonl, log=lambda *a: None)
+
+
+def test_resume_accepts_matching_dirty_sha(tmp_path):
+    """The SAME uncommitted state (identical dirty_sha) is resumable."""
+    fp = {**FP, "gemma_dirty": True, "dirty_sha": "deadbeef"}
+    jsonl = tmp_path / "r.jsonl"
+    jsonl.write_text(json.dumps(_record(**fp)) + "\n")
+    tr = run_task(_spec(), fp, jsonl, log=lambda *a: None)
+    assert len(tr.records) == 3  # 1 resumed + 2 fresh
+
+
+def test_resume_refuses_record_missing_model_key(tmp_path):
+    """A legacy record with no model key must hit the friendly RuntimeError,
+    not a KeyError."""
+    jsonl = tmp_path / "r.jsonl"
+    rec = _record()
+    del rec["model"]
+    jsonl.write_text(json.dumps(rec) + "\n")
+    with pytest.raises(RuntimeError, match="resume mismatch"):
+        run_task(_spec(), FP, jsonl, log=lambda *a: None)
+
+
+def test_resume_legacy_record_without_dirty_sha_matches_clean_tree_only(tmp_path):
+    """Records predating the dirty_sha field (the recorded baseline) compare
+    as None: resumable against a clean current tree, refused against a dirty
+    one."""
+    jsonl = tmp_path / "r.jsonl"
+    rec = _record()
+    del rec["dirty_sha"]
+    jsonl.write_text(json.dumps(rec) + "\n")
+    tr = run_task(_spec(), FP, jsonl, log=lambda *a: None)  # FP is clean: accepted
+    assert len(tr.records) == 3
+    dirty_fp = {**FP, "gemma_dirty": True, "dirty_sha": "deadbeef"}
+    with pytest.raises(RuntimeError, match="resume mismatch"):
+        run_task(_spec(), dirty_fp, jsonl, log=lambda *a: None)
 
 
 def test_resume_accepts_matching_fingerprint(tmp_path):

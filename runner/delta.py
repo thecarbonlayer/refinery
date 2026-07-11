@@ -40,6 +40,27 @@ def delta(baseline: dict, candidate: dict) -> dict:
             f"task sets differ: only-baseline={sorted(base_names - cand_names)}, "
             f"only-candidate={sorted(cand_names - base_names)}"
         )
+    # per-task attempts parity: fractions from unequal sample sizes have
+    # unequal precision, so a Δ over them is not like-for-like.
+    mismatched = [
+        f"{name} (baseline {baseline['tasks'][name]['attempts']} vs "
+        f"candidate {candidate['tasks'][name]['attempts']})"
+        for name in sorted(base_names)
+        if baseline["tasks"][name]["attempts"] != candidate["tasks"][name]["attempts"]
+    ]
+    if mismatched:
+        raise ValueError(
+            "sample-size mismatch — rerun candidate with matching attempts: "
+            + ", ".join(mismatched)
+        )
+    # model parity: a Δ across models measures the model swap, not the edit.
+    base_model = baseline["fingerprint"].get("model")
+    cand_model = candidate["fingerprint"].get("model")
+    if base_model != cand_model:
+        raise ValueError(
+            f"model mismatch: baseline ran {base_model!r}, candidate ran {cand_model!r} "
+            f"— Δ across models is meaningless"
+        )
     d_in = split_rate(candidate, "held_in") - split_rate(baseline, "held_in")
     d_ho = split_rate(candidate, "held_out") - split_rate(baseline, "held_out")
     per_task = {

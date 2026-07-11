@@ -161,6 +161,31 @@ def test_absolute_paths_outside_allows_write_only_devices(tmp_path: Path):
     assert absolute_paths_outside("cat /dev/null/../shm/x", root) == ["/dev/null/../shm/x"]
 
 
+def test_arg_texts_decodes_json_string_values(tmp_path: Path):
+    """JSON slash-escaping must not hide an absolute path: the raw string
+    misses \\/etc\\/hosts, so the decoded values must be scanned too."""
+    from runner.helpers import arg_texts
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    raw = '{"path": "\\/etc\\/hosts"}'
+    texts = arg_texts(raw)
+    assert raw in texts  # raw string always scanned
+    assert any(absolute_paths_outside(t, root) == ["/etc/hosts"] for t in texts), (
+        "decoded /etc/hosts must be visible to the scan"
+    )
+
+
+def test_arg_texts_handles_nested_json_and_non_json():
+    from runner.helpers import arg_texts
+
+    nested = '{"cmd": {"args": ["\\/etc\\/passwd", 3]}, "note": "x"}'
+    joined = " ".join(arg_texts(nested))
+    assert "/etc/passwd" in joined
+    # non-JSON falls back to the raw string only
+    assert arg_texts("cat /etc/hosts") == ["cat /etc/hosts"]
+
+
 def test_absolute_paths_outside_home_and_single_segment(tmp_path: Path):
     root = tmp_path / "ws"
     root.mkdir()

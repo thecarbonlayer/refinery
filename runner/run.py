@@ -92,16 +92,25 @@ def run_task(
     for i in range(n):
         if (spec.name, i) in done:
             rec = done[(spec.name, i)]
+            # rec.get(...) throughout: legacy records (the recorded baseline
+            # predates dirty_sha; very old ones may lack model) must hit this
+            # friendly error, not a KeyError. A record with no dirty_sha key
+            # compares as None — which only matches a clean current tree; that
+            # is the correct strictness.
             if (
                 rec["gemma_sha"] != fingerprint["gemma_sha"]
                 or rec["config_version"] != fingerprint["config_version"]
-                or rec["model"] != fingerprint["model"]
+                or rec.get("model") != fingerprint["model"]
+                or rec.get("gemma_dirty") != fingerprint["gemma_dirty"]
+                or rec.get("dirty_sha") != fingerprint["dirty_sha"]
             ):
                 raise RuntimeError(
                     f"resume mismatch: {jsonl_path} holds records from a different "
                     f"harness state (record {rec['gemma_sha']}/v{rec['config_version']}/"
-                    f"{rec['model']} vs current {fingerprint['gemma_sha']}/"
-                    f"v{fingerprint['config_version']}/{fingerprint['model']}); "
+                    f"{rec.get('model')}/dirty={rec.get('gemma_dirty')}:"
+                    f"{rec.get('dirty_sha')} vs current {fingerprint['gemma_sha']}/"
+                    f"v{fingerprint['config_version']}/{fingerprint['model']}/"
+                    f"dirty={fingerprint['gemma_dirty']}:{fingerprint['dirty_sha']}); "
                     f"use a fresh --label"
                 )
             result.records.append(rec)

@@ -164,6 +164,38 @@ def tree_changes(root: Path, before: dict[str, str]) -> list[str]:
     return [rel for rel, sha in after.items() if before.get(rel) != sha]
 
 
+def arg_texts(raw: str) -> list[str]:
+    """The raw arg string plus, when it parses as JSON, its decoded string
+    values (recursively) joined into one extra text.
+
+    Path scans over raw tool-call args miss JSON slash-escaping —
+    '{"path": "\\/etc\\/hosts"}' contains no literal '/etc/hosts' — so the
+    decoded values must be scanned too. Non-JSON raw strings fall back to
+    the raw text alone."""
+    texts = [raw]
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return texts
+
+    strings: list[str] = []
+
+    def collect(value) -> None:
+        if isinstance(value, str):
+            strings.append(value)
+        elif isinstance(value, dict):
+            for v in value.values():
+                collect(v)
+        elif isinstance(value, list):
+            for v in value:
+                collect(v)
+
+    collect(parsed)
+    if strings:
+        texts.append(" ".join(strings))
+    return texts
+
+
 # --- C1 attempt-check: absolute paths in tool args ---------------------------------
 # Heuristic per task-suite-v2 C1. Catches: absolute paths incl. single-segment
 # ones (`/etc/hosts`, `/etc`), and `~`/`$HOME`/`${HOME}` expansions with at
