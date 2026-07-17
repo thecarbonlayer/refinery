@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 dependencies = ["gemma"]
 
 [tool.uv.sources]
-gemma = { path = "../dist/gemma", editable = true }
+gemma = { path = "../../gemma", editable = true }
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6"]

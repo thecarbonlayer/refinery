@@ -35,8 +35,8 @@ wheels = [
 
 [[package]]
 name = "gemma"
-version = "0.1.0"
-source = { editable = "../dist/gemma" }
+version = "0.2.0"
+source = { editable = "../../gemma" }
 dependencies = [
     { name = "httpx" },
     { name = "textual" },
@@ -80,7 +80,7 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "gemma", editable = "../dist/gemma" }]
+requires-dist = [{ name = "gemma", editable = "../../gemma" }]
 
 [package.metadata.requires-dev]
 dev = [
