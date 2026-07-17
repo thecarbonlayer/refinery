@@ -7,12 +7,26 @@ import os
 import tempfile
 from pathlib import Path
 
+from runner import guard
 from runner.delta import split_rate
 from runner.gemma_env import gemma_fingerprint
 from runner.run import load_done, run_task
 from runner.spec import TaskSpec
 
 RESULTS_DIR = Path(__file__).resolve().parents[1] / "results"
+
+
+def _prior_fingerprint(out_path: Path, jsonl_path: Path) -> dict | None:
+    """The fingerprint a prior baseline under this label was stamped with, from the
+    results JSON if present, else the first JSONL record. ``None`` when no prior run
+    exists."""
+    if out_path.is_file():
+        return json.loads(out_path.read_text()).get("fingerprint")
+    if jsonl_path.is_file():
+        for line in jsonl_path.read_text().splitlines():
+            if line.strip():
+                return json.loads(line)
+    return None
 
 
 def run_suite(
@@ -22,6 +36,7 @@ def run_suite(
     attempts: int | None = None,
     fingerprint: dict | None = None,
     results_dir: Path = RESULTS_DIR,
+    force: bool = False,
     log=print,
 ) -> dict:
     # injected is a TEST SEAM: tests pass a synthetic fingerprint precisely
@@ -31,13 +46,25 @@ def run_suite(
     fingerprint = fingerprint if injected else gemma_fingerprint()
     jsonl_path = results_dir / f"{label}.jsonl"
     out_path = results_dir / f"{label}.json"
-    if only and out_path.is_file():
-        existing = json.loads(out_path.read_text())
-        if "filter" not in existing:
-            raise RuntimeError(
-                f"{out_path} holds a FULL suite run; a --only run would overwrite it "
-                f"with a partial one — use a different label for partial runs"
-            )
+    # --force overwrites this label from scratch: discard prior records (so nothing
+    # resumes) and skip the resume-guard + partial-overwrite guards entirely.
+    if force:
+        jsonl_path.unlink(missing_ok=True)
+    else:
+        # resume-guard: refuse a stale baseline LOUDLY and up front, before spending
+        # any live-model attempts. Additive gemma bumps (behavior_key unchanged) pass
+        # and resume; a config/model/verifier/working-tree change raises StaleBaseline.
+        # gemma_sha alone moving is not a mismatch — that's the whole point.
+        prior = _prior_fingerprint(out_path, jsonl_path)
+        if prior is not None:
+            guard.assert_resumable(prior, fingerprint)
+        if only and out_path.is_file():
+            existing = json.loads(out_path.read_text())
+            if "filter" not in existing:
+                raise RuntimeError(
+                    f"{out_path} holds a FULL suite run; a --only run would overwrite it "
+                    f"with a partial one — use a different label for partial runs"
+                )
     done = load_done(jsonl_path, log=log)
     log(
         f"suite '{label}' against {fingerprint['gemma_sha'][:10]}"

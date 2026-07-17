@@ -60,6 +60,28 @@ def test_fingerprint_distinguishes_two_dirty_states_at_same_sha(monkeypatch):
     assert fp1["dirty_sha"] != fp2["dirty_sha"]
 
 
+def test_fingerprint_behavior_key_present_and_gemma_sha_independent(monkeypatch):
+    """gemma_fingerprint stamps a behavior_key; two checkouts differing only in the
+    committed sha share it (the additive-release resume path)."""
+    from runner import guard
+
+    def fp_for(sha):
+        _patch(
+            monkeypatch,
+            {
+                ("rev-parse", "HEAD"): f"{sha}\n",
+                ("status", "--porcelain"): "",
+                ("diff", "HEAD"): "",
+            },
+        )
+        return ge.gemma_fingerprint(ROOT)
+
+    fp_a, fp_b = fp_for("shaA"), fp_for("shaB")
+    assert fp_a["behavior_key"] == guard.fingerprint_behavior_key(fp_a)
+    assert fp_a["gemma_sha"] != fp_b["gemma_sha"]
+    assert fp_a["behavior_key"] == fp_b["behavior_key"]
+
+
 def test_fingerprint_includes_runner_sha(monkeypatch):
     _patch(
         monkeypatch,

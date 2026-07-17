@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from loop.artifacts import Candidate
-from loop.config_edit import apply_candidate, config_path
+from loop.config_edit import apply_candidate, config_path, known_knobs
 from runner.gemma_env import GEMMA_ROOT
 
 REAL_CONFIG = GEMMA_ROOT / "harness" / "harness_config.json"
@@ -56,9 +56,19 @@ def test_stale_old_value_rejected_and_file_untouched(fake_gemma):
     assert config_path(fake_gemma).read_text() == before
 
 
-def test_unknown_field_rejected(fake_gemma):
-    with pytest.raises(ValueError, match="no field 'nope'"):
+def test_unknown_field_rejected_against_gemma_schema(fake_gemma):
+    """The field catalogue comes from gemma's config_schema(), not a hardcoded list —
+    a knob gemma doesn't declare is rejected with the known-knob set surfaced."""
+    with pytest.raises(ValueError, match="no field 'nope' in gemma's config schema"):
         apply_candidate(fake_gemma, make_candidate({"nope": {"old": 1, "new": 2}}))
+
+
+def test_known_knobs_reflects_gemma_schema():
+    """known_knobs is discovered from gemma, so the real editable knobs appear with
+    their collection flags — the editor tracks the surface as gemma grows it."""
+    knobs = known_knobs()
+    assert "max_item_chars" in knobs and knobs["max_item_chars"]["collection"] is False
+    assert knobs["approval_tools"]["collection"] is True
 
 
 def test_multiline_list_field_unsupported_by_surgical_edit(fake_gemma):

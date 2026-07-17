@@ -1,7 +1,7 @@
 """Binding to the gemma checkout under test.
 
-The runner lives OUTSIDE dist/gemma (the suite must not share a home with the
-editable surface an external editor will act on), but it drives dist/gemma's
+The runner lives OUTSIDE gemma (the suite must not share a home with the
+editable surface an external editor will act on), but it drives gemma's
 Agent in-process via the editable path dependency. This module pins down the
 two environment questions that raises: which endpoint/model to call (gemma's
 own .env, loaded here because Provider.from_env reads .env from the cwd), and
@@ -11,34 +11,31 @@ WHICH harness state produced a given result (git SHA + config version stamp).
 from __future__ import annotations
 
 import hashlib
-import os
 import subprocess
 from pathlib import Path
 
-GEMMA_ROOT = Path(__file__).resolve().parents[2] / "dist" / "gemma"
+GEMMA_ROOT = Path(__file__).resolve().parents[3] / "gemma"
 
 
 def load_gemma_env(root: Path = GEMMA_ROOT) -> None:
-    """Load <gemma>/.env into os.environ (setdefault — real env vars win)."""
-    path = root / ".env"
-    if not path.is_file():
-        return
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        if line.startswith("export "):
-            line = line[len("export ") :].lstrip()
-        key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+    """Load <gemma>/.env into os.environ (setdefault — real env vars win).
+
+    Delegates to gemma's own ``load_env`` (the embedding seam, adr/0002) instead of
+    reimplementing dotenv parsing, so the suite reads .env exactly the way the
+    harness's own gates do."""
+    from gemma import load_env
+
+    load_env(root)
 
 
 def make_provider():
-    """The Provider every task's Agent uses — gemma's .env, same as its own gates."""
-    from model import Provider
+    """The Provider every task's Agent uses — gemma's .env, same as its own gates.
 
-    load_gemma_env()
-    return Provider.from_env()
+    ``Provider.from_env(root=)`` loads <gemma>/.env itself before reading the vars,
+    so no separate dotenv step is needed."""
+    from gemma import Provider
+
+    return Provider.from_env(root=GEMMA_ROOT)
 
 
 def _git(root: Path, *args: str) -> str:
@@ -69,13 +66,30 @@ def runner_sha(root: Path = RUNNER_ROOT) -> str:
 
 
 def gemma_fingerprint(root: Path = GEMMA_ROOT) -> dict:
-    """Attribute a run to a harness state: git SHA (+dirty), config version, model.
+    """Attribute a run to a harness state: git SHA (+dirty), config version, model,
+    verifier hash, and the derived ``behavior_key`` the resume-guard pins on.
 
-    A dirty flag alone has no content identity — two different uncommitted
-    edits at the same SHA would be indistinguishable — so a dirty tree also
-    carries ``dirty_sha``: sha256 over `status --porcelain` + `diff HEAD`
-    (untracked files appear in the status text, so they perturb the hash even
-    though the diff misses them). Clean tree -> ``dirty_sha`` is None."""
+    ``config_version`` and ``model`` come from gemma's own ``provenance()`` primitive
+    (adr/0002) rather than reaching into ``CONFIG`` directly. We keep our OWN
+    authoritative full ``gemma_sha`` and dirty-tree detection layered on top:
+    ``provenance()`` is best-effort (returns a *short* sha, ``None`` outside a git
+    repo, and does no dirty detection), but a measurement suite must fail loudly on an
+    unattributable checkout and needs a content identity for uncommitted edits.
+
+    A dirty flag alone has no content identity — two different uncommitted edits at the
+    same SHA would be indistinguishable — so a dirty tree also carries ``dirty_sha``:
+    sha256 over `status --porcelain` + `diff HEAD` (untracked files appear in the
+    status text, so they perturb the hash even though the diff misses them). Clean
+    tree -> ``dirty_sha`` is None.
+
+    ``behavior_key`` (see runner/guard.py) folds config_version + model + runner_sha +
+    dirty_sha — everything that determines behavior *except* the committed
+    ``gemma_sha`` — so an additive gemma release resumes instead of forcing a
+    re-baseline."""
+    from gemma import provenance
+
+    from runner import guard
+
     sha = _git(root, "rev-parse", "HEAD").strip()
     if not sha:
         raise RuntimeError("cannot fingerprint gemma checkout: git rev-parse failed")
@@ -86,13 +100,15 @@ def gemma_fingerprint(root: Path = GEMMA_ROOT) -> dict:
         if dirty
         else None
     )
-    from harness.harness_config import CONFIG
-
-    return {
+    model = make_provider().model
+    prov = provenance(model=model, root=root)  # config_version + model (short sha unused)
+    fp = {
         "gemma_sha": sha,
         "gemma_dirty": dirty,
         "dirty_sha": dirty_sha,
-        "config_version": CONFIG.version,
-        "model": make_provider().model,
+        "config_version": prov["config_version"],
+        "model": model,
         "runner_sha": runner_sha(),
     }
+    fp["behavior_key"] = guard.fingerprint_behavior_key(fp)
+    return fp

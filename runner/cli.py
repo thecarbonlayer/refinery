@@ -24,6 +24,40 @@ def validate_only(only: list[str], tasks) -> list[str]:
     return sorted(set(only) - {t.name for t in tasks})
 
 
+def check(label: str) -> int:
+    """Report whether a recorded baseline still resumes under the current harness
+    state, without running the model. Returns a process exit code: 0 = current
+    (resumes; any gemma_sha move was additive), 1 = stale (re-baseline required) or
+    no such baseline."""
+    from runner import guard
+    from runner.gemma_env import gemma_fingerprint
+    from runner.suite import RESULTS_DIR
+
+    out_path = RESULTS_DIR / f"{label}.json"
+    if not out_path.is_file():
+        print(f"no such baseline: {out_path}")
+        return 1
+    prior = json.loads(out_path.read_text()).get("fingerprint", {})
+    current = gemma_fingerprint()
+    status = guard.baseline_status(prior, current)
+    print(f"baseline '{label}': {status.upper()}")
+    print(
+        f"  recorded behavior_key = {prior.get('behavior_key')}  "
+        f"(gemma_sha {prior.get('gemma_sha')}, config_version {prior.get('config_version')})"
+    )
+    print(
+        f"  current  behavior_key = {current['behavior_key']}  "
+        f"(gemma_sha {current['gemma_sha']}, config_version {current['config_version']}, "
+        f"model {current['model']})"
+    )
+    print(
+        "  -> resumes; any gemma_sha move was additive"
+        if status == "current"
+        else "  -> re-baseline required; config_version / model / verifier / working tree changed"
+    )
+    return 0 if status == "current" else 1
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="runner")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -37,6 +71,19 @@ def main() -> None:
         default=None,
         help="override attempt count (default: 3 held-in / 5 held-out)",
     )
+    run_p.add_argument(
+        "--force",
+        action="store_true",
+        help="bypass the resume-guard: re-run and overwrite this label from scratch, "
+        "even a still-current or stale baseline",
+    )
+
+    check_p = sub.add_parser(
+        "check",
+        help="report whether a recorded baseline still resumes under the current "
+        "harness state (no model run)",
+    )
+    check_p.add_argument("label", help="results file stem to check (results/<label>.json)")
 
     delta_p = sub.add_parser("delta", help="Δ between two results JSONs + acceptance rule")
     delta_p.add_argument("baseline")
@@ -59,8 +106,11 @@ def main() -> None:
             label=args.label,
             only=set(args.only) if args.only else None,
             attempts=args.attempts,
+            force=args.force,
         )
         print(json.dumps(results["summary"], indent=2))
+    elif args.cmd == "check":
+        raise SystemExit(check(args.label))
     else:
         from runner.delta import delta
 

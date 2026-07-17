@@ -2,11 +2,15 @@ import json
 
 import pytest
 
+from runner import guard
+from runner.guard import StaleBaseline
 from runner.run import load_done, run_task
 from runner.spec import Attempt, TaskSpec
 from runner.suite import run_suite
 
-FP = {
+# The behavior-relevant fingerprint fields. behavior_key folds all of these EXCEPT
+# the committed gemma_sha (which is provenance, not behavior); see runner/guard.py.
+BASE_FP = {
     "gemma_sha": "abc123",
     "gemma_dirty": False,
     "dirty_sha": None,
@@ -14,6 +18,17 @@ FP = {
     "model": "gemma",
     "runner_sha": "runnersha1",
 }
+
+
+def _fp(**over):
+    """A self-consistent fingerprint: behavior_key derived from the (possibly
+    overridden) behavior-relevant fields, exactly as gemma_fingerprint stamps it."""
+    fp = {**BASE_FP, **over}
+    fp["behavior_key"] = guard.fingerprint_behavior_key(fp)
+    return fp
+
+
+FP = _fp()
 
 
 def _spec(name="A1", split="held_in", passed=True):
@@ -27,6 +42,10 @@ def _spec(name="A1", split="held_in", passed=True):
 
 
 def _record(task="A1", attempt=0, **overrides):
+    """A recorded attempt. Fingerprint-field overrides (gemma_sha, model, ...) flow
+    through _fp so behavior_key stays consistent with them; other keys override the
+    attempt payload."""
+    fp_over = {k: overrides.pop(k) for k in list(overrides) if k in BASE_FP}
     rec = {
         "task": task,
         "split": "held_in",
@@ -39,89 +58,76 @@ def _record(task="A1", attempt=0, **overrides):
         "approvals": [],
         "turns": 1,
         "duration_s": 0.1,
-        **FP,
+        **_fp(**fp_over),
     }
     rec.update(overrides)
     return rec
 
 
-def test_resume_refuses_stale_fingerprint(tmp_path):
+def test_resume_accepts_additive_gemma_sha_bump(tmp_path):
+    """The whole point: a record from a different COMMITTED gemma_sha but the same
+    behavior_key (an additive, default-neutral release) resumes instead of forcing an
+    empty re-baseline."""
     jsonl = tmp_path / "r.jsonl"
     jsonl.write_text(json.dumps(_record(gemma_sha="OLDSHA")) + "\n")
-    with pytest.raises(RuntimeError, match="resume mismatch"):
-        run_task(_spec(), FP, jsonl, log=lambda *a: None)
+    tr = run_task(_spec(), FP, jsonl, log=lambda *a: None)
+    assert len(tr.records) == 3  # 1 resumed + 2 fresh — no refusal
+    assert tr.records[0]["gemma_sha"] == "OLDSHA"  # the resumed record kept its provenance
 
 
 def test_resume_refuses_different_model(tmp_path):
-    """Same gemma sha + config but a different model is still a different
-    harness state — resuming across a model swap would blend fractions."""
+    """A different model is a different behavior — resuming across a model swap would
+    blend fractions, so behavior_key differs and resume is refused."""
     jsonl = tmp_path / "r.jsonl"
     jsonl.write_text(json.dumps(_record(model="other-model")) + "\n")
-    with pytest.raises(RuntimeError, match="resume mismatch.*other-model"):
+    with pytest.raises(StaleBaseline, match="resume mismatch.*other-model"):
+        run_task(_spec(), FP, jsonl, log=lambda *a: None)
+
+
+def test_resume_refuses_different_config_version(tmp_path):
+    """A config bump is a real behavior change — behavior_key moves, resume refused."""
+    jsonl = tmp_path / "r.jsonl"
+    jsonl.write_text(json.dumps(_record(config_version=2)) + "\n")
+    with pytest.raises(StaleBaseline, match="resume mismatch"):
         run_task(_spec(), FP, jsonl, log=lambda *a: None)
 
 
 def test_resume_refuses_different_dirty_state(tmp_path):
-    """Same SHA but a different dirty-tree content identity is a different
-    harness state — two uncommitted edits at one SHA must not blend."""
+    """A different dirty-tree content identity is uncommitted gemma behavior that no
+    version counter attests — behavior_key includes dirty_sha, so resume is refused."""
     jsonl = tmp_path / "r.jsonl"
     jsonl.write_text(json.dumps(_record(gemma_dirty=True, dirty_sha="deadbeef")) + "\n")
-    with pytest.raises(RuntimeError, match="resume mismatch"):
+    with pytest.raises(StaleBaseline, match="resume mismatch"):
         run_task(_spec(), FP, jsonl, log=lambda *a: None)
 
 
 def test_resume_accepts_matching_dirty_sha(tmp_path):
     """The SAME uncommitted state (identical dirty_sha) is resumable."""
-    fp = {**FP, "gemma_dirty": True, "dirty_sha": "deadbeef"}
+    fp = _fp(gemma_dirty=True, dirty_sha="deadbeef")
     jsonl = tmp_path / "r.jsonl"
-    jsonl.write_text(json.dumps(_record(**fp)) + "\n")
+    jsonl.write_text(json.dumps(_record(gemma_dirty=True, dirty_sha="deadbeef")) + "\n")
     tr = run_task(_spec(), fp, jsonl, log=lambda *a: None)
     assert len(tr.records) == 3  # 1 resumed + 2 fresh
 
 
-def test_resume_refuses_record_missing_model_key(tmp_path):
-    """A legacy record with no model key must hit the friendly RuntimeError,
-    not a KeyError."""
-    jsonl = tmp_path / "r.jsonl"
-    rec = _record()
-    del rec["model"]
-    jsonl.write_text(json.dumps(rec) + "\n")
-    with pytest.raises(RuntimeError, match="resume mismatch"):
-        run_task(_spec(), FP, jsonl, log=lambda *a: None)
-
-
-def test_resume_legacy_record_without_dirty_sha_matches_clean_tree_only(tmp_path):
-    """Records predating the dirty_sha field (the recorded baseline) compare
-    as None: resumable against a clean current tree, refused against a dirty
-    one."""
-    jsonl = tmp_path / "r.jsonl"
-    rec = _record()
-    del rec["dirty_sha"]
-    jsonl.write_text(json.dumps(rec) + "\n")
-    tr = run_task(_spec(), FP, jsonl, log=lambda *a: None)  # FP is clean: accepted
-    assert len(tr.records) == 3
-    dirty_fp = {**FP, "gemma_dirty": True, "dirty_sha": "deadbeef"}
-    with pytest.raises(RuntimeError, match="resume mismatch"):
-        run_task(_spec(), dirty_fp, jsonl, log=lambda *a: None)
-
-
 def test_resume_refuses_different_runner_sha(tmp_path):
-    """Records measured by a different runner (verifier) version must not
-    blend with fresh attempts — the verifier itself is part of the identity."""
+    """Records measured by a different runner (verifier) version must not blend with
+    fresh attempts — runner_sha stays in the behavior_key, so resume is refused."""
     jsonl = tmp_path / "r.jsonl"
     jsonl.write_text(json.dumps(_record(runner_sha="other-runner")) + "\n")
-    with pytest.raises(RuntimeError, match="resume mismatch"):
+    with pytest.raises(StaleBaseline, match="resume mismatch"):
         run_task(_spec(), FP, jsonl, log=lambda *a: None)
 
 
-def test_resume_refuses_legacy_record_without_runner_sha(tmp_path):
-    """A record predating the runner_sha field can't attest which verifier
-    produced it — refuse; it gets re-recorded under a fresh label."""
+def test_resume_refuses_legacy_record_without_behavior_key(tmp_path):
+    """A record predating this guard carries no behavior_key and cannot attest which
+    behavior it measured (the old recorded baseline is exactly this) — stale by
+    definition, so it is refused and re-recorded under a fresh label or with --force."""
     jsonl = tmp_path / "r.jsonl"
     rec = _record()
-    del rec["runner_sha"]
+    del rec["behavior_key"]
     jsonl.write_text(json.dumps(rec) + "\n")
-    with pytest.raises(RuntimeError, match="resume mismatch"):
+    with pytest.raises(StaleBaseline, match="resume mismatch"):
         run_task(_spec(), FP, jsonl, log=lambda *a: None)
 
 
@@ -258,6 +264,76 @@ def test_run_suite_injected_fingerprint_skips_mid_suite_recompute(tmp_path, monk
         log=lambda *a: None,
     )
     assert set(results["tasks"]) == {"A1", "B1"}
+
+
+def test_run_suite_resumes_after_additive_gemma_bump(tmp_path):
+    """Acceptance test: a complete baseline recorded at one gemma_sha resumes (re-runs
+    nothing) when only the committed gemma_sha has moved — the additive-release case."""
+    jsonl = tmp_path / "base.jsonl"
+    jsonl.write_text(
+        "".join(json.dumps(_record(gemma_sha="OLDSHA", attempt=i)) + "\n" for i in range(3))
+    )
+    ran = {"n": 0}
+
+    def counting_spec():
+        def run():
+            ran["n"] += 1
+            return Attempt(True, "pass", "d")
+
+        return TaskSpec("A1", "held_in", "A", "pass", run=run)
+
+    results = run_suite(
+        [counting_spec()],
+        label="base",
+        fingerprint=_fp(gemma_sha="NEWSHA"),  # additive move
+        results_dir=tmp_path,
+        log=lambda *a: None,
+    )
+    assert ran["n"] == 0  # every attempt resumed, nothing re-run
+    assert results["tasks"]["A1"]["attempts"] == 3
+
+
+def test_run_suite_refuses_stale_baseline_up_front(tmp_path):
+    """A stale baseline (real behavior change) fails LOUDLY before any attempt runs."""
+    jsonl = tmp_path / "base.jsonl"
+    jsonl.write_text(json.dumps(_record()) + "\n")
+    (tmp_path / "base.json").write_text(json.dumps({"fingerprint": FP, "tasks": {}, "summary": {}}))
+    ran = {"n": 0}
+
+    def counting_spec():
+        def run():
+            ran["n"] += 1
+            return Attempt(True, "pass", "d")
+
+        return TaskSpec("A1", "held_in", "A", "pass", run=run)
+
+    with pytest.raises(StaleBaseline, match="behavior_key"):
+        run_suite(
+            [counting_spec()],
+            label="base",
+            fingerprint=_fp(config_version=2),
+            results_dir=tmp_path,
+            log=lambda *a: None,
+        )
+    assert ran["n"] == 0  # refused before spending a single attempt
+
+
+def test_run_suite_force_overwrites_stale_baseline(tmp_path):
+    """--force discards a stale baseline and re-runs from scratch instead of refusing."""
+    jsonl = tmp_path / "base.jsonl"
+    jsonl.write_text(json.dumps(_record(config_version=99)) + "\n")  # incompatible prior
+    results = run_suite(
+        [_spec()],
+        label="base",
+        fingerprint=FP,
+        results_dir=tmp_path,
+        force=True,
+        log=lambda *a: None,
+    )
+    assert results["tasks"]["A1"]["attempts"] == 3
+    # the stale record was discarded, not blended in
+    on_disk = load_done(tmp_path / "base.jsonl", log=lambda *a: None)
+    assert all(rec["behavior_key"] == FP["behavior_key"] for rec in on_disk.values())
 
 
 def test_run_suite_unfiltered_writes_results(tmp_path):
