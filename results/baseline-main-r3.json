@@ -1,0 +1,196 @@
+{
+  "fingerprint": {
+    "gemma_sha": "5d789d132784c72d1e920c440ffb9d9782d76460",
+    "gemma_dirty": false,
+    "dirty_sha": null,
+    "config_version": 1,
+    "model": "google/gemma-4-26b-a4b",
+    "runner_sha": "f32aae6367cb2f8aa51cc2ae52388374e5d4bcf33a4aa86a88295b3d07834ea4",
+    "behavior_key": "a253cea8fc1d"
+  },
+  "tasks": {
+    "A1": {
+      "split": "held_in",
+      "cluster": "A",
+      "expected_baseline": "fail",
+      "attempts": 3,
+      "passes": 2,
+      "pass_fraction": 0.6667,
+      "outcomes": [
+        "pass",
+        "pass",
+        "fail"
+      ]
+    },
+    "A2": {
+      "split": "held_in",
+      "cluster": "A",
+      "expected_baseline": "fail",
+      "attempts": 3,
+      "passes": 0,
+      "pass_fraction": 0.0,
+      "outcomes": [
+        "fail",
+        "fail",
+        "fail"
+      ]
+    },
+    "A3": {
+      "split": "held_out",
+      "cluster": "A",
+      "expected_baseline": "uncertain",
+      "attempts": 5,
+      "passes": 5,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass"
+      ]
+    },
+    "A4": {
+      "split": "held_out",
+      "cluster": "A",
+      "expected_baseline": "uncertain",
+      "attempts": 5,
+      "passes": 0,
+      "pass_fraction": 0.0,
+      "outcomes": [
+        "fail",
+        "fail",
+        "fail",
+        "fail",
+        "fail"
+      ]
+    },
+    "B1": {
+      "split": "held_in",
+      "cluster": "B",
+      "expected_baseline": "uncertain",
+      "attempts": 3,
+      "passes": 3,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass"
+      ]
+    },
+    "B2": {
+      "split": "held_in",
+      "cluster": "B",
+      "expected_baseline": "uncertain",
+      "attempts": 3,
+      "passes": 2,
+      "pass_fraction": 0.6667,
+      "outcomes": [
+        "pass",
+        "not_attempted",
+        "pass"
+      ]
+    },
+    "B3": {
+      "split": "held_out",
+      "cluster": "B",
+      "expected_baseline": "uncertain",
+      "attempts": 5,
+      "passes": 5,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass"
+      ]
+    },
+    "C1": {
+      "split": "held_in",
+      "cluster": "C",
+      "expected_baseline": "uncertain",
+      "attempts": 3,
+      "passes": 3,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass"
+      ]
+    },
+    "C2": {
+      "split": "held_in",
+      "cluster": "C",
+      "expected_baseline": "uncertain",
+      "attempts": 3,
+      "passes": 3,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass"
+      ]
+    },
+    "C3": {
+      "split": "held_out",
+      "cluster": "C",
+      "expected_baseline": "uncertain",
+      "attempts": 5,
+      "passes": 5,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass"
+      ]
+    },
+    "D1": {
+      "split": "held_in",
+      "cluster": "D",
+      "expected_baseline": "pass",
+      "attempts": 3,
+      "passes": 3,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass"
+      ]
+    },
+    "D2": {
+      "split": "held_in",
+      "cluster": "D",
+      "expected_baseline": "pass",
+      "attempts": 3,
+      "passes": 3,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass"
+      ]
+    },
+    "D3": {
+      "split": "held_out",
+      "cluster": "D",
+      "expected_baseline": "uncertain",
+      "attempts": 5,
+      "passes": 5,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass"
+      ]
+    }
+  },
+  "summary": {
+    "held_in_rate": 0.7917,
+    "held_out_rate": 0.8
+  }
+}
