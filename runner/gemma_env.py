@@ -1,11 +1,12 @@
 """Binding to the gemma checkout under test.
 
-The runner lives OUTSIDE gemma (the suite must not share a home with the
-editable surface an external editor will act on), but it drives gemma's
-Agent in-process via the editable path dependency. This module pins down the
-two environment questions that raises: which endpoint/model to call (gemma's
-own .env, loaded here because Provider.from_env reads .env from the cwd), and
-WHICH harness state produced a given result (git SHA + config version stamp).
+The runner lives OUTSIDE gemma — its own repo, not just its own directory (the
+suite must not share a home with the editable surface an external editor will
+act on) — but it drives gemma's Agent in-process via the editable path
+dependency. This module pins down the two environment questions that raises:
+which endpoint/model to call (gemma's own .env, loaded here because
+Provider.from_env reads .env from the cwd), and WHICH harness state produced a
+given result (git SHA + config version stamp).
 """
 
 from __future__ import annotations
@@ -14,7 +15,10 @@ import hashlib
 import subprocess
 from pathlib import Path
 
-GEMMA_ROOT = Path(__file__).resolve().parents[3] / "gemma"
+# refinery and gemma are sibling checkouts: <root>/refinery, <root>/gemma.
+# parents[2] is that shared root (runner -> repo -> root), matching the
+# `../gemma` editable dependency in pyproject.toml. Keep the two in step.
+GEMMA_ROOT = Path(__file__).resolve().parents[2] / "gemma"
 
 
 def load_gemma_env(root: Path = GEMMA_ROOT) -> None:

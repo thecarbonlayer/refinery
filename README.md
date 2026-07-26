@@ -1,17 +1,24 @@
-# harness-editor — task-suite runner + Δ measurement + the self-improvement loop
+# refinery — task-suite runner + Δ measurement + the self-improvement loop
+
+> Refining improves the material without replacing it. The weights never move;
+> only the harness around them does. The pipeline proposes, validates, and
+> opens a PR — it never merges.
 
 The measurement half of the self-evolving-harness project: runs the 13-task
-suite (docs/research/self-evolving-harness/task-suite-v2.md) against a live
-Gemma agent driven by the gemma harness, N times per task (3 held-in /
-5 held-out), aggregates pass fractions (averaged, never majority-voted), and
-computes Δ_in/Δ_ho between two harness states for the acceptance rule
-`Δ_in ≥ 0, Δ_ho ≥ 0, max(Δ_in, Δ_ho) > 0`.
+suite (`task-suite-v2.md`) against a live Gemma agent driven by the gemma
+harness, N times per task (3 held-in / 5 held-out), aggregates pass fractions
+(averaged, never majority-voted), and computes Δ_in/Δ_ho between two harness
+states for the acceptance rule `Δ_in ≥ 0, Δ_ho ≥ 0, max(Δ_in, Δ_ho) > 0`.
 
-**Why it lives here and not in gemma:** the task definitions, verifier
-code, pinned commands, and oracle hashes must never share a home with the
-editable surface an external editor (Sol) acts on — otherwise the editor can
-"pass" a task by rewriting its verifier. This directory is outside the fork
-Sol edits, by design. (Review flag (d)-1; open-questions.md §7.)
+**Why this is its own repo:** the task definitions, verifier code, pinned
+commands, and oracle hashes must never share a home with the editable surface
+the external editor acts on — otherwise the editor can "pass" a task by
+rewriting its verifier. The boundary is a repo boundary, not a directory
+convention. (Review flag (d)-1; open-questions.md §7.)
+
+**Layout it expects:** `refinery/` and `gemma/` as sibling checkouts under one
+root. `pyproject.toml`'s `../gemma` and `runner/gemma_env.py`'s `GEMMA_ROOT`
+both assume that — change them together if you nest things differently.
 
 ## Running
 

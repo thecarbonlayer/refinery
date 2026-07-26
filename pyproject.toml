@@ -1,12 +1,12 @@
 [project]
-name = "harness-editor"
+name = "refinery"
 version = "0.1.0"
-description = "Task-suite runner + self-improvement loop for the self-evolving-harness project (lives outside the editable surface by design)"
+description = "Task-suite runner + self-improvement loop that measures and edits a gemma harness from outside it (never from within)"
 requires-python = ">=3.11"
 dependencies = ["gemma"]
 
 [tool.uv.sources]
-gemma = { path = "../../gemma", editable = true }
+gemma = { path = "../gemma", editable = true }
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6"]
