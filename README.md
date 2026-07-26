@@ -4,9 +4,10 @@
 > only the harness around them does. The pipeline proposes, validates, and
 > opens a PR — it never merges.
 
-The measurement half of the self-evolving-harness project: runs the 13-task
-suite (13 tasks in `runner/tasks/`, 4 clusters) against a live Gemma agent driven by the carbon
-harness, N times per task (3 held-in / 5 held-out), aggregates pass fractions
+The measurement half of the self-evolving-harness project: runs a fixed task
+suite (`runner/tasks/`) against a live Gemma agent driven by the
+[carbon](https://github.com/thecarbonlayer/carbon) harness, repeatedly per task
+(held-out gets more samples than held-in), aggregates pass fractions
 (averaged, never majority-voted), and computes Δ_in/Δ_ho between two harness
 states for the acceptance rule `Δ_in ≥ 0, Δ_ho ≥ 0, max(Δ_in, Δ_ho) > 0`.
 
@@ -66,7 +67,7 @@ provenance) in the body. The pipeline never merges.
 
 ## Layout
 
-- runner/tasks/ — the 13 task specs (mechanical verifiers only; sentinels,
+- runner/tasks/ — the task specs (mechanical verifiers only; sentinels,
   pinned commands, and seed-file sha256s authored at import time)
 - runner/{run,suite}.py — attempt/suite drivers; runner/delta.py — Δ + rule
 - runner/helpers.py — approve-and-log approver, environ guard,
