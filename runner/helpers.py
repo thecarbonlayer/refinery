@@ -19,7 +19,7 @@ from pathlib import Path
 
 # --- approver -----------------------------------------------------------------
 def scripted_approver(log: list[dict]) -> Callable[[str, str], bool]:
-    """Approve-and-log (review flag (d)-2): headless runs must neither stall
+    """Approve-and-log: headless runs must neither stall
     (fail-closed) nor silently erase the approval gate from the record. Every
     grant is logged into the attempt record so the gate stays observable."""
 

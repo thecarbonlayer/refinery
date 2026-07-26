@@ -4,7 +4,7 @@ The rule (Self-Harness): an edit is accepted iff Δ_in ≥ 0, Δ_ho ≥ 0, and
 max(Δ_in, Δ_ho) > 0 — never a regression on either split, a real gain on one.
 Split rates are the MEAN OF PER-TASK PASS FRACTIONS (each task weighs equally
 regardless of attempt count), and fractions come from averaged repeats, never
-majority vote (open-questions.md §8).
+majority vote.
 """
 
 from __future__ import annotations

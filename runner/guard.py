@@ -13,9 +13,9 @@ provenance/audit — it just no longer gates resume.
 
 This is our eval-integrity policy (AGENTS.md), layered on carbon's ``provenance()``
 primitive: carbon exposes the state, we decide what invalidates a baseline. It
-mirrors the sibling consumer ``crikit-agent-evals/evals/guard.py`` (whose behavior
-input is a dataset fingerprint; ours is the verifier hash + dirty-tree identity) so
-the two consumers converge on one shape instead of diverging.
+mirrors a sibling consumer's eval guard (whose behavior input is a dataset
+fingerprint; ours is the verifier hash + dirty-tree identity) so the two
+consumers converge on one shape instead of diverging.
 
 Kept deliberately free of any carbon import: it compares two fingerprint dicts and
 nothing more. The *live* current fingerprint is produced by

@@ -1,7 +1,6 @@
 # Iteration 1 — mining notes
 
-Proposer: Fable (claude-fable-5), in-session — per the "Proposer decided" note in
-docs/research/self-evolving-harness/todo-begin-self-improvement-loop.md. Mining is
+Proposer: Fable (claude-fable-5), in-session. Mining is
 reasoning, not code; this file and `clusters.json` are its fixed output artifact.
 
 Input: `results/baseline-main.json` / `.jsonl` (carbon `edac4be`, config v1,

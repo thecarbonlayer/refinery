@@ -13,6 +13,13 @@ from runner.carbon_env import CARBON_ROOT
 REAL_CONFIG = CARBON_ROOT / "harness" / "harness_config.json"
 
 
+def _bumped() -> int:
+    """The version an edit should produce: whatever the real config carries now,
+    plus one. Hardcoding it pinned these tests to a config that has since been
+    bumped in carbon, so they broke on a change that was not theirs."""
+    return json.loads(REAL_CONFIG.read_text())["version"] + 1
+
+
 def make_candidate(fields, cand_id="cand-x"):
     return Candidate(
         id=cand_id,
@@ -91,7 +98,7 @@ def test_single_line_list_field_is_editable(fake_carbon):
         fake_carbon, make_candidate({"approval_tools": {"old": old, "new": ["bash"]}})
     )
     assert json.loads(config_path(fake_carbon).read_text())["approval_tools"] == ["bash"]
-    assert new["version"] == 2
+    assert new["version"] == _bumped()
 
 
 def test_invalid_new_value_rejected_by_carbon_door(fake_carbon):

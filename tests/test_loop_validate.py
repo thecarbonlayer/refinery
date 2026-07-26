@@ -13,6 +13,14 @@ from runner.carbon_env import CARBON_ROOT
 
 REAL_CONFIG = CARBON_ROOT / "harness" / "harness_config.json"
 
+
+def _bumped() -> int:
+    """The version an edit should produce: whatever the real config carries now,
+    plus one. Hardcoding it pinned these tests to a config that has since been
+    bumped in carbon, so they broke on a change that was not theirs."""
+    return json.loads(REAL_CONFIG.read_text())["version"] + 1
+
+
 CANDIDATE = Candidate(
     id="cand-x",
     cluster_id="CL-1",
@@ -86,7 +94,7 @@ def test_accepted_candidate_and_revert(fake_carbon, baseline, tmp_path):
         results_dir=results_dir,
         log=lambda *_: None,
     )
-    assert seen["config"]["max_item_chars"] == 12000 and seen["config"]["version"] == 2
+    assert seen["config"]["max_item_chars"] == 12000 and seen["config"]["version"] == _bumped()
     # reverted afterwards, tree clean
     assert json.loads(config_path(fake_carbon).read_text())["max_item_chars"] == 4000
     require_clean_tree(fake_carbon)

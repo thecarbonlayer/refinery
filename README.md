@@ -5,7 +5,7 @@
 > opens a PR — it never merges.
 
 The measurement half of the self-evolving-harness project: runs the 13-task
-suite (`task-suite-v2.md`) against a live Gemma agent driven by the carbon
+suite (13 tasks in `runner/tasks/`, 4 clusters) against a live Gemma agent driven by the carbon
 harness, N times per task (3 held-in / 5 held-out), aggregates pass fractions
 (averaged, never majority-voted), and computes Δ_in/Δ_ho between two harness
 states for the acceptance rule `Δ_in ≥ 0, Δ_ho ≥ 0, max(Δ_in, Δ_ho) > 0`.
@@ -14,7 +14,7 @@ states for the acceptance rule `Δ_in ≥ 0, Δ_ho ≥ 0, max(Δ_in, Δ_ho) > 0`
 commands, and oracle hashes must never share a home with the editable surface
 the external editor acts on — otherwise the editor can "pass" a task by
 rewriting its verifier. The boundary is a repo boundary, not a directory
-convention. (Review flag (d)-1; open-questions.md §7.)
+convention.
 
 **Layout it expects:** `refinery/` and `carbon/` as sibling checkouts under one
 root. `pyproject.toml`'s `../carbon` and `runner/carbon_env.py`'s `CARBON_ROOT`
@@ -22,7 +22,9 @@ both assume that — change them together if you nest things differently.
 
 ## Running
 
-LM Studio must be serving the model in carbon/.env (real models, no mocks).
+LM Studio must be serving the model named in `carbon/.env` (real models, no
+mocks). refinery has no `.env` of its own — it reads carbon's, so the suite
+and the harness under test always agree on the endpoint.
 
     uv sync
     uv run python -m runner.cli run --label baseline-main          # full suite, resumable
@@ -47,8 +49,7 @@ then `delta` the two JSONs.
 ## The loop (mine -> propose -> validate -> PR)
 
 `loop/` is the pipeline half: the mining and proposal steps are done by the
-proposer model directly as reasoning (Fable, in-session, for iteration 1 —
-see docs/research/self-evolving-harness/todo-begin-self-improvement-loop.md)
+proposer model directly as reasoning (Fable, in-session, for iteration 1)
 and land as fixed JSON artifacts in `iterations/<iter>/` (`clusters.json`,
 `candidates.json`); only validation and the branch+PR step are code. A
 candidate is applied to the carbon WORKING TREE (never committed — a
@@ -68,7 +69,7 @@ provenance) in the body. The pipeline never merges.
 - runner/tasks/ — the 13 task specs (mechanical verifiers only; sentinels,
   pinned commands, and seed-file sha256s authored at import time)
 - runner/{run,suite}.py — attempt/suite drivers; runner/delta.py — Δ + rule
-- runner/helpers.py — approve-and-log approver (flag (d)-2), environ guard,
+- runner/helpers.py — approve-and-log approver, environ guard,
   transcript/hash utilities
 - results/ — committed measurement artifacts
 - loop/ — the validate→branch→PR pipeline (imports runner.suite / runner.delta)

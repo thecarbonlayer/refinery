@@ -12,6 +12,14 @@ from runner.carbon_env import CARBON_ROOT, _git
 
 REAL_CONFIG = CARBON_ROOT / "harness" / "harness_config.json"
 
+
+def _bumped() -> int:
+    """The version an edit should produce: whatever the real config carries now,
+    plus one. Hardcoding it pinned these tests to a config that has since been
+    bumped in carbon, so they broke on a change that was not theirs."""
+    return json.loads(REAL_CONFIG.read_text())["version"] + 1
+
+
 CANDIDATE = Candidate(
     id="cand-raise-clamp-12k",
     cluster_id="CL-1",
@@ -163,7 +171,7 @@ def test_open_pr_full_flow(repos):
     # the edit landed as ONE commit on the branch, pushed to origin
     assert _git(root, "ls-remote", "--heads", "origin", branch).strip()
     on_branch = json.loads(_git(root, "show", f"{branch}:harness/harness_config.json"))
-    assert on_branch["max_item_chars"] == 12000 and on_branch["version"] == 2
+    assert on_branch["max_item_chars"] == 12000 and on_branch["version"] == _bumped()
     # checkout restored, tree clean, main untouched
     assert _git(root, "rev-parse", "--abbrev-ref", "HEAD").strip() == "main"
     assert not _git(root, "status", "--porcelain").strip()

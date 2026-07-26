@@ -12,7 +12,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-# Per open-questions.md §8: 3 attempts held-in, 5 held-out; average, never majority.
+# Noise policy: 3 attempts per held-in task, 5 per held-out (held-out carries the
+# generalization claim, so it gets more samples). Pass fractions are AVERAGED across
+# repeats, never majority-voted — a 2/3 is 0.67, not a pass.
 ATTEMPTS = {"held_in": 3, "held_out": 5}
 
 

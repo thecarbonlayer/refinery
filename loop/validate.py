@@ -44,7 +44,7 @@ def revert_config(carbon_root: Path = CARBON_ROOT) -> None:
 
 
 def _run_runner(label: str, only: list[str] | None, attempts: int | None) -> None:
-    """Run the suite in a fresh interpreter (same venv), cwd at harness-editor."""
+    """Run the suite in a fresh interpreter (same venv), cwd at the repo root."""
     cmd = [sys.executable, "-m", "runner.cli", "run", "--label", label]
     if only:
         cmd += ["--only", *only]

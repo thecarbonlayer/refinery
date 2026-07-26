@@ -39,7 +39,7 @@ Run 2026-07-11. Proposer: Fable (claude-fable-5), in-session. Target: carbon
 ## Selection
 
 All three candidates alternate values of the same knob against the same
-cluster — mutually exclusive, so one PR (open-questions.md §5: multiple PRs in
+cluster — mutually exclusive, so one PR (the pipeline opens multiple PRs in
 one iteration only for *distinct* clusters). `clamp-12k` strictly dominates:
 both mechanism surfaces fixed, no per-task regression, highest Δ_in.
 
@@ -71,7 +71,7 @@ held-out tasks per mechanism).
 ## Process notes
 
 - One iteration only — the sequential-acceptance/held-out-erosion caveat
-  (open-questions.md §9 (d)-3) does not yet apply, but note `clamp-12k` was
+  does not yet apply, but note `clamp-12k` was
   selected partly on Δ_ho; A4 is now effectively "spent" as a held-out check
   for the clamp mechanism.
 - Provenance is a candidate field, rendered "Fable-proposed,

@@ -1,6 +1,6 @@
 """Branch + PR pipeline for an ACCEPTED candidate.
 
-Decisions locked in docs/research/self-evolving-harness/open-questions.md §5:
+Decisions locked for this pipeline:
 one PR per accepted edit (never a bundle); the PR targets the dedicated
 ``self-improvement`` branch, set explicitly (GitHub would silently default to
 ``main`` otherwise); the PR body carries the evidence (cluster, knobs old->new,
