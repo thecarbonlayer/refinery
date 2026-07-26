@@ -26,7 +26,7 @@ CANDIDATE = Candidate(
     cluster_id="CL-1",
     proposer="Fable",
     proposer_detail="test",
-    fields={"max_item_chars": {"old": 4000, "new": 12000}},
+    fields={"max_tokens": {"old": 4096, "new": 8192}},
     rationale="r",
     expected_effect="e",
     regression_risk="g",
@@ -94,9 +94,9 @@ def test_accepted_candidate_and_revert(fake_carbon, baseline, tmp_path):
         results_dir=results_dir,
         log=lambda *_: None,
     )
-    assert seen["config"]["max_item_chars"] == 12000 and seen["config"]["version"] == _bumped()
+    assert seen["config"]["max_tokens"] == 8192 and seen["config"]["version"] == _bumped()
     # reverted afterwards, tree clean
-    assert json.loads(config_path(fake_carbon).read_text())["max_item_chars"] == 4000
+    assert json.loads(config_path(fake_carbon).read_text())["max_tokens"] == 4096
     require_clean_tree(fake_carbon)
     assert record.accepted and record.delta_in == 0.5 and record.delta_ho == pytest.approx(0.8)
     assert record.per_task["A2"] == 1.0
@@ -136,7 +136,7 @@ def test_runner_crash_still_reverts(fake_carbon, baseline, tmp_path):
             results_dir=tmp_path,
             log=lambda *_: None,
         )
-    assert json.loads(config_path(fake_carbon).read_text())["max_item_chars"] == 4000
+    assert json.loads(config_path(fake_carbon).read_text())["max_tokens"] == 4096
     require_clean_tree(fake_carbon)
 
 

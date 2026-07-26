@@ -86,6 +86,12 @@ def validate_candidate(
         delta_in=d["delta_in"],
         delta_ho=d["delta_ho"],
         per_task=d["per_task"],
+        aggregate_accepted=d["aggregate_accepted"],
+        regressions=d["regressions"],
+        catastrophic_regressions=d["catastrophic_regressions"],
+        baseline_metrics=d["baseline_metrics"],
+        candidate_metrics=d["candidate_metrics"],
+        metric_delta=d["metric_delta"],
         baseline_fingerprint=d["baseline_fingerprint"],
         candidate_fingerprint=d["candidate_fingerprint"],
     )
@@ -93,6 +99,13 @@ def validate_candidate(
         f"candidate {candidate.id}: Δ_in={d['delta_in']:+.4f} Δ_ho={d['delta_ho']:+.4f} "
         f"-> {'ACCEPTED' if d['accepted'] else 'REJECTED'}"
     )
+    if d["catastrophic_regressions"]:
+        log(
+            "  catastrophic per-task regression veto: "
+            + ", ".join(
+                f"{name} {change:+.4f}" for name, change in d["catastrophic_regressions"].items()
+            )
+        )
     return record
 
 

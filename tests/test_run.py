@@ -31,13 +31,18 @@ def _fp(**over):
 FP = _fp()
 
 
-def _spec(name="A1", split="held_in", passed=True):
+def _spec(name="A1", split="held_in", passed=True, metrics=None):
     return TaskSpec(
         name=name,
         split=split,
         cluster="A",
         expected_baseline="pass",
-        run=lambda: Attempt(passed, "pass" if passed else "fail", "detail"),
+        run=lambda: Attempt(
+            passed,
+            "pass" if passed else "fail",
+            "detail",
+            metrics=metrics or {},
+        ),
     )
 
 
@@ -137,6 +142,35 @@ def test_resume_accepts_matching_fingerprint(tmp_path):
     tr = run_task(_spec(), FP, jsonl, log=lambda *a: None)
     assert len(tr.records) == 3  # 1 resumed + 2 fresh
     assert tr.pass_fraction == 1.0
+
+
+def test_attempt_metrics_are_persisted(tmp_path):
+    jsonl = tmp_path / "metrics.jsonl"
+    tr = run_task(
+        _spec(metrics={"tokens": 123.0, "tool_calls": 4.0}),
+        FP,
+        jsonl,
+        attempts=1,
+        log=lambda *a: None,
+    )
+    assert tr.records[0]["metrics"] == {"tokens": 123.0, "tool_calls": 4.0}
+    assert json.loads(jsonl.read_text())["metrics"]["tokens"] == 123.0
+
+
+def test_suite_aggregates_task_equal_weight_metrics(tmp_path):
+    results = run_suite(
+        [
+            _spec(name="A1", metrics={"tokens": 100.0}),
+            _spec(name="B1", metrics={"tokens": 300.0}),
+        ],
+        label="metrics",
+        attempts=1,
+        fingerprint=FP,
+        results_dir=tmp_path,
+        log=lambda *a: None,
+    )
+    assert results["tasks"]["A1"]["metrics"]["tokens"] == 100.0
+    assert results["summary"]["metrics"]["tokens"] == 200.0
 
 
 def test_load_done_tolerates_malformed_final_line(tmp_path):

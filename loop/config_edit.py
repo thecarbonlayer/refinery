@@ -38,9 +38,42 @@ def known_knobs() -> dict[str, dict]:
     """carbon's editable-surface schema, keyed by field name: what knobs exist, their
     type, and which are collections / positive-int — the generic knob catalogue the
     editor and the propose side read instead of hardcoding field names."""
-    from carbon import config_schema
+    from carbon import surface_manifest
 
-    return {field["name"]: field for field in config_schema()}
+    return {
+        field["name"]: field
+        for field in surface_manifest()["editable"]
+        if field.get("editable", True)
+    }
+
+
+def immutable_invariants() -> dict[str, str]:
+    """Carbon's explicit do-not-propose list, keyed by invariant name."""
+    from carbon import surface_manifest
+
+    return {item["name"]: item["reason"] for item in surface_manifest()["immutable"]}
+
+
+def proposal_surface() -> dict:
+    """The complete proposer contract: selectable knobs and locked boundaries."""
+    from carbon import surface_manifest
+
+    manifest = surface_manifest()
+    return {
+        "editable": known_knobs(),
+        "locked_fields": {
+            item["name"]: item.get("locked_reason")
+            or item.get("deprecated")
+            or "Managed by Carbon or the pipeline."
+            for item in manifest["locked_fields"]
+        },
+        "immutable": immutable_invariants(),
+        "candidate_kinds": {
+            "configuration_candidate": "Can be applied and evaluated automatically.",
+            "strategy_surface_gap": "Needs a reviewed Carbon strategy implementation first.",
+            "correctness_defect": "Needs a locked Carbon fix; must not become a knob.",
+        },
+    }
 
 
 def apply_candidate(carbon_root: str | Path, candidate: Candidate) -> dict:

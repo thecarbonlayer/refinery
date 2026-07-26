@@ -7,7 +7,7 @@ def test_registry_shape():
     assert len(names) == len(set(names)), "duplicate task names"
     for t in TASKS:
         assert t.split in ATTEMPTS
-        assert t.cluster in "ABCD"
+        assert t.cluster in "ABCDEFGH"
         assert t.expected_baseline in ("pass", "fail", "uncertain")
 
 
@@ -27,11 +27,70 @@ def test_registry_membership():
         "D1",
         "D2",
         "D3",
+        "E1",
+        "E2",
+        "F1",
+        "F2",
+        "G1",
+        "G2",
+        "G3",
+        "H1",
+        "H2",
+        "H3",
     }
     held_in = {t.name for t in TASKS if t.split == "held_in"}
     held_out = {t.name for t in TASKS if t.split == "held_out"}
-    assert held_in == {"A1", "A2", "B1", "B2", "C1", "C2", "D1", "D2"}
-    assert held_out == {"A3", "A4", "B3", "C3", "D3"}
+    assert held_in == {
+        "A1",
+        "A2",
+        "B1",
+        "B2",
+        "C1",
+        "C2",
+        "D1",
+        "D2",
+        "E1",
+        "F1",
+        "G1",
+        "G3",
+        "H1",
+        "H3",
+    }
+    assert held_out == {"A3", "A4", "B3", "C3", "D3", "E2", "F2", "G2", "H2"}
+
+
+def test_e_fixtures_put_needles_beyond_blunt_clamps():
+    from runner.tasks.cluster_e import E1_SENTINEL, E2_SENTINEL, _large_reference, _long_test_output
+
+    reference = _large_reference()
+    output = _long_test_output()
+    assert len(reference) > 100_000
+    assert reference.find(E1_SENTINEL) > 80_000
+    assert len(output) > 80_000
+    assert output.rstrip().endswith(E2_SENTINEL)
+
+
+def test_f1_expected_changes_only_beta():
+    from runner.tasks.cluster_f import F1_EXPECTED
+
+    assert "def alpha_timeout():\n    timeout = 5" in F1_EXPECTED
+    assert "def beta_timeout():\n    timeout = 30" in F1_EXPECTED
+
+
+def test_g1_sentinel_is_not_a_numbered_line():
+    from runner.tasks.cluster_g import G1_SENTINEL
+
+    assert not G1_SENTINEL.partition(":")[0].isdigit()
+
+
+def test_h_fault_injections_prove_recovery_and_boundaries():
+    from unittest.mock import patch
+
+    from runner.tasks.cluster_h import SPECS
+
+    with patch("harness.agent.time.sleep"):
+        attempts = [spec.run() for spec in SPECS]
+    assert all(attempt.passed for attempt in attempts), [attempt.detail for attempt in attempts]
 
 
 def test_c3_outcome_never_masks_a_leak():

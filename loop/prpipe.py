@@ -53,7 +53,7 @@ def commit_message(candidate: Candidate, record: ValidationRecord, iteration: st
     return (
         f"evolve({iteration}): {_fields_summary(candidate)} [{candidate.cluster_id}]\n\n"
         f"{candidate.rationale}\n\n"
-        f"Validated against the 13-task suite: Δ_in={record.delta_in:+.4f}, "
+        f"Validated against the full task suite: Δ_in={record.delta_in:+.4f}, "
         f"Δ_ho={record.delta_ho:+.4f} (acceptance rule: Δ_in ≥ 0, Δ_ho ≥ 0, max > 0).\n"
         f"{provenance(candidate)}.\n\n"
         f"{COMMIT_TRAILER}"
@@ -82,6 +82,18 @@ def pr_body(
             f"{c['pass_fraction']:.4f} | {d:+.4f} |"
         )
     per_task = "\n".join(rows)
+    regressions = (
+        ", ".join(f"`{name}` ({change:+.4f})" for name, change in record.regressions.items())
+        or "none"
+    )
+    metric_rows = (
+        "\n".join(
+            f"| `{name}` | {record.baseline_metrics.get(name, 0):.4f} | "
+            f"{record.candidate_metrics.get(name, 0):.4f} | {change:+.4f} |"
+            for name, change in record.metric_delta.items()
+        )
+        or "| _not recorded_ | — | — | — |"
+    )
     bf, cf = record.baseline_fingerprint, record.candidate_fingerprint
     return f"""## Failure cluster targeted
 
@@ -103,9 +115,21 @@ Observed in: {", ".join(cluster.tasks)}.
 
 **Δ_in = {record.delta_in:+.4f}, Δ_ho = {record.delta_ho:+.4f} -> ACCEPTED**
 
+Per-task regression warnings: {regressions}. A full-pass -> zero-pass movement is a
+promotion veto even when the aggregate split rule passes.
+
 | task | split | baseline | candidate | Δ |
 |---|---|---|---|---|
 {per_task}
+
+### Efficiency and trajectory telemetry
+
+These values are diagnostic and do not override task correctness. Negative cost,
+token, call, error, and compaction deltas generally mean less work for the same score.
+
+| metric | baseline mean | candidate mean | Δ |
+|---|---:|---:|---:|
+{metric_rows}
 
 Baseline fingerprint: `{bf.get("gemma_sha", "")[:12]}` (config v{bf.get("config_version")}, \
 model {bf.get("model")}).

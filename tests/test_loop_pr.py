@@ -21,22 +21,22 @@ def _bumped() -> int:
 
 
 CANDIDATE = Candidate(
-    id="cand-raise-clamp-12k",
+    id="cand-raise-output-budget",
     cluster_id="CL-1",
     proposer="Fable",
     proposer_detail="claude-fable-5, in-session",
-    fields={"max_item_chars": {"old": 4000, "new": 12000}},
-    rationale="The clamp drops the tail; observed needles sit past it.",
-    expected_effect="A2/A4 recover",
-    regression_risk="window pressure on A1/A3",
+    fields={"max_tokens": {"old": 4096, "new": 8192}},
+    rationale="The response budget cuts a required long answer before its final receipt.",
+    expected_effect="G1 recovers",
+    regression_risk="higher token cost and latency",
 )
 
 CLUSTER = Cluster(
     id="CL-1",
-    mechanism="clamp suffix-drop at the door",
-    tasks=("A2",),
-    hypothesis="max_item_chars=4000 truncates below the needle offset",
-    evidence=("reply: 'the log ends abruptly'",),
+    mechanism="completion budget cuts valid output",
+    tasks=("G1",),
+    hypothesis="max_tokens=4096 ends the answer before the final receipt",
+    evidence=("reply: 'incident handoff ends before line 400'",),
 )
 
 BASE_FP = {
@@ -115,7 +115,7 @@ def test_provenance_uses_candidate_field():
 
 def test_commit_message_carries_evidence_and_trailer():
     msg = commit_message(CANDIDATE, RECORD, "iter-01")
-    assert "evolve(iter-01): max_item_chars 4000 -> 12000 [CL-1]" in msg
+    assert "evolve(iter-01): max_tokens 4096 -> 8192 [CL-1]" in msg
     assert "Δ_in=+0.1250" in msg and "Δ_ho=+0.2000" in msg
     assert "Fable-proposed, task-suite-validated" in msg
     assert msg.endswith("Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>")
@@ -123,8 +123,8 @@ def test_commit_message_carries_evidence_and_trailer():
 
 def test_pr_body_is_the_required_template():
     body = pr_body(CANDIDATE, RECORD, CLUSTER, BASELINE_RESULTS, CANDIDATE_RESULTS)
-    assert "CL-1" in body and "clamp suffix-drop" in body
-    assert "| `max_item_chars` | `4000` | `12000` |" in body
+    assert "CL-1" in body and "completion budget" in body
+    assert "| `max_tokens` | `4096` | `8192` |" in body
     assert "Δ_in = +0.1250, Δ_ho = +0.2000" in body and "ACCEPTED" in body
     assert "| A2 | held_in | 0.0000 | 1.0000 | +1.0000 |" in body  # per-task, not aggregate
     assert "**Fable-proposed, task-suite-validated**" in body
@@ -167,16 +167,16 @@ def test_open_pr_full_flow(repos):
     assert url == "https://github.com/x/carbon/pull/1"
     assert calls["cmd"][:4] == ["gh", "pr", "create", "--base"]
     assert calls["cmd"][4] == "self-improvement"  # explicit base, never the default branch
-    branch = "evolve/iter-01-cand-raise-clamp-12k"
+    branch = "evolve/iter-01-cand-raise-output-budget"
     # the edit landed as ONE commit on the branch, pushed to origin
     assert _git(root, "ls-remote", "--heads", "origin", branch).strip()
     on_branch = json.loads(_git(root, "show", f"{branch}:harness/harness_config.json"))
-    assert on_branch["max_item_chars"] == 12000 and on_branch["version"] == _bumped()
+    assert on_branch["max_tokens"] == 8192 and on_branch["version"] == _bumped()
     # checkout restored, tree clean, main untouched
     assert _git(root, "rev-parse", "--abbrev-ref", "HEAD").strip() == "main"
     assert not _git(root, "status", "--porcelain").strip()
     on_main = json.loads(_git(root, "show", "main:harness/harness_config.json"))
-    assert on_main["max_item_chars"] == 4000
+    assert on_main["max_tokens"] == 4096
 
 
 def test_open_pr_refuses_rejected(repos):

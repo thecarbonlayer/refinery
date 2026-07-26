@@ -1,3 +1,5 @@
+import pytest
+
 from runner.delta import acceptance, delta
 
 
@@ -32,6 +34,18 @@ def test_delta_computes_split_and_per_task_changes():
     assert abs(d["delta_ho"] - 0.2) < 1e-9
     assert abs(d["per_task"]["A1"] - 2 / 3) < 1e-9
     assert d["per_task"]["B1"] == 0.0
+    assert d["regressions"] == {}
+    assert d["catastrophic_regressions"] == {}
+
+
+def test_delta_reports_efficiency_metrics_without_using_them_as_truth_gate():
+    baseline = _results({"A1": ("held_in", 0.0), "B1": ("held_out", 0.0)})
+    candidate = _results({"A1": ("held_in", 1.0), "B1": ("held_out", 1.0)})
+    baseline["summary"]["metrics"] = {"tokens": 1000.0, "cost": 1.0}
+    candidate["summary"]["metrics"] = {"tokens": 800.0, "cost": 0.8}
+    d = delta(baseline, candidate)
+    assert d["metric_delta"] == {"cost": pytest.approx(-0.2), "tokens": -200.0}
+    assert d["accepted"] is True
 
 
 def test_acceptance_rule():
@@ -39,6 +53,52 @@ def test_acceptance_rule():
     assert acceptance(0.0, 0.0)["accepted"] is False  # max must be > 0
     assert acceptance(0.2, -0.1)["accepted"] is False  # no held-out regression
     assert acceptance(-0.1, 0.2)["accepted"] is False  # no held-in regression
+
+
+def test_delta_vetoes_full_pass_to_zero_pass_hidden_by_split_average():
+    """Iteration 1's real blind spot: one held-in task gains 0->1 while a
+    different held-in task collapses 1->0, so aggregate Δ_in stays zero."""
+    baseline = _results(
+        {
+            "miner": ("held_in", 0.0),
+            "guard": ("held_in", 1.0),
+            "heldout": ("held_out", 0.0),
+        }
+    )
+    candidate = _results(
+        {
+            "miner": ("held_in", 1.0),
+            "guard": ("held_in", 0.0),
+            "heldout": ("held_out", 1.0),
+        }
+    )
+    d = delta(baseline, candidate)
+    assert d["delta_in"] == 0.0
+    assert d["delta_ho"] == 1.0
+    assert d["aggregate_accepted"] is True
+    assert d["catastrophic_regressions"] == {"guard": -1.0}
+    assert d["accepted"] is False
+
+
+def test_delta_reports_smaller_regression_without_hard_veto():
+    baseline = _results(
+        {
+            "miner": ("held_in", 0.0),
+            "noisy": ("held_in", 2 / 3),
+            "heldout": ("held_out", 0.0),
+        }
+    )
+    candidate = _results(
+        {
+            "miner": ("held_in", 1.0),
+            "noisy": ("held_in", 1 / 3),
+            "heldout": ("held_out", 1.0),
+        }
+    )
+    d = delta(baseline, candidate)
+    assert d["regressions"] == {"noisy": -(1 / 3)}
+    assert d["catastrophic_regressions"] == {}
+    assert d["accepted"] is True
 
 
 def test_delta_refuses_mismatched_task_sets():

@@ -7,7 +7,13 @@ from pathlib import Path
 import pytest
 
 from loop.artifacts import Candidate
-from loop.config_edit import apply_candidate, config_path, known_knobs
+from loop.config_edit import (
+    apply_candidate,
+    config_path,
+    immutable_invariants,
+    known_knobs,
+    proposal_surface,
+)
 from runner.carbon_env import CARBON_ROOT
 
 REAL_CONFIG = CARBON_ROOT / "harness" / "harness_config.json"
@@ -45,11 +51,9 @@ def fake_carbon(tmp_path) -> Path:
 def test_apply_changes_only_the_named_lines(fake_carbon):
     before = config_path(fake_carbon).read_text().splitlines()
     old = json.loads(config_path(fake_carbon).read_text())
-    new = apply_candidate(
-        fake_carbon, make_candidate({"max_item_chars": {"old": 4000, "new": 12000}})
-    )
+    new = apply_candidate(fake_carbon, make_candidate({"max_tokens": {"old": 4096, "new": 8192}}))
     after = config_path(fake_carbon).read_text().splitlines()
-    assert new["max_item_chars"] == 12000
+    assert new["max_tokens"] == 8192
     assert new["version"] == old["version"] + 1
     changed = [i for i, (a, b) in enumerate(zip(before, after, strict=True)) if a != b]
     assert len(before) == len(after) and len(changed) == 2  # the knob + the version bump
@@ -59,9 +63,7 @@ def test_apply_changes_only_the_named_lines(fake_carbon):
 def test_stale_old_value_rejected_and_file_untouched(fake_carbon):
     before = config_path(fake_carbon).read_text()
     with pytest.raises(ValueError, match="stale"):
-        apply_candidate(
-            fake_carbon, make_candidate({"max_item_chars": {"old": 9999, "new": 12000}})
-        )
+        apply_candidate(fake_carbon, make_candidate({"max_tokens": {"old": 9999, "new": 8192}}))
     assert config_path(fake_carbon).read_text() == before
 
 
@@ -76,29 +78,56 @@ def test_known_knobs_reflects_carbon_schema():
     """known_knobs is discovered from carbon, so the real editable knobs appear with
     their collection flags — the editor tracks the surface as carbon grows it."""
     knobs = known_knobs()
-    assert "max_item_chars" in knobs and knobs["max_item_chars"]["collection"] is False
-    assert knobs["approval_tools"]["collection"] is True
+    assert "max_item_chars" not in knobs
+    assert "approval_tools" not in knobs
+    assert "require_run" not in knobs
+    assert "version" not in knobs
+    assert knobs["tool_output"]["strategies"] == ["head_tail", "keep_head"]
+    assert knobs["compaction"]["strategies"] == [
+        "structured_checkpoint",
+        "summarize_middle",
+    ]
+
+
+def test_bounded_strategy_object_is_editable(fake_carbon):
+    old = json.loads(config_path(fake_carbon).read_text())["tool_output"]
+    changed = {**old, "strategy": "keep_head"}
+    new = apply_candidate(
+        fake_carbon,
+        make_candidate({"tool_output": {"old": old, "new": changed}}),
+    )
+    assert new["tool_output"] == changed
+    assert json.loads(config_path(fake_carbon).read_text())["tool_output"] == changed
+
+
+def test_proposal_surface_explicitly_separates_locked_invariants():
+    locked = immutable_invariants()
+    assert "verification_integrity" in locked
+    assert "unique_atomic_edits" in locked
+    surface = proposal_surface()
+    assert "tool_output" in surface["editable"]
+    assert "require_run" in surface["locked_fields"]
+    assert "max_item_chars" in surface["locked_fields"]
+    assert surface["candidate_kinds"]["correctness_defect"].startswith("Needs a locked Carbon fix")
 
 
 def test_multiline_list_field_unsupported_by_surgical_edit(fake_carbon):
     """code_extensions spans multiple lines in the real file, so its exact
     `"field": <json>` text never appears — loudly unsupported, not reformatted."""
     old = json.loads(config_path(fake_carbon).read_text())["code_extensions"]
-    with pytest.raises(ValueError, match="cannot surgically edit"):
+    with pytest.raises(ValueError, match="no field 'code_extensions'"):
         apply_candidate(
             fake_carbon, make_candidate({"code_extensions": {"old": old, "new": [".py"]}})
         )
 
 
-def test_single_line_list_field_is_editable(fake_carbon):
-    """approval_tools sits on one line in the real file, so the surgical
-    replacement handles it — the C-cluster knob stays genuinely editable."""
+def test_permission_boundary_field_is_not_editable(fake_carbon):
+    """The loop may measure approval behavior but may not weaken the boundary."""
     old = ["bash", "write_file", "edit_file"]
-    new = apply_candidate(
-        fake_carbon, make_candidate({"approval_tools": {"old": old, "new": ["bash"]}})
-    )
-    assert json.loads(config_path(fake_carbon).read_text())["approval_tools"] == ["bash"]
-    assert new["version"] == _bumped()
+    with pytest.raises(ValueError, match="no field 'approval_tools'"):
+        apply_candidate(
+            fake_carbon, make_candidate({"approval_tools": {"old": old, "new": ["bash"]}})
+        )
 
 
 def test_invalid_new_value_rejected_by_carbon_door(fake_carbon):
@@ -107,6 +136,24 @@ def test_invalid_new_value_rejected_by_carbon_door(fake_carbon):
     would refuse to load."""
     before = config_path(fake_carbon).read_text()
     with pytest.raises(ValueError, match="positive integer"):
-        apply_candidate(fake_carbon, make_candidate({"max_item_chars": {"old": 4000, "new": -1}}))
+        apply_candidate(
+            fake_carbon,
+            make_candidate(
+                {
+                    "tool_output": {
+                        "old": {
+                            "strategy": "head_tail",
+                            "budget": 4000,
+                            "tail_fraction": 0.6,
+                        },
+                        "new": {
+                            "strategy": "head_tail",
+                            "budget": -1,
+                            "tail_fraction": 0.6,
+                        },
+                    }
+                }
+            ),
+        )
     assert config_path(fake_carbon).read_text() == before
     assert not list(fake_carbon.glob("harness/*.candidate-check"))  # temp check file cleaned up

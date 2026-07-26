@@ -16,6 +16,22 @@ from runner.spec import TaskSpec
 RESULTS_DIR = Path(__file__).resolve().parents[1] / "results"
 
 
+def _mean_metrics(records: list[dict]) -> dict[str, float]:
+    names = sorted({name for record in records for name in record.get("metrics", {})})
+    return (
+        {
+            name: round(
+                sum(float(record.get("metrics", {}).get(name, 0)) for record in records)
+                / len(records),
+                6,
+            )
+            for name in names
+        }
+        if records
+        else {}
+    )
+
+
 def _prior_fingerprint(out_path: Path, jsonl_path: Path) -> dict | None:
     """The fingerprint a prior baseline under this label was stamped with, from the
     results JSON if present, else the first JSONL record. ``None`` when no prior run
@@ -102,10 +118,27 @@ def run_suite(
             "passes": sum(1 for r in tr.records if r["passed"]),
             "pass_fraction": round(tr.pass_fraction, 4),
             "outcomes": [r["outcome"] for r in tr.records],
+            "metrics": _mean_metrics(tr.records),
         }
+    # Build suite metrics from task aggregates. Each task has equal weight,
+    # matching split-rate aggregation and avoiding held-out's larger sample
+    # count dominating cost telemetry.
+    metric_names = sorted(
+        {name for task in results["tasks"].values() for name in task.get("metrics", {})}
+    )
     results["summary"] = {
         "held_in_rate": round(split_rate(results, "held_in"), 4),
         "held_out_rate": round(split_rate(results, "held_out"), 4),
+        "metrics": {
+            name: round(
+                sum(task.get("metrics", {}).get(name, 0) for task in results["tasks"].values())
+                / len(results["tasks"]),
+                6,
+            )
+            for name in metric_names
+        }
+        if results["tasks"]
+        else {},
     }
     fd, tmp_name = tempfile.mkstemp(dir=results_dir, prefix=f".{label}.", suffix=".json.tmp")
     with os.fdopen(fd, "w") as f:

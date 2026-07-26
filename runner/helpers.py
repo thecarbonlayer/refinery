@@ -133,6 +133,29 @@ def compacted(messages: list[dict]) -> bool:
     return any(str(m.get("content", "")).startswith("[summary") for m in messages)
 
 
+def agent_metrics(agent) -> dict[str, float]:
+    """Quality/cost telemetry used to compare knob candidates, never to grade truth."""
+    totals = agent.tracer.totals() if getattr(agent, "tracer", None) else {}
+    messages = getattr(agent, "messages", [])
+    tool_calls = sum(len(m.get("tool_calls") or []) for m in messages)
+    tool_errors = sum(
+        1
+        for m in messages
+        if m.get("role") == "tool" and str(m.get("content", "")).startswith("error")
+    )
+    return {
+        "llm_calls": float(totals.get("llm_calls", 0)),
+        "model_attempts": float(getattr(agent, "_turn_model_calls", 0)),
+        "tool_calls": float(totals.get("tool_calls", tool_calls)),
+        "tokens": float(totals.get("tokens", 0)),
+        "cost": float(totals.get("cost", 0)),
+        "compactions": float(getattr(agent, "compaction_count", 0)),
+        "tool_errors": float(tool_errors),
+        "incomplete_responses": float(getattr(agent, "_stop_reason", "") == "incomplete_response"),
+        "retries": float(getattr(agent, "retry_count", 0)),
+    }
+
+
 # --- filesystem oracles -----------------------------------------------------------
 def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()

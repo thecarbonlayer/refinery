@@ -49,6 +49,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="loop")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
+    sub.add_parser(
+        "surface",
+        help="print Carbon's editable strategy menu and explicit immutable boundaries",
+    )
+
     dry_p = sub.add_parser("dry-run", help="apply -> run a task subset -> revert (no Δ)")
     dry_p.add_argument("--iteration", required=True)
     dry_p.add_argument("--candidate", required=True)
@@ -70,6 +75,11 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    if args.cmd == "surface":
+        from loop.config_edit import proposal_surface
+
+        print(json.dumps(proposal_surface(), indent=2, sort_keys=True))
+        return
     it_dir = iteration_dir(args.iteration)
     candidates = load_candidates(it_dir / "candidates.json")
 

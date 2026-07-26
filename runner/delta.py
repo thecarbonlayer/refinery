@@ -83,11 +83,38 @@ def delta(baseline: dict, candidate: dict) -> dict:
         name: candidate["tasks"][name]["pass_fraction"] - baseline["tasks"][name]["pass_fraction"]
         for name in sorted(base_names)
     }
+    regressions = {name: change for name, change in per_task.items() if change < 0}
+    # The aggregate Self-Harness rule can average a total collapse on one task
+    # against a gain on another task in the same split. Refinery observed this
+    # in iteration 1: A1 moved 1.0 -> 0.0 while A2 moved 0.0 -> 1.0, leaving
+    # Δ_in unchanged. Treat a full-pass -> zero-pass movement as a promotion
+    # veto. Smaller negative movements stay visible as regression warnings;
+    # with only 3/5 stochastic attempts, making every single flip a hard veto
+    # would mostly measure sampling noise.
+    catastrophic_regressions = {
+        name: change
+        for name, change in per_task.items()
+        if baseline["tasks"][name]["pass_fraction"] == 1.0
+        and candidate["tasks"][name]["pass_fraction"] == 0.0
+    }
+    aggregate = acceptance(d_in, d_ho)
+    base_metrics = baseline.get("summary", {}).get("metrics", {})
+    candidate_metrics = candidate.get("summary", {}).get("metrics", {})
+    metric_delta = {
+        name: float(candidate_metrics.get(name, 0)) - float(base_metrics.get(name, 0))
+        for name in sorted(set(base_metrics) | set(candidate_metrics))
+    }
     return {
         "baseline_fingerprint": base_fp,
         "candidate_fingerprint": cand_fp,
         "delta_in": d_in,
         "delta_ho": d_ho,
         "per_task": per_task,
-        **acceptance(d_in, d_ho),
+        "regressions": regressions,
+        "catastrophic_regressions": catastrophic_regressions,
+        "baseline_metrics": base_metrics,
+        "candidate_metrics": candidate_metrics,
+        "metric_delta": metric_delta,
+        "aggregate_accepted": aggregate["accepted"],
+        "accepted": aggregate["accepted"] and not catastrophic_regressions,
     }

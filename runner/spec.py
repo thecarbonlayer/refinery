@@ -28,13 +28,14 @@ class Attempt:
     detail: str
     approvals: list[dict] = field(default_factory=list)
     turns: int = 0
+    metrics: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class TaskSpec:
     name: str
     split: str  # "held_in" | "held_out"
-    cluster: str  # "A" | "B" | "C" | "D"
+    cluster: str  # short mechanism-cluster id, e.g. "A" or "G"
     expected_baseline: str  # "pass" | "fail" | "uncertain"  (miner-vs-guard prior, v2 table)
     run: Callable[[], Attempt]
 
