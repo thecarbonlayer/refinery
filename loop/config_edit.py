@@ -9,15 +9,15 @@ text never appears) is loudly unsupported rather than reformatted; a single-line
 collection stays editable. No current candidate needs a multiline one, and
 support can be added when one does.
 
-Which fields exist, and which are collections, is discovered from gemma's own
+Which fields exist, and which are collections, is discovered from carbon's own
 ``config_schema()`` (adr/0002) rather than hardcoded here — so the editor tracks
-the editable surface as gemma grows it, and the self-improving loop can propose a
-knob the day gemma adds it instead of waiting on a matching edit here.
+the editable surface as carbon grows it, and the self-improving loop can propose a
+knob the day carbon adds it instead of waiting on a matching edit here.
 
-Safety: a candidate may only target a knob gemma's schema declares, its ``old``
+Safety: a candidate may only target a knob carbon's schema declares, its ``old``
 values must match the file (stale-candidate guard), every replacement must be
 unique in the text, and the edited file is re-parsed AND re-validated through
-gemma's own ``load_config`` door before the write is considered done.
+carbon's own ``load_config`` door before the write is considered done.
 """
 
 from __future__ import annotations
@@ -30,25 +30,25 @@ from loop.artifacts import Candidate
 CONFIG_REL = Path("harness") / "harness_config.json"
 
 
-def config_path(gemma_root: str | Path) -> Path:
-    return Path(gemma_root) / CONFIG_REL
+def config_path(carbon_root: str | Path) -> Path:
+    return Path(carbon_root) / CONFIG_REL
 
 
 def known_knobs() -> dict[str, dict]:
-    """gemma's editable-surface schema, keyed by field name: what knobs exist, their
+    """carbon's editable-surface schema, keyed by field name: what knobs exist, their
     type, and which are collections / positive-int — the generic knob catalogue the
     editor and the propose side read instead of hardcoding field names."""
-    from gemma import config_schema
+    from carbon import config_schema
 
     return {field["name"]: field for field in config_schema()}
 
 
-def apply_candidate(gemma_root: str | Path, candidate: Candidate) -> dict:
+def apply_candidate(carbon_root: str | Path, candidate: Candidate) -> dict:
     """Rewrite harness_config.json with the candidate's values + version bump.
 
     Returns the new config as a dict. Raises (leaving the file untouched) on
     any mismatch between the candidate's ``old`` values and the file."""
-    path = config_path(gemma_root)
+    path = config_path(carbon_root)
     text = path.read_text()
     current = json.loads(text)
     schema = known_knobs()
@@ -57,7 +57,7 @@ def apply_candidate(gemma_root: str | Path, candidate: Candidate) -> dict:
     for name, diff in candidate.fields.items():
         if name not in schema:
             raise ValueError(
-                f"candidate {candidate.id!r}: no field {name!r} in gemma's config "
+                f"candidate {candidate.id!r}: no field {name!r} in carbon's config "
                 f"schema (known knobs: {', '.join(sorted(schema))})"
             )
         if name not in current:
@@ -92,7 +92,7 @@ def apply_candidate(gemma_root: str | Path, candidate: Candidate) -> dict:
             f"candidate {candidate.id!r}: edited text does not parse back to the "
             f"intended config — refusing to write"
         )
-    from harness.harness_config import load_config  # gemma's own validation door
+    from harness.harness_config import load_config  # carbon's own validation door
 
     tmp = path.with_suffix(".json.candidate-check")
     tmp.write_text(text)

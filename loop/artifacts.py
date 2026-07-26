@@ -120,7 +120,7 @@ def load_candidates(path: str | Path) -> list[Candidate]:
 class ValidationRecord:
     """The outcome of validating one candidate — accepted or not, it is kept.
 
-    Rejected candidates never touch the dist/gemma repo, but their record (and
+    Rejected candidates never touch the carbon repo, but their record (and
     the runner's results JSON it points at) is part of the iteration's honest
     history: most candidates are EXPECTED to fail acceptance."""
 

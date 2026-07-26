@@ -5,7 +5,7 @@
 > opens a PR — it never merges.
 
 The measurement half of the self-evolving-harness project: runs the 13-task
-suite (`task-suite-v2.md`) against a live Gemma agent driven by the gemma
+suite (`task-suite-v2.md`) against a live Gemma agent driven by the carbon
 harness, N times per task (3 held-in / 5 held-out), aggregates pass fractions
 (averaged, never majority-voted), and computes Δ_in/Δ_ho between two harness
 states for the acceptance rule `Δ_in ≥ 0, Δ_ho ≥ 0, max(Δ_in, Δ_ho) > 0`.
@@ -16,13 +16,13 @@ the external editor acts on — otherwise the editor can "pass" a task by
 rewriting its verifier. The boundary is a repo boundary, not a directory
 convention. (Review flag (d)-1; open-questions.md §7.)
 
-**Layout it expects:** `refinery/` and `gemma/` as sibling checkouts under one
-root. `pyproject.toml`'s `../gemma` and `runner/gemma_env.py`'s `GEMMA_ROOT`
+**Layout it expects:** `refinery/` and `carbon/` as sibling checkouts under one
+root. `pyproject.toml`'s `../carbon` and `runner/carbon_env.py`'s `CARBON_ROOT`
 both assume that — change them together if you nest things differently.
 
 ## Running
 
-LM Studio must be serving the model in gemma/.env (real models, no mocks).
+LM Studio must be serving the model in carbon/.env (real models, no mocks).
 
     uv sync
     uv run python -m runner.cli run --label baseline-main          # full suite, resumable
@@ -30,7 +30,7 @@ LM Studio must be serving the model in gemma/.env (real models, no mocks).
     uv run python -m runner.cli delta results/baseline-main.json results/candidate.json
 
 Results stream to results/<label>.jsonl per attempt (a killed run resumes,
-skipping finished attempts; records are pinned to the gemma SHA + config
+skipping finished attempts; records are pinned to the carbon SHA + config
 version they measured, and a resume refuses records from a different harness
 state); aggregates land in results/<label>.json. Partial runs (--only) are
 stamped with a "filter" field and refuse to overwrite a full run's JSON.
@@ -40,7 +40,7 @@ Results are also stamped with `runner_sha` (the verifier's own version);
 deltas across different runner versions are refused, so re-measure the
 baseline after changing runner code.
 
-To measure a different harness state: check out the branch in gemma
+To measure a different harness state: check out the branch in carbon
 (the editable dependency points at that working tree), run with a new label,
 then `delta` the two JSONs.
 
@@ -51,11 +51,11 @@ proposer model directly as reasoning (Fable, in-session, for iteration 1 —
 see docs/research/self-evolving-harness/todo-begin-self-improvement-loop.md)
 and land as fixed JSON artifacts in `iterations/<iter>/` (`clusters.json`,
 `candidates.json`); only validation and the branch+PR step are code. A
-candidate is applied to the gemma WORKING TREE (never committed — a
+candidate is applied to the carbon WORKING TREE (never committed — a
 rejected candidate leaves no trace there), the suite runs in a fresh
 subprocess (config values bind at import), the edit is reverted, and the
 acceptance rule `Δ_in ≥ 0, Δ_ho ≥ 0, max > 0` decides. Accepted edits each get
-their own branch off `self-improvement` in gemma and a PR targeting it
+their own branch off `self-improvement` in carbon and a PR targeting it
 (explicit base — never `main`), with the evidence (cluster, knobs, per-task Δ,
 provenance) in the body. The pipeline never merges.
 

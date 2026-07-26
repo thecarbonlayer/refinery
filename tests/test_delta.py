@@ -2,7 +2,7 @@ from runner.delta import acceptance, delta
 
 
 def _results(
-    tasks: dict[str, tuple[str, float]], model: str = "gemma", runner_sha: str = "rsha1"
+    tasks: dict[str, tuple[str, float]], model: str = "carbon", runner_sha: str = "rsha1"
 ) -> dict:
     """Minimal results-JSON shape: name -> (split, pass_fraction). Attempts
     mirror the real suite (3 held_in, 5 held_out) so parity checks pass."""
@@ -67,7 +67,7 @@ def test_delta_refuses_mismatched_models():
         {"A1": ("held_in", 1.0), "B1": ("held_in", 1.0), "A3": ("held_out", 0.4)},
         model="other-model",
     )
-    with pytest.raises(ValueError, match="gemma.*other-model"):
+    with pytest.raises(ValueError, match="carbon.*other-model"):
         delta(BASE, cand)
 
 

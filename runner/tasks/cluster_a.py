@@ -12,7 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import mkdtemp
 
-from runner.gemma_env import make_provider
+from runner.carbon_env import make_provider
 from runner.helpers import compacted, neutral_dir
 from runner.spec import Attempt, TaskSpec
 

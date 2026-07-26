@@ -94,7 +94,7 @@ def run_task(
         if (spec.name, i) in done:
             rec = done[(spec.name, i)]
             # Resume is gated on the behavior_key, NOT the raw gemma_sha: an
-            # additive gemma release moves the committed sha but leaves the key
+            # additive carbon release moves the committed sha but leaves the key
             # unchanged, so its records resume instead of forcing an empty
             # re-baseline (see runner/guard.py). A record with no behavior_key
             # (predates this guard — e.g. the old recorded baseline) can never

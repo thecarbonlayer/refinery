@@ -8,9 +8,9 @@ import pytest
 
 from loop.artifacts import Candidate, Cluster, ValidationRecord
 from loop.prpipe import commit_message, ensure_base_branch, open_pr, pr_body, provenance
-from runner.gemma_env import GEMMA_ROOT, _git
+from runner.carbon_env import CARBON_ROOT, _git
 
-REAL_CONFIG = GEMMA_ROOT / "harness" / "harness_config.json"
+REAL_CONFIG = CARBON_ROOT / "harness" / "harness_config.json"
 
 CANDIDATE = Candidate(
     id="cand-raise-clamp-12k",
@@ -78,12 +78,12 @@ CANDIDATE_RESULTS = results({"A2": 1.0, "A4": 0.8, "D1": 1.0})
 
 @pytest.fixture
 def repos(tmp_path):
-    """A fake gemma clone with a local bare 'origin' — push is exercised for real."""
+    """A fake carbon clone with a local bare 'origin' — push is exercised for real."""
     origin = tmp_path / "origin.git"
     subprocess.run(
         ["git", "init", "--bare", "-b", "main", str(origin)], check=True, capture_output=True
     )
-    root = tmp_path / "gemma"
+    root = tmp_path / "carbon"
     (root / "harness").mkdir(parents=True)
     shutil.copy(REAL_CONFIG, root / "harness" / "harness_config.json")
     for args in (
@@ -140,7 +140,7 @@ def test_open_pr_full_flow(repos):
 
         class P:
             returncode = 0
-            stdout = "https://github.com/x/gemma/pull/1\n"
+            stdout = "https://github.com/x/carbon/pull/1\n"
             stderr = ""
 
         return P()
@@ -152,11 +152,11 @@ def test_open_pr_full_flow(repos):
         BASELINE_RESULTS,
         CANDIDATE_RESULTS,
         iteration="iter-01",
-        gemma_root=root,
+        carbon_root=root,
         gh_run=fake_gh,
         log=lambda *_: None,
     )
-    assert url == "https://github.com/x/gemma/pull/1"
+    assert url == "https://github.com/x/carbon/pull/1"
     assert calls["cmd"][:4] == ["gh", "pr", "create", "--base"]
     assert calls["cmd"][4] == "self-improvement"  # explicit base, never the default branch
     branch = "evolve/iter-01-cand-raise-clamp-12k"
@@ -182,7 +182,7 @@ def test_open_pr_refuses_rejected(repos):
             BASELINE_RESULTS,
             CANDIDATE_RESULTS,
             iteration="iter-01",
-            gemma_root=root,
+            carbon_root=root,
             gh_run=None,
             log=lambda *_: None,
         )

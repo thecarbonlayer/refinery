@@ -30,7 +30,7 @@ def check(label: str) -> int:
     (resumes; any gemma_sha move was additive), 1 = stale (re-baseline required) or
     no such baseline."""
     from runner import guard
-    from runner.gemma_env import gemma_fingerprint
+    from runner.carbon_env import carbon_fingerprint
     from runner.suite import RESULTS_DIR
 
     out_path = RESULTS_DIR / f"{label}.json"
@@ -38,7 +38,7 @@ def check(label: str) -> int:
         print(f"no such baseline: {out_path}")
         return 1
     prior = json.loads(out_path.read_text()).get("fingerprint", {})
-    current = gemma_fingerprint()
+    current = carbon_fingerprint()
     status = guard.baseline_status(prior, current)
     print(f"baseline '{label}': {status.upper()}")
     print(
@@ -62,7 +62,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="runner")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    run_p = sub.add_parser("run", help="run the task suite against the current dist/gemma checkout")
+    run_p = sub.add_parser("run", help="run the task suite against the current carbon checkout")
     run_p.add_argument("--label", required=True, help="results file stem (results/<label>.json[l])")
     run_p.add_argument("--only", nargs="+", default=None, help="task names to run (default: all)")
     run_p.add_argument(

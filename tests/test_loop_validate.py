@@ -9,9 +9,9 @@ import pytest
 from loop.artifacts import Candidate
 from loop.config_edit import config_path
 from loop.validate import require_clean_tree, validate_candidate
-from runner.gemma_env import GEMMA_ROOT
+from runner.carbon_env import CARBON_ROOT
 
-REAL_CONFIG = GEMMA_ROOT / "harness" / "harness_config.json"
+REAL_CONFIG = CARBON_ROOT / "harness" / "harness_config.json"
 
 CANDIDATE = Candidate(
     id="cand-x",
@@ -44,8 +44,8 @@ def results_json(fractions: dict[str, float], fingerprint=FP) -> dict:
 
 
 @pytest.fixture
-def fake_gemma(tmp_path):
-    root = tmp_path / "gemma"
+def fake_carbon(tmp_path):
+    root = tmp_path / "carbon"
     (root / "harness").mkdir(parents=True)
     shutil.copy(REAL_CONFIG, root / "harness" / "harness_config.json")
     for args in (
@@ -66,14 +66,14 @@ def baseline(tmp_path):
     return p
 
 
-def test_accepted_candidate_and_revert(fake_gemma, baseline, tmp_path):
+def test_accepted_candidate_and_revert(fake_carbon, baseline, tmp_path):
     results_dir = tmp_path / "results"
     results_dir.mkdir()
     seen = {}
 
     def fake_runner(label, only, attempts):
         # the edit must be LIVE while the suite runs
-        seen["config"] = json.loads(config_path(fake_gemma).read_text())
+        seen["config"] = json.loads(config_path(fake_carbon).read_text())
         cand_fp = dict(FP, gemma_dirty=True, dirty_sha="d1", config_version=2)
         out = results_json({"A2": 1.0, "A4": 0.8, "D1": 1.0}, fingerprint=cand_fp)
         (results_dir / f"{label}.json").write_text(json.dumps(out))
@@ -81,20 +81,20 @@ def test_accepted_candidate_and_revert(fake_gemma, baseline, tmp_path):
     record = validate_candidate(
         CANDIDATE,
         baseline_path=baseline,
-        gemma_root=fake_gemma,
+        carbon_root=fake_carbon,
         run_runner=fake_runner,
         results_dir=results_dir,
         log=lambda *_: None,
     )
     assert seen["config"]["max_item_chars"] == 12000 and seen["config"]["version"] == 2
     # reverted afterwards, tree clean
-    assert json.loads(config_path(fake_gemma).read_text())["max_item_chars"] == 4000
-    require_clean_tree(fake_gemma)
+    assert json.loads(config_path(fake_carbon).read_text())["max_item_chars"] == 4000
+    require_clean_tree(fake_carbon)
     assert record.accepted and record.delta_in == 0.5 and record.delta_ho == pytest.approx(0.8)
     assert record.per_task["A2"] == 1.0
 
 
-def test_regression_is_rejected(fake_gemma, baseline, tmp_path):
+def test_regression_is_rejected(fake_carbon, baseline, tmp_path):
     results_dir = tmp_path / "results"
     results_dir.mkdir()
 
@@ -106,7 +106,7 @@ def test_regression_is_rejected(fake_gemma, baseline, tmp_path):
     record = validate_candidate(
         CANDIDATE,
         baseline_path=baseline,
-        gemma_root=fake_gemma,
+        carbon_root=fake_carbon,
         run_runner=fake_runner,
         results_dir=results_dir,
         log=lambda *_: None,
@@ -115,7 +115,7 @@ def test_regression_is_rejected(fake_gemma, baseline, tmp_path):
     assert record.delta_in == 0.0 and record.delta_ho == 0.0
 
 
-def test_runner_crash_still_reverts(fake_gemma, baseline, tmp_path):
+def test_runner_crash_still_reverts(fake_carbon, baseline, tmp_path):
     def exploding_runner(label, only, attempts):
         raise RuntimeError("boom")
 
@@ -123,22 +123,22 @@ def test_runner_crash_still_reverts(fake_gemma, baseline, tmp_path):
         validate_candidate(
             CANDIDATE,
             baseline_path=baseline,
-            gemma_root=fake_gemma,
+            carbon_root=fake_carbon,
             run_runner=exploding_runner,
             results_dir=tmp_path,
             log=lambda *_: None,
         )
-    assert json.loads(config_path(fake_gemma).read_text())["max_item_chars"] == 4000
-    require_clean_tree(fake_gemma)
+    assert json.loads(config_path(fake_carbon).read_text())["max_item_chars"] == 4000
+    require_clean_tree(fake_carbon)
 
 
-def test_dirty_tree_refused(fake_gemma, baseline, tmp_path):
-    (fake_gemma / "stray.txt").write_text("x")
+def test_dirty_tree_refused(fake_carbon, baseline, tmp_path):
+    (fake_carbon / "stray.txt").write_text("x")
     with pytest.raises(RuntimeError, match="not clean"):
         validate_candidate(
             CANDIDATE,
             baseline_path=baseline,
-            gemma_root=fake_gemma,
+            carbon_root=fake_carbon,
             run_runner=lambda *a: None,
             results_dir=tmp_path,
             log=lambda *_: None,

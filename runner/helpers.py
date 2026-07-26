@@ -2,7 +2,7 @@
 
 Everything here is a pure function over transcripts/filesystems (unit-testable
 offline) or a small process-level guard. No LLM judgment anywhere — the same
-discipline as dist/gemma/tasks/checks.py.
+discipline as carbon/tasks/checks.py.
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ def tool_call_args(messages: list[dict], names: tuple[str, ...]) -> list[str]:
 def bash_runs(messages: list[dict], match: Callable[[str], bool]) -> list[tuple[str, str]]:
     """(command, paired tool-result) for every bash call whose command matches.
 
-    Pairing is structural, not a transcript-wide id lookup: gemma's loop appends
+    Pairing is structural, not a transcript-wide id lookup: carbon's loop appends
     one tool message per call, in call order, immediately after the assistant
     block — and stores ``tc.get("id", "")``, so with local models ids can be
     empty or duplicated and an id-keyed dict would let a later result clobber

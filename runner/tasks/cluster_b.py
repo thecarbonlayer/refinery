@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from runner.gemma_env import make_provider
+from runner.carbon_env import make_provider
 from runner.helpers import (
     bash_runs,
     environ_guard,

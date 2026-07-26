@@ -8,8 +8,8 @@ import tempfile
 from pathlib import Path
 
 from runner import guard
+from runner.carbon_env import carbon_fingerprint
 from runner.delta import split_rate
-from runner.gemma_env import gemma_fingerprint
 from runner.run import load_done, run_task
 from runner.spec import TaskSpec
 
@@ -40,10 +40,10 @@ def run_suite(
     log=print,
 ) -> dict:
     # injected is a TEST SEAM: tests pass a synthetic fingerprint precisely
-    # because there is no live dist/gemma checkout to recompute against, so
+    # because there is no live carbon checkout to recompute against, so
     # the mid-suite drift guard below is skipped for injected fingerprints.
     injected = fingerprint is not None
-    fingerprint = fingerprint if injected else gemma_fingerprint()
+    fingerprint = fingerprint if injected else carbon_fingerprint()
     jsonl_path = results_dir / f"{label}.jsonl"
     out_path = results_dir / f"{label}.json"
     # --force overwrites this label from scratch: discard prior records (so nothing
@@ -52,7 +52,7 @@ def run_suite(
         jsonl_path.unlink(missing_ok=True)
     else:
         # resume-guard: refuse a stale baseline LOUDLY and up front, before spending
-        # any live-model attempts. Additive gemma bumps (behavior_key unchanged) pass
+        # any live-model attempts. Additive carbon bumps (behavior_key unchanged) pass
         # and resume; a config/model/verifier/working-tree change raises StaleBaseline.
         # gemma_sha alone moving is not a mismatch — that's the whole point.
         prior = _prior_fingerprint(out_path, jsonl_path)
@@ -77,11 +77,11 @@ def run_suite(
     for spec in tasks:
         if only and spec.name not in only:
             continue
-        # drift guard: a mid-suite edit to dist/gemma would stamp every later
+        # drift guard: a mid-suite edit to carbon would stamp every later
         # attempt with the stale suite-start fingerprint — recompute before
         # each task and abort on any difference.
         if not injected:
-            current = gemma_fingerprint()
+            current = carbon_fingerprint()
             if current != fingerprint:
                 changed = ", ".join(
                     f"{key}: {fingerprint.get(key)!r} -> {current.get(key)!r}"
@@ -89,7 +89,7 @@ def run_suite(
                     if fingerprint.get(key) != current.get(key)
                 )
                 raise RuntimeError(
-                    f"gemma state changed mid-suite ({changed}); aborting — "
+                    f"carbon state changed mid-suite ({changed}); aborting — "
                     f"restart with a fresh label or clean state"
                 )
         log(f"task {spec.name} [{spec.split}] ...")

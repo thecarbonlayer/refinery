@@ -1,8 +1,8 @@
 # Iteration 1 — report
 
-Run 2026-07-11. Proposer: Fable (claude-fable-5), in-session. Target: dist/gemma
+Run 2026-07-11. Proposer: Fable (claude-fable-5), in-session. Target: carbon
 `edac4be` (config v1), `google/gemma-4-26b-a4b` via LM Studio.
-**Deliverable: PR #1 — https://github.com/thecarbonlayer/gemma/pull/1**
+**Deliverable: PR #1 — https://github.com/thecarbonlayer/carbon/pull/1**
 (`evolve/iter-01-clamp-12k` -> `self-improvement`, not merged by the pipeline).
 
 ## What happened, in order

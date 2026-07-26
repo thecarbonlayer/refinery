@@ -21,7 +21,7 @@ from pathlib import Path
 
 from loop.artifacts import Candidate, Cluster, ValidationRecord
 from loop.config_edit import CONFIG_REL, apply_candidate
-from runner.gemma_env import GEMMA_ROOT, _git
+from runner.carbon_env import CARBON_ROOT, _git
 
 BASE_BRANCH = "self-improvement"
 COMMIT_TRAILER = "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
@@ -31,17 +31,17 @@ def provenance(candidate: Candidate) -> str:
     return f"{candidate.proposer}-proposed, task-suite-validated"
 
 
-def ensure_base_branch(gemma_root: Path = GEMMA_ROOT, log=print) -> None:
+def ensure_base_branch(carbon_root: Path = CARBON_ROOT, log=print) -> None:
     """Create ``self-improvement`` at the current main tip if it doesn't exist,
     and make sure origin has it (gh needs the base branch on the remote)."""
-    branches = _git(gemma_root, "branch", "--list", BASE_BRANCH).strip()
+    branches = _git(carbon_root, "branch", "--list", BASE_BRANCH).strip()
     if not branches:
-        main_tip = _git(gemma_root, "rev-parse", "main").strip()
-        _git(gemma_root, "branch", BASE_BRANCH, "main")
+        main_tip = _git(carbon_root, "rev-parse", "main").strip()
+        _git(carbon_root, "branch", BASE_BRANCH, "main")
         log(f"created {BASE_BRANCH} at main tip {main_tip[:10]}")
-    remote = _git(gemma_root, "ls-remote", "--heads", "origin", BASE_BRANCH).strip()
+    remote = _git(carbon_root, "ls-remote", "--heads", "origin", BASE_BRANCH).strip()
     if not remote:
-        _git(gemma_root, "push", "-u", "origin", BASE_BRANCH)
+        _git(carbon_root, "push", "-u", "origin", BASE_BRANCH)
         log(f"pushed {BASE_BRANCH} to origin")
 
 
@@ -138,7 +138,7 @@ def open_pr(
     baseline_results: dict,
     candidate_results: dict,
     iteration: str,
-    gemma_root: Path = GEMMA_ROOT,
+    carbon_root: Path = CARBON_ROOT,
     gh_run=subprocess.run,
     log=print,
 ) -> str:
@@ -146,17 +146,17 @@ def open_pr(
     PR (explicit base). Returns the PR URL. Never merges."""
     if not record.accepted:
         raise ValueError(f"candidate {candidate.id!r} was not accepted — no PR")
-    ensure_base_branch(gemma_root, log=log)
+    ensure_base_branch(carbon_root, log=log)
     branch = f"evolve/{iteration}-{candidate.id}"
-    if _git(gemma_root, "branch", "--list", branch).strip():
-        raise RuntimeError(f"branch {branch} already exists in {gemma_root}")
-    original = _git(gemma_root, "rev-parse", "--abbrev-ref", "HEAD").strip()
-    _git(gemma_root, "switch", "-c", branch, BASE_BRANCH)
+    if _git(carbon_root, "branch", "--list", branch).strip():
+        raise RuntimeError(f"branch {branch} already exists in {carbon_root}")
+    original = _git(carbon_root, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    _git(carbon_root, "switch", "-c", branch, BASE_BRANCH)
     try:
-        apply_candidate(gemma_root, candidate)
-        _git(gemma_root, "add", str(CONFIG_REL))
-        _git(gemma_root, "commit", "-m", commit_message(candidate, record, iteration))
-        _git(gemma_root, "push", "-u", "origin", branch)
+        apply_candidate(carbon_root, candidate)
+        _git(carbon_root, "add", str(CONFIG_REL))
+        _git(carbon_root, "commit", "-m", commit_message(candidate, record, iteration))
+        _git(carbon_root, "push", "-u", "origin", branch)
         title = f"evolve({iteration}): {_fields_summary(candidate)}"
         body = pr_body(candidate, record, cluster, baseline_results, candidate_results)
         proc = gh_run(
@@ -173,7 +173,7 @@ def open_pr(
                 "--body",
                 body,
             ],
-            cwd=gemma_root,
+            cwd=carbon_root,
             capture_output=True,
             text=True,
         )
@@ -183,4 +183,4 @@ def open_pr(
         log(f"opened PR for {candidate.id}: {url}")
         return url
     finally:
-        _git(gemma_root, "switch", original)
+        _git(carbon_root, "switch", original)

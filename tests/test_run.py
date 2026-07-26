@@ -15,14 +15,14 @@ BASE_FP = {
     "gemma_dirty": False,
     "dirty_sha": None,
     "config_version": 1,
-    "model": "gemma",
+    "model": "carbon",
     "runner_sha": "runnersha1",
 }
 
 
 def _fp(**over):
     """A self-consistent fingerprint: behavior_key derived from the (possibly
-    overridden) behavior-relevant fields, exactly as gemma_fingerprint stamps it."""
+    overridden) behavior-relevant fields, exactly as carbon_fingerprint stamps it."""
     fp = {**BASE_FP, **over}
     fp["behavior_key"] = guard.fingerprint_behavior_key(fp)
     return fp
@@ -93,7 +93,7 @@ def test_resume_refuses_different_config_version(tmp_path):
 
 
 def test_resume_refuses_different_dirty_state(tmp_path):
-    """A different dirty-tree content identity is uncommitted gemma behavior that no
+    """A different dirty-tree content identity is uncommitted carbon behavior that no
     version counter attests — behavior_key includes dirty_sha, so resume is refused."""
     jsonl = tmp_path / "r.jsonl"
     jsonl.write_text(json.dumps(_record(gemma_dirty=True, dirty_sha="deadbeef")) + "\n")
@@ -231,13 +231,13 @@ def test_run_suite_filtered_run_stamps_filter_and_can_self_overwrite(tmp_path):
     )
 
 
-def test_run_suite_aborts_when_gemma_state_changes_mid_suite(tmp_path, monkeypatch):
-    """A dist/gemma edit between tasks would stamp later attempts with the
+def test_run_suite_aborts_when_carbon_state_changes_mid_suite(tmp_path, monkeypatch):
+    """A carbon edit between tasks would stamp later attempts with the
     stale suite-start fingerprint — the per-task recompute must catch it."""
     import runner.suite as suite_mod
 
     fps = iter([FP, FP, {**FP, "gemma_sha": "MUTATED"}])
-    monkeypatch.setattr(suite_mod, "gemma_fingerprint", lambda: next(fps))
+    monkeypatch.setattr(suite_mod, "carbon_fingerprint", lambda: next(fps))
     with pytest.raises(RuntimeError, match="changed mid-suite"):
         run_suite(
             [_spec(), _spec(name="B1")],
@@ -248,14 +248,14 @@ def test_run_suite_aborts_when_gemma_state_changes_mid_suite(tmp_path, monkeypat
 
 
 def test_run_suite_injected_fingerprint_skips_mid_suite_recompute(tmp_path, monkeypatch):
-    """Injection is a test seam that bypasses the live gemma checkout — the
-    mid-suite guard must not fire (or even call gemma_fingerprint)."""
+    """Injection is a test seam that bypasses the live carbon checkout — the
+    mid-suite guard must not fire (or even call carbon_fingerprint)."""
     import runner.suite as suite_mod
 
     def boom():
-        raise AssertionError("gemma_fingerprint must not be called when injected")
+        raise AssertionError("carbon_fingerprint must not be called when injected")
 
-    monkeypatch.setattr(suite_mod, "gemma_fingerprint", boom)
+    monkeypatch.setattr(suite_mod, "carbon_fingerprint", boom)
     results = run_suite(
         [_spec(), _spec(name="B1")],
         label="injected",
@@ -266,7 +266,7 @@ def test_run_suite_injected_fingerprint_skips_mid_suite_recompute(tmp_path, monk
     assert set(results["tasks"]) == {"A1", "B1"}
 
 
-def test_run_suite_resumes_after_additive_gemma_bump(tmp_path):
+def test_run_suite_resumes_after_additive_carbon_bump(tmp_path):
     """Acceptance test: a complete baseline recorded at one gemma_sha resumes (re-runs
     nothing) when only the committed gemma_sha has moved — the additive-release case."""
     jsonl = tmp_path / "base.jsonl"

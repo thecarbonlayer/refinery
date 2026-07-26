@@ -4,7 +4,7 @@ Proposer: Fable (claude-fable-5), in-session — per the "Proposer decided" note
 docs/research/self-evolving-harness/todo-begin-self-improvement-loop.md. Mining is
 reasoning, not code; this file and `clusters.json` are its fixed output artifact.
 
-Input: `results/baseline-main.json` / `.jsonl` (dist/gemma `edac4be`, config v1,
+Input: `results/baseline-main.json` / `.jsonl` (carbon `edac4be`, config v1,
 `google/gemma-4-26b-a4b`, runner `f02e31e8…`). Held-in rate 0.8333, held-out 0.8.
 
 ## Discipline

@@ -1,5 +1,5 @@
 """The resume-guard: behavior_key is gemma_sha-independent but pins every other
-behavior input. Pure/offline — guard.py imports no gemma."""
+behavior input. Pure/offline — guard.py imports no carbon."""
 
 import pytest
 
@@ -10,7 +10,7 @@ BASE = {
     "gemma_dirty": False,
     "dirty_sha": None,
     "config_version": 1,
-    "model": "gemma",
+    "model": "carbon",
     "runner_sha": "runner1",
 }
 
@@ -42,7 +42,7 @@ def test_behavior_key_moves_on_any_real_behavior_input(field, value):
 
 def test_fingerprint_behavior_key_missing_field_is_a_bug_not_a_default():
     with pytest.raises(KeyError):
-        guard.fingerprint_behavior_key({"model": "gemma"})  # no config_version/runner_sha
+        guard.fingerprint_behavior_key({"model": "carbon"})  # no config_version/runner_sha
 
 
 def test_baseline_status_current_when_keys_match():

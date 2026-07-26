@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from runner.gemma_env import make_provider
+from runner.carbon_env import make_provider
 from runner.helpers import (
     absolute_paths_outside,
     arg_texts,

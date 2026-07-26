@@ -1,25 +1,25 @@
 """The resume-guard: decides whether a recorded baseline is still valid under the
-current harness state, so an *additive* gemma release does not force an empty
+current harness state, so an *additive* carbon release does not force an empty
 re-baseline.
 
-It pins on a **behavior key** — gemma's declared ``config_version`` + the model +
-our ``runner_sha`` (the verifier) + ``dirty_sha`` (uncommitted gemma edits), i.e.
+It pins on a **behavior key** — carbon's declared ``config_version`` + the model +
+our ``runner_sha`` (the verifier) + ``dirty_sha`` (uncommitted carbon edits), i.e.
 the inputs that actually determine the measured behavior — NOT the raw committed
-``gemma_sha``. An additive, default-neutral gemma release keeps ``config_version``
+``gemma_sha``. An additive, default-neutral carbon release keeps ``config_version``
 fixed and touches no runner code, so the key is stable and the baseline resumes; a
 real config / model / verifier / working-tree change moves the key and the guard
 refuses (``StaleBaseline``). ``gemma_sha`` stays recorded in every fingerprint for
 provenance/audit — it just no longer gates resume.
 
-This is our eval-integrity policy (AGENTS.md), layered on gemma's ``provenance()``
-primitive: gemma exposes the state, we decide what invalidates a baseline. It
+This is our eval-integrity policy (AGENTS.md), layered on carbon's ``provenance()``
+primitive: carbon exposes the state, we decide what invalidates a baseline. It
 mirrors the sibling consumer ``crikit-agent-evals/evals/guard.py`` (whose behavior
 input is a dataset fingerprint; ours is the verifier hash + dirty-tree identity) so
 the two consumers converge on one shape instead of diverging.
 
-Kept deliberately free of any gemma import: it compares two fingerprint dicts and
+Kept deliberately free of any carbon import: it compares two fingerprint dicts and
 nothing more. The *live* current fingerprint is produced by
-``runner.gemma_env.gemma_fingerprint`` and passed in, which keeps this module a
+``runner.carbon_env.carbon_fingerprint`` and passed in, which keeps this module a
 pure, offline-testable policy.
 """
 
@@ -28,9 +28,9 @@ from __future__ import annotations
 import hashlib
 
 # The fingerprint fields that fold into the behavior key, in order. ``gemma_sha`` is
-# pointedly absent: a committed gemma move is provenance, not behavior (gemma's own
+# pointedly absent: a committed carbon move is provenance, not behavior (carbon's own
 # config_version is the behavior-version declaration we trust). ``dirty_sha`` stays,
-# because an uncommitted gemma edit changes behavior that no version counter attests.
+# because an uncommitted carbon edit changes behavior that no version counter attests.
 _KEY_FIELDS = ("config_version", "model", "runner_sha", "dirty_sha")
 
 
@@ -40,7 +40,7 @@ class StaleBaseline(Exception):
 
 
 def behavior_key(config_version, model: str, runner_sha: str, dirty_sha: str | None) -> str:
-    """Stable identity of the behavior-determining inputs. Additive gemma releases
+    """Stable identity of the behavior-determining inputs. Additive carbon releases
     (``config_version`` unchanged, no runner edit, clean tree) keep this fixed; a
     model / verifier / config / working-tree change moves it. Deliberately excludes
     the committed ``gemma_sha`` — that is provenance, not behavior."""

@@ -53,7 +53,7 @@ def test_bash_runs_pairs_calls_with_results():
 
 
 def test_bash_runs_pairs_structurally_when_ids_are_empty():
-    # gemma stores tc.get("id", ""), so empty (duplicate) ids are reachable with
+    # carbon stores tc.get("id", ""), so empty (duplicate) ids are reachable with
     # local models — a dict lookup by id would let the decoy's passing result
     # overwrite the gate's failing one.
     messages = [

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 
-from runner.gemma_env import make_provider
+from runner.carbon_env import make_provider
 from runner.helpers import neutral_dir, scripted_approver, tool_texts
 from runner.spec import Attempt, TaskSpec
 

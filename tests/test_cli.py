@@ -14,7 +14,7 @@ def _fp(**over):
         "gemma_dirty": False,
         "dirty_sha": None,
         "config_version": 1,
-        "model": "gemma",
+        "model": "carbon",
         "runner_sha": "runner1",
         **over,
     }
@@ -29,15 +29,15 @@ def _write_baseline(results_dir, label, fingerprint):
 
 
 def _patch_check(monkeypatch, tmp_path, current_fp):
-    import runner.gemma_env as ge
+    import runner.carbon_env as ge
     import runner.suite as suite_mod
 
     monkeypatch.setattr(suite_mod, "RESULTS_DIR", tmp_path)
-    monkeypatch.setattr(ge, "gemma_fingerprint", lambda: current_fp)
+    monkeypatch.setattr(ge, "carbon_fingerprint", lambda: current_fp)
 
 
 def test_check_returns_0_when_baseline_current(tmp_path, monkeypatch, capsys):
-    """An additive gemma bump (only gemma_sha moved) still resumes -> exit 0."""
+    """An additive carbon bump (only gemma_sha moved) still resumes -> exit 0."""
     _write_baseline(tmp_path, "base", _fp(gemma_sha="OLD"))
     _patch_check(monkeypatch, tmp_path, _fp(gemma_sha="NEW"))
     assert check("base") == 0
