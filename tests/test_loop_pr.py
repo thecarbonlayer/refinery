@@ -3,6 +3,7 @@
 import json
 import shutil
 import subprocess
+from dataclasses import replace
 
 import pytest
 
@@ -20,12 +21,26 @@ def _bumped() -> int:
     return json.loads(REAL_CONFIG.read_text())["version"] + 1
 
 
+def _live(field: str):
+    """The value carbon's config carries right now.
+
+    Hardcoding `old` pinned these tests to one config exactly as hardcoding
+    `version` once did: a legal `max_tokens` candidate broke five tests that had
+    nothing to do with it. `max_tokens` is a knob the loop exists to tune.
+    """
+    return json.loads(REAL_CONFIG.read_text())[field]
+
+
+OLD_MT = _live("max_tokens")
+NEW_MT = OLD_MT * 2  # legal (positive int, no ceiling) and always distinct
+
+
 CANDIDATE = Candidate(
     id="cand-raise-output-budget",
     cluster_id="CL-1",
     proposer="Fable",
     proposer_detail="claude-fable-5, in-session",
-    fields={"max_tokens": {"old": 4096, "new": 8192}},
+    fields={"max_tokens": {"old": OLD_MT, "new": NEW_MT}},
     rationale="The response budget cuts a required long answer before its final receipt.",
     expected_effect="G1 recovers",
     regression_risk="higher token cost and latency",
@@ -35,7 +50,7 @@ CLUSTER = Cluster(
     id="CL-1",
     mechanism="completion budget cuts valid output",
     tasks=("G1",),
-    hypothesis="max_tokens=4096 ends the answer before the final receipt",
+    hypothesis="the response budget ends the answer before the final receipt",
     evidence=("reply: 'incident handoff ends before line 400'",),
 )
 
@@ -115,7 +130,7 @@ def test_provenance_uses_candidate_field():
 
 def test_commit_message_carries_evidence_and_trailer():
     msg = commit_message(CANDIDATE, RECORD, "iter-01")
-    assert "evolve(iter-01): max_tokens 4096 -> 8192 [CL-1]" in msg
+    assert f"evolve(iter-01): max_tokens {OLD_MT} -> {NEW_MT} [CL-1]" in msg
     assert "Δ_in=+0.1250" in msg and "Δ_ho=+0.2000" in msg
     assert "Fable-proposed, task-suite-validated" in msg
     assert msg.endswith("Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>")
@@ -124,11 +139,118 @@ def test_commit_message_carries_evidence_and_trailer():
 def test_pr_body_is_the_required_template():
     body = pr_body(CANDIDATE, RECORD, CLUSTER, BASELINE_RESULTS, CANDIDATE_RESULTS)
     assert "CL-1" in body and "completion budget" in body
-    assert "| `max_tokens` | `4096` | `8192` |" in body
+    assert f"| `max_tokens` | `{OLD_MT}` | `{NEW_MT}` |" in body
     assert "Δ_in = +0.1250, Δ_ho = +0.2000" in body and "ACCEPTED" in body
     assert "| A2 | held_in | 0.0000 | 1.0000 | +1.0000 |" in body  # per-task, not aggregate
     assert "**Fable-proposed, task-suite-validated**" in body
     assert "computed locally against LM Studio" in body  # disclosed limitation
+
+
+TELEMETRY_RECORD = replace(
+    RECORD,
+    baseline_metrics={"tokens": 1000.0, "cost": 0.42},
+    candidate_metrics={"tokens": 670.0},
+    metric_delta={"tokens": -330.0},
+    metric_not_compared=["cost"],
+    metric_task_counts={"tokens": {"baseline": 3, "candidate": 3}},
+    metric_attempt_counts={"tokens": {"baseline": 9, "candidate": 3}},
+    metric_denominator_drift=["tokens"],
+)
+
+
+def test_pr_body_renders_telemetry_with_its_denominators():
+    """The whole telemetry block was unreachable in tests: RECORD leaves
+    `metric_delta` empty, so the table rendered its `_not recorded_` placeholder and
+    six separate mutations to this rendering — including hardcoding "drift: none"
+    and swapping the baseline/candidate columns — all left the suite green.
+
+    A wrong number here is worse than a missing one, because a human votes on it.
+    """
+    body = pr_body(CANDIDATE, TELEMETRY_RECORD, CLUSTER, BASELINE_RESULTS, CANDIDATE_RESULTS)
+    # Column ORDER: baseline then candidate, so a swap is caught rather than read
+    # as an improvement of the same magnitude in the opposite direction.
+    assert "| `tokens` | 1000.0000 | 670.0000 | -330.0000 | 3 / **9→3** |" in body
+    # Identical task counts, a third of the attempts: the drift must be visible.
+    assert "Contributing-count drift: `tokens`." in body
+    assert "Not compared (measured on one side only, never imputed as zero): `cost`." in body
+    # The HEADER row, not the prose caption — the caption also contains
+    # "tasks / attempts", so a substring check passed even with the column deleted,
+    # leaving rows emitting five cells under four headers.
+    assert "| metric | baseline mean | candidate mean | Δ | tasks / attempts |" in body
+    row = next(line for line in body.splitlines() if line.startswith("| `tokens`"))
+    assert row.count("|") == 6, f"row has the wrong cell count: {row}"
+
+
+def test_pr_body_flags_a_one_sided_denominator():
+    """A count present on only ONE side — the candidate broke and reported none —
+    must render as drift, not as an uninformative `?`.
+
+    The `and` in `_denominator`'s None check is load-bearing: with `or`, this case
+    printed `?` and hid exactly the drift reported two lines below it.
+    """
+    one_sided = replace(
+        TELEMETRY_RECORD,
+        metric_task_counts={"tokens": {"baseline": 3, "candidate": None}},
+        metric_attempt_counts={"tokens": {"baseline": 9, "candidate": None}},
+    )
+    body = pr_body(CANDIDATE, one_sided, CLUSTER, BASELINE_RESULTS, CANDIDATE_RESULTS)
+    assert "**3→None**" in body and "**9→None**" in body
+
+
+def test_pr_body_never_claims_parity_for_an_unknown_denominator():
+    """With no counts at all the row renders `? / ?`; the prose must not then assert
+    that every metric covers the same task count on both sides."""
+    unknown = replace(TELEMETRY_RECORD, metric_task_counts={}, metric_attempt_counts={})
+    body = pr_body(
+        CANDIDATE,
+        replace(unknown, metric_denominator_drift=[]),
+        CLUSTER,
+        BASELINE_RESULTS,
+        CANDIDATE_RESULTS,
+    )
+    assert "? / ?" in body
+    assert "Contributing-count drift: denominator unknown for `tokens`." in body
+
+
+def test_pr_body_marks_a_clean_comparison_as_clean():
+    """The negative case: with matching denominators nothing may be bolded, or the
+    warning becomes noise a reviewer learns to skip."""
+    clean = replace(
+        TELEMETRY_RECORD,
+        candidate_metrics={"tokens": 670.0, "cost": 0.30},
+        metric_delta={"tokens": -330.0, "cost": -0.12},
+        metric_not_compared=[],
+        metric_task_counts={
+            "tokens": {"baseline": 3, "candidate": 3},
+            "cost": {"baseline": 3, "candidate": 3},
+        },
+        metric_attempt_counts={
+            "tokens": {"baseline": 9, "candidate": 9},
+            "cost": {"baseline": 9, "candidate": 9},
+        },
+        metric_denominator_drift=[],
+    )
+    body = pr_body(CANDIDATE, clean, CLUSTER, BASELINE_RESULTS, CANDIDATE_RESULTS)
+    assert "| `tokens` | 1000.0000 | 670.0000 | -330.0000 | 3 / 9 |" in body
+    assert "| `cost` | 0.4200 | 0.3000 | -0.1200 | 3 / 9 |" in body
+    # Only the metric ROWS — the caption legitimately contains "**bolded**".
+    rows = [line for line in body.splitlines() if line.startswith("| `")]
+    assert rows and not any("**" in line for line in rows), f"spurious drift markers: {rows}"
+    assert "Contributing-count drift: none — every metric covers the same counts" in body
+
+
+def test_validation_record_round_trips_every_telemetry_field():
+    """The serialized record is what lands in the committed iteration artifact.
+    Dropping a field there loses the evidence silently — no test read these before."""
+    payload = TELEMETRY_RECORD.to_json()
+    for key in (
+        "metric_delta",
+        "metric_not_compared",
+        "metric_task_counts",
+        "metric_attempt_counts",
+        "metric_denominator_drift",
+    ):
+        assert payload[key] == getattr(TELEMETRY_RECORD, key), f"{key} lost in as_dict()"
 
 
 def test_ensure_base_branch_creates_and_pushes(repos):
@@ -171,12 +293,12 @@ def test_open_pr_full_flow(repos):
     # the edit landed as ONE commit on the branch, pushed to origin
     assert _git(root, "ls-remote", "--heads", "origin", branch).strip()
     on_branch = json.loads(_git(root, "show", f"{branch}:harness/harness_config.json"))
-    assert on_branch["max_tokens"] == 8192 and on_branch["version"] == _bumped()
+    assert on_branch["max_tokens"] == NEW_MT and on_branch["version"] == _bumped()
     # checkout restored, tree clean, main untouched
     assert _git(root, "rev-parse", "--abbrev-ref", "HEAD").strip() == "main"
     assert not _git(root, "status", "--porcelain").strip()
     on_main = json.loads(_git(root, "show", "main:harness/harness_config.json"))
-    assert on_main["max_tokens"] == 4096
+    assert on_main["max_tokens"] == OLD_MT
 
 
 def test_open_pr_refuses_rejected(repos):

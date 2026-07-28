@@ -40,11 +40,9 @@ def known_knobs() -> dict[str, dict]:
     editor and the propose side read instead of hardcoding field names."""
     from carbon import surface_manifest
 
-    return {
-        field["name"]: field
-        for field in surface_manifest()["editable"]
-        if field.get("editable", True)
-    }
+    # carbon has already partitioned on `editable`; re-filtering here would be
+    # dead code that hides a shape change instead of failing on it.
+    return {field["name"]: field for field in surface_manifest()["editable"]}
 
 
 def immutable_invariants() -> dict[str, str]:
@@ -55,19 +53,23 @@ def immutable_invariants() -> dict[str, str]:
 
 
 def proposal_surface() -> dict:
-    """The complete proposer contract: selectable knobs and locked boundaries."""
+    """The complete proposer contract: selectable knobs and locked boundaries.
+
+    Reads the manifest exactly once, so every section describes the same carbon
+    state even if the file underneath is changing.
+    """
     from carbon import surface_manifest
 
     manifest = surface_manifest()
     return {
-        "editable": known_knobs(),
+        "editable": {field["name"]: field for field in manifest["editable"]},
         "locked_fields": {
             item["name"]: item.get("locked_reason")
             or item.get("deprecated")
             or "Managed by Carbon or the pipeline."
             for item in manifest["locked_fields"]
         },
-        "immutable": immutable_invariants(),
+        "immutable": {item["name"]: item["reason"] for item in manifest["immutable"]},
         "candidate_kinds": {
             "configuration_candidate": "Can be applied and evaluated automatically.",
             "strategy_surface_gap": "Needs a reviewed Carbon strategy implementation first.",

@@ -51,9 +51,12 @@ def fake_carbon(tmp_path) -> Path:
 def test_apply_changes_only_the_named_lines(fake_carbon):
     before = config_path(fake_carbon).read_text().splitlines()
     old = json.loads(config_path(fake_carbon).read_text())
-    new = apply_candidate(fake_carbon, make_candidate({"max_tokens": {"old": 4096, "new": 8192}}))
+    doubled = old["max_tokens"] * 2  # legal, distinct, and derived from disk
+    new = apply_candidate(
+        fake_carbon, make_candidate({"max_tokens": {"old": old["max_tokens"], "new": doubled}})
+    )
     after = config_path(fake_carbon).read_text().splitlines()
-    assert new["max_tokens"] == 8192
+    assert new["max_tokens"] == doubled
     assert new["version"] == old["version"] + 1
     changed = [i for i, (a, b) in enumerate(zip(before, after, strict=True)) if a != b]
     assert len(before) == len(after) and len(changed) == 2  # the knob + the version bump
@@ -100,6 +103,17 @@ def test_bounded_strategy_object_is_editable(fake_carbon):
     assert json.loads(config_path(fake_carbon).read_text())["tool_output"] == changed
 
 
+def test_proposal_surface_delegates_to_the_same_catalogues():
+    """The single-read refactor inlined ``known_knobs()`` and
+    ``immutable_invariants()``, so nothing pinned the two code paths together:
+    replacing the whole ``immutable`` section with ``{}`` — deleting the proposer's
+    entire do-not-propose safety list — left every test green."""
+    surface = proposal_surface()
+    assert surface["editable"] == known_knobs()
+    assert surface["immutable"] == immutable_invariants()
+    assert surface["immutable"], "the do-not-propose list must never be empty"
+
+
 def test_proposal_surface_explicitly_separates_locked_invariants():
     locked = immutable_invariants()
     assert "verification_integrity" in locked
@@ -133,27 +147,19 @@ def test_permission_boundary_field_is_not_editable(fake_carbon):
 def test_invalid_new_value_rejected_by_carbon_door(fake_carbon):
     """A non-positive count must be caught by carbon's own load_config before
     the file is written — the pipeline can never leave a config the harness
-    would refuse to load."""
+    would refuse to load.
+
+    ``old`` is read from disk, not spelled out: a hardcoded policy dict goes stale
+    on 29 of the 30 legal `tool_output` variants, and then this test fails on a
+    `stale` error instead of the `positive integer` one it exists to prove. The
+    sibling `test_bounded_strategy_object_is_editable` already reads from disk.
+    """
     before = config_path(fake_carbon).read_text()
+    live = json.loads(before)["tool_output"]
     with pytest.raises(ValueError, match="positive integer"):
         apply_candidate(
             fake_carbon,
-            make_candidate(
-                {
-                    "tool_output": {
-                        "old": {
-                            "strategy": "head_tail",
-                            "budget": 4000,
-                            "tail_fraction": 0.6,
-                        },
-                        "new": {
-                            "strategy": "head_tail",
-                            "budget": -1,
-                            "tail_fraction": 0.6,
-                        },
-                    }
-                }
-            ),
+            make_candidate({"tool_output": {"old": live, "new": {**live, "budget": -1}}}),
         )
     assert config_path(fake_carbon).read_text() == before
     assert not list(fake_carbon.glob("harness/*.candidate-check"))  # temp check file cleaned up

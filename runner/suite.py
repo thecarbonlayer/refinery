@@ -16,20 +16,50 @@ from runner.spec import TaskSpec
 RESULTS_DIR = Path(__file__).resolve().parents[1] / "results"
 
 
+def _collect(sources: list[dict]) -> dict[str, list[float]]:
+    """Group every reported metric value by name, skipping non-reporters.
+
+    A metric absent from a record is NOT a measured zero — a scripted-provider
+    task has no token or cost figure at all — so it must not enter that metric's
+    denominator.
+    """
+    values: dict[str, list[float]] = {}
+    for source in sources:
+        for name, value in (source.get("metrics") or {}).items():
+            values.setdefault(name, []).append(float(value))
+    return values
+
+
 def _mean_metrics(records: list[dict]) -> dict[str, float]:
-    names = sorted({name for record in records for name in record.get("metrics", {})})
-    return (
-        {
-            name: round(
-                sum(float(record.get("metrics", {}).get(name, 0)) for record in records)
-                / len(records),
-                6,
-            )
-            for name in names
-        }
-        if records
-        else {}
-    )
+    """Mean per metric over the attempts that actually reported it."""
+    return {
+        name: round(sum(vals) / len(vals), 6) for name, vals in sorted(_collect(records).items())
+    }
+
+
+def _counts(sources: list[dict]) -> dict[str, int]:
+    """How many sources contributed to each metric's mean.
+
+    Published at BOTH levels. A task with `attempts: 3` whose metric mean covers
+    only the one attempt that did not raise is otherwise read as a 3-attempt mean,
+    which is the same misreading the suite-level count exists to prevent.
+    """
+    return {name: len(vals) for name, vals in sorted(_collect(sources).items())}
+
+
+def _total_attempt_counts(tasks: list[dict]) -> dict[str, int]:
+    """Reporting ATTEMPTS per metric across the whole suite.
+
+    The task-level count cannot see attempt-level drift: three tasks reporting on
+    3/3 attempts and three reporting on 1/3 both publish "3 tasks", while the means
+    cover 9 attempts and 3. Without this, a candidate whose attempts start erroring
+    shows a large favourable cost delta beside "denominator drift: none".
+    """
+    totals: dict[str, int] = {}
+    for task in tasks:
+        for name, count in (task.get("metric_attempt_counts") or {}).items():
+            totals[name] = totals.get(name, 0) + count
+    return dict(sorted(totals.items()))
 
 
 def _prior_fingerprint(out_path: Path, jsonl_path: Path) -> dict | None:
@@ -119,26 +149,23 @@ def run_suite(
             "pass_fraction": round(tr.pass_fraction, 4),
             "outcomes": [r["outcome"] for r in tr.records],
             "metrics": _mean_metrics(tr.records),
+            "metric_attempt_counts": _counts(tr.records),
         }
-    # Build suite metrics from task aggregates. Each task has equal weight,
-    # matching split-rate aggregation and avoiding held-out's larger sample
-    # count dominating cost telemetry.
-    metric_names = sorted(
-        {name for task in results["tasks"].values() for name in task.get("metrics", {})}
-    )
+    # Build suite metrics from task aggregates. Each REPORTING task has equal
+    # weight, matching split-rate aggregation and avoiding held-out's larger
+    # sample count dominating cost telemetry. Tasks that cannot produce a metric
+    # are absent from its mean rather than averaged in as zeros, and the
+    # denominator is published so a mean over 20 of 23 tasks cannot be read as a
+    # mean over all of them.
+    # Same two helpers as the per-task level, so a mean and its published
+    # denominator can never be computed over different populations.
+    task_records = list(results["tasks"].values())
     results["summary"] = {
         "held_in_rate": round(split_rate(results, "held_in"), 4),
         "held_out_rate": round(split_rate(results, "held_out"), 4),
-        "metrics": {
-            name: round(
-                sum(task.get("metrics", {}).get(name, 0) for task in results["tasks"].values())
-                / len(results["tasks"]),
-                6,
-            )
-            for name in metric_names
-        }
-        if results["tasks"]
-        else {},
+        "metrics": _mean_metrics(task_records),
+        "metric_task_counts": _counts(task_records),
+        "metric_attempt_counts": _total_attempt_counts(task_records),
     }
     fd, tmp_name = tempfile.mkstemp(dir=results_dir, prefix=f".{label}.", suffix=".json.tmp")
     with os.fdopen(fd, "w") as f:

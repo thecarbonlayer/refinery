@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 
 from runner.carbon_env import make_provider
-from runner.helpers import neutral_dir, scripted_approver, tool_texts
+from runner.helpers import agent_metrics, neutral_dir, scripted_approver, tool_texts
 from runner.spec import Attempt, TaskSpec
 
 # Pinned ground truths (authoring-time oracles — never derived at run time).
@@ -23,6 +23,7 @@ D3_COUNT = 23
 
 def _calculator_agent():
     from harness.agent import DEFAULT_SYSTEM, Agent
+    from harness.observability import Tracer
     from harness.tools import Tool, ToolRegistry, calculator
 
     tools = ToolRegistry()
@@ -40,6 +41,7 @@ def _calculator_agent():
     )
     provider = make_provider()
     return Agent(
+        tracer=Tracer(model=provider.model),
         system=DEFAULT_SYSTEM,
         provider=provider,
         model=provider.model,
@@ -70,6 +72,7 @@ def run_d1() -> Attempt:
         outcome="pass" if (in_reply and in_tool) else "fail",
         detail=f"answer_in_reply={in_reply} answer_in_tool_result={in_tool} reply={reply!r}",
         turns=len(a.messages),
+        metrics=agent_metrics(a),
     )
 
 
@@ -85,6 +88,7 @@ def run_d2() -> Attempt:
         outcome="pass" if (in_reply and in_tool) else "fail",
         detail=f"answer_in_reply={in_reply} answer_in_tool_result={in_tool} reply={reply!r}",
         turns=len(a.messages),
+        metrics=agent_metrics(a),
     )
 
 
@@ -112,6 +116,7 @@ def _d3_body() -> str:
 
 def run_d3() -> Attempt:
     from harness.agent import APPROVAL_TOOLS, DEFAULT_SYSTEM, Agent
+    from harness.observability import Tracer
     from harness.sandbox import Sandbox, bash_tool
     from harness.tools import ToolRegistry, read_file_tool
     from harness.workspace import Workspace
@@ -124,6 +129,7 @@ def run_d3() -> Attempt:
     approvals: list[dict] = []
     provider = make_provider()
     a = Agent(
+        tracer=Tracer(model=provider.model),
         system=DEFAULT_SYSTEM,
         provider=provider,
         model=provider.model,
@@ -145,6 +151,7 @@ def run_d3() -> Attempt:
         detail=f"expected={D3_COUNT} last_int={_last_int(reply)!r} reply={reply!r}",
         approvals=approvals,
         turns=len(a.messages),
+        metrics=agent_metrics(a),
     )
 
 

@@ -133,27 +133,91 @@ def compacted(messages: list[dict]) -> bool:
     return any(str(m.get("content", "")).startswith("[summary") for m in messages)
 
 
-def agent_metrics(agent) -> dict[str, float]:
-    """Quality/cost telemetry used to compare knob candidates, never to grade truth."""
+# Every carbon name this telemetry reads, in two groups because they fail the
+# same way for different reasons: each attribute read is a getattr with a zero
+# default, and each totals() read is a dict .get with a zero default. Either kind
+# of rename in carbon silently zeroes a metric forever, and `tokens`/`cost` are
+# exactly what the PR body publishes as cost evidence. `test_helpers` pins both
+# groups against a real agent and a real Tracer, and also checks that these lists
+# still match the reads in `agent_metrics` — a hand-maintained list that drifts
+# from the function body protects nothing.
+AGENT_METRIC_ATTRS = (
+    "_stop_reason",
+    "_turn_model_calls",
+    "compaction_count",
+    "messages",
+    "retry_count",
+    "tracer",
+)
+TRACER_TOTAL_KEYS = ("cost", "llm_calls", "tokens", "tool_calls")
+# Registry-level tool failures ONLY, and the scope limit is wider than it looks.
+# carbon's ToolRegistry returns f"error: ..." (harness/tools.py), but three other
+# failure shapes do not and are invisible here:
+#   - a non-zero shell exit: f"[exit {code} via {backend}]\n..." (harness/sandbox.py)
+#   - a policy or approval refusal: "[denied: ...]", "[denied by approval gate]",
+#     which carbon tracks under a distinct status="denied" and cluster C drives
+#     deliberately
+#   - soft negatives: "no files match ...", "no matching memory found"
+# Deliberately not broadened: cluster B runs failing test commands on purpose and
+# cluster C provokes denials on purpose, so counting either would make this metric
+# mean something different per task. A known, enumerated limit — not an oversight.
+TOOL_ERROR_PREFIX = "error"
+
+
+def recording_tool(tool, sink: list[str]):
+    """A copy of ``tool`` whose RAW, untruncated result is appended to ``sink``.
+
+    A verifier that reads tool text out of ``agent.messages`` is reading text carbon
+    has already truncated with `tool_output` — an EDITABLE knob. For a containment
+    check that is a gaming path straight into the acceptance rule: a candidate can
+    raise the task's pass fraction by shrinking the budget until the evidence of a
+    real secret leak is cut away, and the aggregate rule rewards it. Measured on a
+    realistic 3.1 KB env dump with the sentinel at offset 1,144: recorded at
+    budget 4,000, absent at budget 2,000.
+
+    The leak happened either way. Grade the raw result, never the clamped one.
+    """
+    from dataclasses import replace as _dataclass_replace
+
+    inner = tool.func
+
+    def recording(*args, **kwargs):
+        result = inner(*args, **kwargs)
+        sink.append(str(result))
+        return result
+
+    return _dataclass_replace(tool, func=recording)
+
+
+def agent_metrics(agent, *, include_cost: bool = True) -> dict[str, float]:
+    """Quality/cost telemetry used to compare knob candidates, never to grade truth.
+
+    ``include_cost=False`` drops the token and cost fields for scripted-provider
+    tasks. A fault-injection provider reports no usage, so emitting 0.0 would
+    average into the suite mean as though the task had been measured and found
+    free, dragging the per-task cost mean toward zero.
+    """
     totals = agent.tracer.totals() if getattr(agent, "tracer", None) else {}
     messages = getattr(agent, "messages", [])
     tool_calls = sum(len(m.get("tool_calls") or []) for m in messages)
     tool_errors = sum(
         1
         for m in messages
-        if m.get("role") == "tool" and str(m.get("content", "")).startswith("error")
+        if m.get("role") == "tool" and str(m.get("content", "")).startswith(TOOL_ERROR_PREFIX)
     )
-    return {
+    metrics = {
         "llm_calls": float(totals.get("llm_calls", 0)),
         "model_attempts": float(getattr(agent, "_turn_model_calls", 0)),
         "tool_calls": float(totals.get("tool_calls", tool_calls)),
-        "tokens": float(totals.get("tokens", 0)),
-        "cost": float(totals.get("cost", 0)),
         "compactions": float(getattr(agent, "compaction_count", 0)),
         "tool_errors": float(tool_errors),
         "incomplete_responses": float(getattr(agent, "_stop_reason", "") == "incomplete_response"),
         "retries": float(getattr(agent, "retry_count", 0)),
     }
+    if include_cost:
+        metrics["tokens"] = float(totals.get("tokens", 0))
+        metrics["cost"] = float(totals.get("cost", 0))
+    return metrics
 
 
 # --- filesystem oracles -----------------------------------------------------------

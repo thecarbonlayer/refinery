@@ -86,14 +86,60 @@ def pr_body(
         ", ".join(f"`{name}` ({change:+.4f})" for name, change in record.regressions.items())
         or "none"
     )
+
+    # Every row carries its own denominator. A mean over 20 of 23 tasks and a mean
+    # over all 23 are different measurements, and a reader cannot tell them apart
+    # from the number alone.
+    def _denominator(name: str) -> str:
+        """Tasks/attempts behind a row, bolded when the two sides disagree.
+
+        Attempts matter as much as tasks: an erroring candidate keeps every task in
+        the population while its mean covers a fraction of the attempts.
+        """
+        cells = []
+        for counts in (record.metric_task_counts, record.metric_attempt_counts):
+            pair = counts.get(name) or {}
+            base, cand = pair.get("baseline"), pair.get("candidate")
+            if base is None and cand is None:
+                cells.append("?")
+            elif base == cand:
+                cells.append(str(base))
+            else:
+                cells.append(f"**{base}→{cand}**")
+        return " / ".join(cells)
+
     metric_rows = (
         "\n".join(
             f"| `{name}` | {record.baseline_metrics.get(name, 0):.4f} | "
-            f"{record.candidate_metrics.get(name, 0):.4f} | {change:+.4f} |"
+            f"{record.candidate_metrics.get(name, 0):.4f} | {change:+.4f} | "
+            f"{_denominator(name)} |"
             for name, change in record.metric_delta.items()
         )
-        or "| _not recorded_ | — | — | — |"
+        or "| _not recorded_ | — | — | — | — |"
     )
+    not_compared = (
+        ", ".join(f"`{name}`" for name in record.metric_not_compared)
+        or "none — both runs measured the same metrics"
+    )
+    # A metric with no entry in either count dict renders "? / ?". Claiming parity
+    # beside an unknown denominator would be a stronger statement than the data
+    # supports, so unknowns are named rather than folded into "none".
+    # EITHER count missing makes the denominator unknown — an `or` here left a metric
+    # with attempts but no task count unflagged, so the body claimed parity for a
+    # count it did not have. And unknowns are appended rather than shadowed by an
+    # `elif`: when some metric drifts, the ones with no denominator at all still
+    # deserve a caveat instead of an unexplained `? / ?`.
+    unknown = sorted(
+        name
+        for name in record.metric_delta
+        if not (record.metric_task_counts.get(name) and record.metric_attempt_counts.get(name))
+    )
+    parts = []
+    if record.metric_denominator_drift:
+        parts.append(", ".join(f"`{name}`" for name in record.metric_denominator_drift))
+    if unknown:
+        parts.append("denominator unknown for " + ", ".join(f"`{name}`" for name in unknown))
+    drift = "; ".join(parts) or "none — every metric covers the same counts on both sides"
     bf, cf = record.baseline_fingerprint, record.candidate_fingerprint
     return f"""## Failure cluster targeted
 
@@ -125,11 +171,22 @@ promotion veto even when the aggregate split rule passes.
 ### Efficiency and trajectory telemetry
 
 These values are diagnostic and do not override task correctness. Negative cost,
-token, call, error, and compaction deltas generally mean less work for the same score.
+token, call, error, and compaction deltas generally mean less work for the same score —
+but only where the denominator matches. Each mean covers only the tasks that reported
+that metric (scripted fault-injection diagnostics have no token or cost figure), so the
+contributing count is given per row as `tasks / attempts`; a **bolded, differing**
+count means the two means cover different populations and the Δ is NOT like-for-like.
+Attempts matter as much as tasks — a candidate whose attempts start erroring keeps
+every task in the population while its mean covers a fraction of the samples.
 
-| metric | baseline mean | candidate mean | Δ |
-|---|---:|---:|---:|
+| metric | baseline mean | candidate mean | Δ | tasks / attempts |
+|---|---:|---:|---:|---:|
 {metric_rows}
+
+Not compared (measured on one side only, never imputed as zero): {not_compared}.
+Contributing-count drift: {drift}. Note the suite mean weights each reporting TASK
+equally, so an identical `tasks / attempts` pair can still hide attempts moving
+between tasks; the pair bounds the population, it does not describe the weighting.
 
 Baseline fingerprint: `{bf.get("gemma_sha", "")[:12]}` (config v{bf.get("config_version")}, \
 model {bf.get("model")}).

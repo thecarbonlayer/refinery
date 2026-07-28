@@ -108,10 +108,12 @@ def run_g3() -> Attempt:
     worker_tools = ToolRegistry()
     worker_tools.register(read_file_tool(str(ws.root)))
     tools = ToolRegistry()
-    # Desired contract: the parent can bind the worker's tools to the same
-    # workspace. Current carbon lacks this delegate_tool(tools=...) seam, so the
-    # baseline records an error. Once the seam exists, the exact same task
-    # proves that the worker reads the intended snapshot.
+    # The parent binds the worker's tools to its own workspace through
+    # delegate_tool(tools=...). That is a CODE seam in carbon (harness/subagents.py),
+    # not part of the editable config surface — refinery measures it but cannot tune
+    # it, which is the whole grader/graded distinction. The seam exists today, so the
+    # prior is `pass` and this task proves the worker reads the intended snapshot
+    # rather than a fresh, empty workspace of its own.
     tools.register(delegate_tool(model=provider.model, tools=worker_tools))
     a = _plain_agent(tools=tools)
     reply = a.send(
@@ -133,7 +135,7 @@ def run_g3() -> Attempt:
 
 
 SPECS = [
-    TaskSpec("G1", "held_in", "G", "pass", run_g1),
+    TaskSpec("G1", "held_in", "G", "uncertain", run_g1),
     TaskSpec("G2", "held_out", "G", "uncertain", run_g2),
     TaskSpec("G3", "held_in", "G", "pass", run_g3),
 ]

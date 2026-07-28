@@ -1,20 +1,166 @@
+import inspect
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
 
 from runner.helpers import (
+    AGENT_METRIC_ATTRS,
+    TRACER_TOTAL_KEYS,
     absolute_paths_outside,
+    agent_metrics,
     bash_runs,
     environ_guard,
     exit_code_of,
     file_sha256,
+    neutral_dir,
     scripted_approver,
     snapshot_tree,
     tool_texts,
     tree_changes,
 )
+
+
+def _probe_agent():
+    from harness.agent import Agent
+    from harness.observability import Tracer
+    from model import Provider
+
+    provider = Provider("fake://attrs", "attr-probe", responder=lambda messages, **kw: None)
+    return Agent(
+        provider=provider,
+        model=provider.model,
+        agents_dir=neutral_dir(),
+        tracer=Tracer(model=provider.model),
+    )
+
+
+def test_agent_metric_attrs_still_exist_on_a_real_carbon_agent():
+    """Each attribute read in ``agent_metrics`` is a getattr with a zero default,
+    so a rename inside carbon would silently zero that metric forever and no
+    baseline would look wrong. Pin the names against a real agent instead."""
+    agent = _probe_agent()
+    missing = [attr for attr in AGENT_METRIC_ATTRS if not hasattr(agent, attr)]
+    assert not missing, f"carbon no longer exposes {missing} — agent_metrics would report 0"
+
+
+def test_tracer_total_keys_still_exist_on_a_real_tracer():
+    """The other half of the same hole, and the more expensive half: `tokens` and
+    `cost` are read out of ``Tracer.totals()`` with a zero default and are exactly
+    what the PR body publishes as cost evidence. A key rename there is every bit
+    as silent as an attribute rename."""
+    from harness.observability import Tracer
+
+    totals = Tracer(model="attr-probe").totals()
+    missing = [key for key in TRACER_TOTAL_KEYS if key not in totals]
+    assert not missing, f"carbon's Tracer.totals() no longer reports {missing}"
+
+
+def test_metric_name_lists_match_the_reads_in_agent_metrics():
+    """A hand-maintained pin list that drifts from the function body protects
+    nothing: renaming a read without touching the list leaves both green. Tie them
+    together by reading the source of the function under test."""
+    source = inspect.getsource(agent_metrics)
+    attrs = set(re.findall(r"getattr\(agent, \"([^\"]+)\"", source))
+    attrs |= set(re.findall(r"getattr\(agent, \"([^\"]+)\", None\)", source))
+    totals_keys = set(re.findall(r"totals\.get\(\"([^\"]+)\"", source))
+    assert attrs == set(AGENT_METRIC_ATTRS), (
+        f"AGENT_METRIC_ATTRS is stale: source reads {sorted(attrs)}"
+    )
+    assert totals_keys == set(TRACER_TOTAL_KEYS), (
+        f"TRACER_TOTAL_KEYS is stale: source reads {sorted(totals_keys)}"
+    )
+
+
+class _FakeAgent:
+    """Stand-in for carbon's Agent, for VALUE-level assertions.
+
+    The attribute names are pinned against a real agent above; what was untested was
+    what `agent_metrics` computes from them. Four of nine fields survived mutation:
+    the `role == "tool"` check, the error prefix, the `tool_calls` fallback, and the
+    incomplete-response comparison could all be inverted or deleted with 154 tests
+    still green — and these are the numbers the PR body publishes as evidence.
+    """
+
+    def __init__(self, **overrides):
+        self.tracer = None
+        self.messages = []
+        self._turn_model_calls = 0
+        self._stop_reason = "stop"
+        self.compaction_count = 0
+        self.retry_count = 0
+        self.__dict__.update(overrides)
+
+
+def test_agent_metrics_counts_only_tool_role_errors_and_falls_back_for_calls():
+    agent = _FakeAgent(
+        messages=[
+            {"role": "assistant", "tool_calls": [{"id": "1"}, {"id": "2"}]},
+            {"role": "tool", "content": "error: no such file: x"},
+            {"role": "tool", "content": "ok, 3 rows"},
+            # An assistant message that merely starts with the word must NOT count.
+            {"role": "user", "content": "error: this is not a tool result"},
+        ]
+    )
+    recorded = agent_metrics(agent, include_cost=False)
+    assert recorded["tool_errors"] == 1.0
+    assert recorded["tool_calls"] == 2.0  # no tracer totals -> counts the messages
+
+
+def test_agent_metrics_reads_each_tracer_total_into_the_right_field():
+    """No test ever handed ``agent_metrics`` a tracer with NON-ZERO totals.
+
+    So swapping the `tokens` and `cost` reads left every test green — `0.0 == 0.0` on
+    both sides — and those are the two numbers the PR body publishes as cost evidence
+    for a human vote. The key-set tests cannot see a value swap; only distinct values
+    can. Same class as the defect the `_FakeAgent` tests were added to close, in the
+    same function.
+    """
+
+    class _StubTracer:
+        def totals(self):
+            return {"llm_calls": 2, "tool_calls": 5, "tokens": 4567, "cost": 1.23, "seconds": 9.9}
+
+    recorded = agent_metrics(_FakeAgent(tracer=_StubTracer()))
+    assert recorded["tokens"] == 4567.0
+    assert recorded["cost"] == 1.23
+    assert recorded["llm_calls"] == 2.0
+    assert recorded["tool_calls"] == 5.0  # tracer totals win over the message fallback
+
+
+def test_agent_metrics_flags_only_an_incomplete_stop_reason():
+    assert (
+        agent_metrics(_FakeAgent(_stop_reason="incomplete_response"))["incomplete_responses"] == 1
+    )
+    for reason in ("stop", "tool_budget", ""):
+        assert agent_metrics(_FakeAgent(_stop_reason=reason))["incomplete_responses"] == 0.0
+
+
+def test_agent_metrics_reports_plain_attribute_counters():
+    recorded = agent_metrics(_FakeAgent(compaction_count=3, retry_count=2, _turn_model_calls=7))
+    assert recorded["compactions"] == 3.0
+    assert recorded["retries"] == 2.0
+    assert recorded["model_attempts"] == 7.0
+
+
+def test_agent_metrics_omits_only_cost_fields_when_asked():
+    """Assert both key sets explicitly. Defining the expectation in terms of the
+    full set makes any SYMMETRIC change pass — deleting a metric from both sides
+    would go unnoticed."""
+    agent = _probe_agent()
+    mechanism = {
+        "llm_calls",
+        "model_attempts",
+        "tool_calls",
+        "compactions",
+        "tool_errors",
+        "incomplete_responses",
+        "retries",
+    }
+    assert set(agent_metrics(agent)) == mechanism | {"tokens", "cost"}
+    assert set(agent_metrics(agent, include_cost=False)) == mechanism
 
 
 def _bash_call(call_id: str, command: str) -> dict:

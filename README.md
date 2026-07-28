@@ -98,9 +98,11 @@ policy improvement is a `strategy_surface_gap`; a broken invariant is a
 - runner/{run,suite}.py — attempt/suite drivers; runner/delta.py — Δ + rule
 - runner/helpers.py — approve-and-log approver, environ guard,
   transcript/hash utilities
-- runner/knob_coverage.py — miner/guard coverage required for every editable knob
 - results/ — committed measurement artifacts
 - loop/ — the validate→branch→PR pipeline (imports runner.suite / runner.delta)
+- loop/knob_coverage.py — which tasks can observe each editable knob, and in what
+  role. Governance metadata, deliberately outside runner/ so correcting a row does
+  not change runner_sha and invalidate every recorded baseline
 - iterations/ — per-iteration artifacts: mining notes, clusters, candidates,
   validation records (rejected candidates included — they are the honest bulk)
 

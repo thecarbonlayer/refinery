@@ -189,8 +189,8 @@ def run_a4() -> Attempt:
 
 
 SPECS = [
-    TaskSpec("A1", "held_in", "A", "fail", run_a1),
-    TaskSpec("A2", "held_in", "A", "fail", run_a2),
+    TaskSpec("A1", "held_in", "A", "pass", run_a1),
+    TaskSpec("A2", "held_in", "A", "pass", run_a2),
     TaskSpec("A3", "held_out", "A", "uncertain", run_a3),
     TaskSpec("A4", "held_out", "A", "uncertain", run_a4),
 ]

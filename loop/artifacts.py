@@ -144,6 +144,13 @@ class ValidationRecord:
     baseline_metrics: dict[str, float] = field(default_factory=dict)
     candidate_metrics: dict[str, float] = field(default_factory=dict)
     metric_delta: dict[str, float] = field(default_factory=dict)
+    # Metrics one side did not measure, and metrics whose contributing-task count
+    # differs between the two runs. Both make a mean unsafe to read as a
+    # like-for-like comparison, so neither may be silently dropped.
+    metric_not_compared: list[str] = field(default_factory=list)
+    metric_task_counts: dict[str, dict] = field(default_factory=dict)
+    metric_attempt_counts: dict[str, dict] = field(default_factory=dict)
+    metric_denominator_drift: list[str] = field(default_factory=list)
     baseline_fingerprint: dict = field(default_factory=dict)
     candidate_fingerprint: dict = field(default_factory=dict)
 
@@ -161,6 +168,10 @@ class ValidationRecord:
             "baseline_metrics": self.baseline_metrics,
             "candidate_metrics": self.candidate_metrics,
             "metric_delta": self.metric_delta,
+            "metric_not_compared": self.metric_not_compared,
+            "metric_task_counts": self.metric_task_counts,
+            "metric_attempt_counts": self.metric_attempt_counts,
+            "metric_denominator_drift": self.metric_denominator_drift,
             "baseline_fingerprint": self.baseline_fingerprint,
             "candidate_fingerprint": self.candidate_fingerprint,
         }

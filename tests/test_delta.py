@@ -55,6 +55,94 @@ def test_acceptance_rule():
     assert acceptance(-0.1, 0.2)["accepted"] is False  # no held-in regression
 
 
+def test_delta_never_imputes_an_unmeasured_metric_as_zero():
+    """A metric absent on one side is NOT a measured zero.
+
+    Subtracting against a default of 0 turned "not measured" into the most
+    favourable number available — a large negative cost delta — rendered in the PR
+    body under prose saying negative means less work for the same score.
+    """
+    baseline = _results({"A1": ("held_in", 0.0), "B1": ("held_out", 0.0)})
+    candidate = _results({"A1": ("held_in", 1.0), "B1": ("held_out", 1.0)})
+    baseline["summary"]["metrics"] = {"tokens": 1000.0, "cost": 0.42}
+    candidate["summary"]["metrics"] = {"tokens": 800.0}  # cost not measured at all
+    d = delta(baseline, candidate)
+    assert d["metric_delta"] == {"tokens": -200.0}
+    assert d["metric_not_compared"] == ["cost"]
+
+
+def test_delta_reports_a_candidate_only_metric_as_not_compared():
+    """The symmetric difference is load-bearing, and only one direction was tested.
+
+    With `set(base) - set(cand)`, a metric only the CANDIDATE measured vanished from
+    `metric_not_compared` while still being excluded from the intersection-based
+    `metric_delta` — so the PR body claimed both runs measured the same metrics over
+    a comparison that silently omitted one.
+    """
+    baseline = _results({"A1": ("held_in", 0.0), "B1": ("held_out", 0.0)})
+    candidate = _results({"A1": ("held_in", 1.0), "B1": ("held_out", 1.0)})
+    baseline["summary"]["metrics"] = {"tokens": 1000.0}
+    candidate["summary"]["metrics"] = {"tokens": 800.0, "retries": 2.0}
+    d = delta(baseline, candidate)
+    assert d["metric_delta"] == {"tokens": -200.0}
+    assert d["metric_not_compared"] == ["retries"]
+
+
+def test_metric_drift_never_moves_acceptance():
+    """AGENTS.md: metrics "expose tradeoffs but never override correctness".
+
+    Nothing enforced it — swapping `catastrophic_regressions` for
+    `metric_denominator_drift` in the accept expression left every test green, which
+    would quietly promote a diagnostic to a gate.
+    """
+    baseline = _results({"A1": ("held_in", 0.0), "B1": ("held_out", 0.0)})
+    candidate = _results({"A1": ("held_in", 1.0), "B1": ("held_out", 1.0)})
+    baseline["summary"] |= {"metrics": {"tokens": 10.0}, "metric_task_counts": {"tokens": 9}}
+    candidate["summary"] |= {"metrics": {"tokens": 10.0}, "metric_task_counts": {"tokens": 1}}
+    d = delta(baseline, candidate)
+    assert d["metric_denominator_drift"] == ["tokens"]  # heavy drift...
+    assert d["accepted"] is True  # ...and a clean gain is still accepted
+
+
+def test_delta_surfaces_attempt_level_denominator_drift():
+    """The case task counts cannot see, and the commonest one.
+
+    A candidate whose attempts start ERRORING keeps every task in the population —
+    identical task counts — while each mean covers a third as many attempts. That
+    rendered a large favourable cost delta beside "denominator drift: none".
+    """
+    baseline = _results({"A1": ("held_in", 1.0), "B1": ("held_out", 1.0)})
+    candidate = _results({"A1": ("held_in", 1.0), "B1": ("held_out", 1.0)})
+    baseline["summary"] |= {
+        "metrics": {"tokens": 1000.0},
+        "metric_task_counts": {"tokens": 2},
+        "metric_attempt_counts": {"tokens": 6},
+    }
+    candidate["summary"] |= {
+        "metrics": {"tokens": 670.0},
+        "metric_task_counts": {"tokens": 2},  # same tasks...
+        "metric_attempt_counts": {"tokens": 2},  # ...a third of the attempts
+    }
+    d = delta(baseline, candidate)
+    assert d["metric_task_counts"]["tokens"] == {"baseline": 2, "candidate": 2}
+    assert d["metric_denominator_drift"] == ["tokens"], "attempt-level drift went unreported"
+    assert d["metric_attempt_counts"]["tokens"] == {"baseline": 6, "candidate": 2}
+
+
+def test_delta_surfaces_metric_denominator_drift():
+    """Two sides can report the SAME mean over different populations: an attempt
+    that raises records ``metrics={}``, so a task the candidate breaks drops out of
+    the mean entirely. Diagnostic only, but it must never be invisible."""
+    baseline = _results({"A1": ("held_in", 1.0), "B1": ("held_out", 1.0)})
+    candidate = _results({"A1": ("held_in", 1.0), "B1": ("held_out", 1.0)})
+    baseline["summary"] |= {"metrics": {"tokens": 100.0}, "metric_task_counts": {"tokens": 3}}
+    candidate["summary"] |= {"metrics": {"tokens": 100.0}, "metric_task_counts": {"tokens": 2}}
+    d = delta(baseline, candidate)
+    assert d["metric_delta"] == {"tokens": 0.0}  # identical means...
+    assert d["metric_denominator_drift"] == ["tokens"]  # ...over different task counts
+    assert d["metric_task_counts"]["tokens"] == {"baseline": 3, "candidate": 2}
+
+
 def test_delta_vetoes_full_pass_to_zero_pass_hidden_by_split_average():
     """Iteration 1's real blind spot: one held-in task gains 0->1 while a
     different held-in task collapses 1->0, so aggregate Δ_in stays zero."""
@@ -99,6 +187,26 @@ def test_delta_reports_smaller_regression_without_hard_veto():
     assert d["regressions"] == {"noisy": -(1 / 3)}
     assert d["catastrophic_regressions"] == {}
     assert d["accepted"] is True
+
+
+def test_catastrophic_veto_needs_both_a_full_baseline_and_a_zero_candidate():
+    """Pin each conjunct SEPARATELY.
+
+    Mutating either one alone left the suite green, because the other still held:
+    `== 1.0` → `> 0.0` needs the candidate to be exactly 0.0 to fire, and `== 0.0` →
+    `< 1.0` needs the baseline to be exactly 1.0. Together they promote every negative
+    per-task movement to a hard veto — the sampling-noise sensitivity `delta.py`'s own
+    comment says was deliberately rejected.
+    """
+    for label, base, cand in (
+        ("full baseline, partial drop", 1.0, 0.5),
+        ("partial to zero", 0.5, 0.0),
+    ):
+        baseline = _results({"gain": ("held_in", 0.0), "drop": ("held_out", base)})
+        candidate = _results({"gain": ("held_in", 1.0), "drop": ("held_out", cand)})
+        d = delta(baseline, candidate)
+        assert d["catastrophic_regressions"] == {}, f"{label} wrongly vetoed"
+        assert d["regressions"], f"{label} should still be a visible warning"
 
 
 def test_delta_refuses_mismatched_task_sets():

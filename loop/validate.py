@@ -92,6 +92,10 @@ def validate_candidate(
         baseline_metrics=d["baseline_metrics"],
         candidate_metrics=d["candidate_metrics"],
         metric_delta=d["metric_delta"],
+        metric_not_compared=d["metric_not_compared"],
+        metric_task_counts=d["metric_task_counts"],
+        metric_attempt_counts=d["metric_attempt_counts"],
+        metric_denominator_drift=d["metric_denominator_drift"],
         baseline_fingerprint=d["baseline_fingerprint"],
         candidate_fingerprint=d["candidate_fingerprint"],
     )
