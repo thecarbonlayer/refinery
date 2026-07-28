@@ -31,13 +31,18 @@ def _fp(**over):
 FP = _fp()
 
 
-def _spec(name="A1", split="held_in", passed=True):
+def _spec(name="A1", split="held_in", passed=True, metrics=None):
     return TaskSpec(
         name=name,
         split=split,
         cluster="A",
         expected_baseline="pass",
-        run=lambda: Attempt(passed, "pass" if passed else "fail", "detail"),
+        run=lambda: Attempt(
+            passed,
+            "pass" if passed else "fail",
+            "detail",
+            metrics=metrics or {},
+        ),
     )
 
 
@@ -137,6 +142,138 @@ def test_resume_accepts_matching_fingerprint(tmp_path):
     tr = run_task(_spec(), FP, jsonl, log=lambda *a: None)
     assert len(tr.records) == 3  # 1 resumed + 2 fresh
     assert tr.pass_fraction == 1.0
+
+
+def test_attempt_metrics_are_persisted(tmp_path):
+    jsonl = tmp_path / "metrics.jsonl"
+    tr = run_task(
+        _spec(metrics={"tokens": 123.0, "tool_calls": 4.0}),
+        FP,
+        jsonl,
+        attempts=1,
+        log=lambda *a: None,
+    )
+    assert tr.records[0]["metrics"] == {"tokens": 123.0, "tool_calls": 4.0}
+    assert json.loads(jsonl.read_text())["metrics"]["tokens"] == 123.0
+
+
+def test_suite_aggregates_task_equal_weight_metrics(tmp_path):
+    results = run_suite(
+        [
+            _spec(name="A1", metrics={"tokens": 100.0}),
+            _spec(name="B1", metrics={"tokens": 300.0}),
+        ],
+        label="metrics",
+        attempts=1,
+        fingerprint=FP,
+        results_dir=tmp_path,
+        log=lambda *a: None,
+    )
+    assert results["tasks"]["A1"]["metrics"]["tokens"] == 100.0
+    assert results["summary"]["metrics"]["tokens"] == 200.0
+
+
+def test_task_metric_mean_covers_only_reporting_attempts(tmp_path):
+    """Every other metrics test uses ``attempts=1``, where zero-filling and
+    skip-absent coincide — so the attempt-level denominator was never exercised.
+
+    ``run.py`` records ``metrics={}`` for an attempt that raises, so a task with one
+    good attempt out of three must report the ONE-attempt mean and publish that
+    count. Otherwise a reader sees ``attempts: 3`` beside a 1-attempt figure and
+    reads it as a 3-attempt mean.
+    """
+    calls = {"n": 0}
+
+    def run():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return Attempt(True, "pass", "ok", metrics={"tokens": 900.0})
+        return Attempt(False, "error", "boom", metrics={})
+
+    spec = TaskSpec(name="A1", split="held_in", cluster="A", expected_baseline="pass", run=run)
+    results = run_suite(
+        [spec],
+        label="attempts",
+        attempts=3,
+        fingerprint=FP,
+        results_dir=tmp_path,
+        log=lambda *a: None,
+    )
+    task = results["tasks"]["A1"]
+    assert task["attempts"] == 3
+    assert task["metrics"]["tokens"] == 900.0  # not 300.0
+    assert task["metric_attempt_counts"] == {"tokens": 1}
+
+
+def test_suite_to_delta_carries_attempt_drift_end_to_end(tmp_path):
+    """The only test that runs run_suite -> delta with REAL summaries.
+
+    Every other attempt-level test hand-builds the summary dict, so
+    `_total_attempt_counts` could return `{}` — or `max()` instead of a sum — and
+    the whole attempt-level feature would be silently dead while 154 tests passed.
+    This is the seam: the suite writes the counts, delta reads them.
+    """
+    from runner.delta import delta
+
+    def flaky(good_attempts: int):
+        calls = {"n": 0}
+
+        def run():
+            calls["n"] += 1
+            if calls["n"] <= good_attempts:
+                return Attempt(True, "pass", "ok", metrics={"tokens": 900.0})
+            return Attempt(False, "error", "boom", metrics={})
+
+        return run
+
+    def suite(label, good):
+        return run_suite(
+            [
+                TaskSpec("A1", "held_in", "A", "pass", flaky(good)),
+                TaskSpec("B1", "held_in", "B", "pass", flaky(good)),
+            ],
+            label=label,
+            attempts=3,
+            fingerprint=FP,
+            results_dir=tmp_path,
+            log=lambda *a: None,
+        )
+
+    base = suite("base", good=3)  # 2 tasks x 3 reporting attempts
+    cand = suite("cand", good=1)  # 2 tasks x 1 reporting attempt
+    assert base["summary"]["metric_attempt_counts"] == {"tokens": 6}
+    assert cand["summary"]["metric_attempt_counts"] == {"tokens": 2}
+    d = delta(base, cand)
+    # Same task count on both sides, so ONLY the attempt counts reveal the change.
+    assert d["metric_task_counts"]["tokens"] == {"baseline": 2, "candidate": 2}
+    assert d["metric_attempt_counts"]["tokens"] == {"baseline": 6, "candidate": 2}
+    assert d["metric_denominator_drift"] == ["tokens"]
+
+
+def test_suite_metric_mean_excludes_tasks_that_cannot_report(tmp_path):
+    """A task with no cost telemetry must be ABSENT from that metric's mean, not
+    averaged in as a measured zero.
+
+    Both tasks carrying every metric is the easy case; this is the one that was
+    wrong. Scripted-provider diagnostics report no tokens at all, so counting
+    them as zeros silently deflated suite-wide cost as the suite grew. The
+    contributing-task count is published so a mean over some tasks cannot be
+    read as a mean over all of them.
+    """
+    results = run_suite(
+        [
+            _spec(name="A1", metrics={"tokens": 100.0, "retries": 1.0}),
+            _spec(name="B1", metrics={"retries": 3.0}),  # no cost telemetry at all
+        ],
+        label="sparse",
+        attempts=1,
+        fingerprint=FP,
+        results_dir=tmp_path,
+        log=lambda *a: None,
+    )
+    assert results["summary"]["metrics"]["tokens"] == 100.0  # over 1 task, not 50.0 over 2
+    assert results["summary"]["metrics"]["retries"] == 2.0
+    assert results["summary"]["metric_task_counts"] == {"retries": 2, "tokens": 1}
 
 
 def test_load_done_tolerates_malformed_final_line(tmp_path):

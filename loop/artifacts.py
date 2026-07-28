@@ -42,6 +42,7 @@ class Candidate:
     rationale: str
     expected_effect: str
     regression_risk: str
+    kind: str = "configuration_candidate"
 
 
 def _require(cond: bool, msg: str) -> None:
@@ -87,6 +88,12 @@ def load_candidates(path: str | Path) -> list[Candidate]:
         ):
             _require(key in c, f"candidate #{i} missing key {key!r}")
         _require(bool(c["fields"]), f"candidate {c['id']!r} changes no fields")
+        kind = c.get("kind", "configuration_candidate")
+        _require(
+            kind == "configuration_candidate",
+            f"candidate {c['id']!r} has kind {kind!r}; only configuration_candidate "
+            "artifacts are executable (record strategy gaps and correctness defects as clusters)",
+        )
         for name, diff in c["fields"].items():
             _require(
                 name not in FORBIDDEN_FIELDS,
@@ -110,6 +117,7 @@ def load_candidates(path: str | Path) -> list[Candidate]:
                 rationale=c["rationale"],
                 expected_effect=c["expected_effect"],
                 regression_risk=c["regression_risk"],
+                kind=kind,
             )
         )
     _require(len({c.id for c in cands}) == len(cands), "duplicate candidate ids")
@@ -130,6 +138,19 @@ class ValidationRecord:
     delta_in: float
     delta_ho: float
     per_task: dict[str, float] = field(default_factory=dict)
+    aggregate_accepted: bool | None = None
+    regressions: dict[str, float] = field(default_factory=dict)
+    catastrophic_regressions: dict[str, float] = field(default_factory=dict)
+    baseline_metrics: dict[str, float] = field(default_factory=dict)
+    candidate_metrics: dict[str, float] = field(default_factory=dict)
+    metric_delta: dict[str, float] = field(default_factory=dict)
+    # Metrics one side did not measure, and metrics whose contributing-task count
+    # differs between the two runs. Both make a mean unsafe to read as a
+    # like-for-like comparison, so neither may be silently dropped.
+    metric_not_compared: list[str] = field(default_factory=list)
+    metric_task_counts: dict[str, dict] = field(default_factory=dict)
+    metric_attempt_counts: dict[str, dict] = field(default_factory=dict)
+    metric_denominator_drift: list[str] = field(default_factory=list)
     baseline_fingerprint: dict = field(default_factory=dict)
     candidate_fingerprint: dict = field(default_factory=dict)
 
@@ -141,6 +162,16 @@ class ValidationRecord:
             "delta_in": self.delta_in,
             "delta_ho": self.delta_ho,
             "per_task": self.per_task,
+            "aggregate_accepted": self.aggregate_accepted,
+            "regressions": self.regressions,
+            "catastrophic_regressions": self.catastrophic_regressions,
+            "baseline_metrics": self.baseline_metrics,
+            "candidate_metrics": self.candidate_metrics,
+            "metric_delta": self.metric_delta,
+            "metric_not_compared": self.metric_not_compared,
+            "metric_task_counts": self.metric_task_counts,
+            "metric_attempt_counts": self.metric_attempt_counts,
+            "metric_denominator_drift": self.metric_denominator_drift,
             "baseline_fingerprint": self.baseline_fingerprint,
             "candidate_fingerprint": self.candidate_fingerprint,
         }

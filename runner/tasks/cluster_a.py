@@ -13,7 +13,7 @@ from pathlib import Path
 from tempfile import mkdtemp
 
 from runner.carbon_env import make_provider
-from runner.helpers import compacted, neutral_dir
+from runner.helpers import agent_metrics, compacted, neutral_dir
 from runner.spec import Attempt, TaskSpec
 
 A1_SENTINEL = "TUESDAY-KEY-9X"
@@ -33,8 +33,10 @@ AUTHORED_CLAMP = 4000
 
 def _plain_agent(**kwargs):
     from harness.agent import DEFAULT_SYSTEM, Agent
+    from harness.observability import Tracer
 
     provider = make_provider()
+    kwargs.setdefault("tracer", Tracer(model=provider.model))
     return Agent(
         system=DEFAULT_SYSTEM,
         provider=provider,
@@ -76,6 +78,7 @@ def run_a1() -> Attempt:
             f"compaction never fired after {A1_MAX_FILLER_TURNS} filler turns "
             f"(last_tokens={a._last_tokens})",
             turns=len(a.messages),
+            metrics=agent_metrics(a),
         )
     reply = a.send("What is the deploy key rotation schedule? Reply with the exact key phrase.")
     is_compacted = compacted(a.messages)
@@ -86,6 +89,7 @@ def run_a1() -> Attempt:
         outcome="pass" if ok else "fail",
         detail=f"compacted={is_compacted} sentinel_recalled={recalled} reply={reply!r}",
         turns=len(a.messages),
+        metrics=agent_metrics(a),
     )
 
 
@@ -125,6 +129,7 @@ def run_a2() -> Attempt:
         outcome="pass" if ok else "fail",
         detail=f"needle_in_reply={ok} tool_called={called} reply={reply!r}",
         turns=len(a.messages),
+        metrics=agent_metrics(a),
     )
 
 
@@ -155,6 +160,7 @@ def run_a3() -> Attempt:
         outcome="pass" if ok else "fail",
         detail=f"has_B={has_b} contaminated={has_other} reply={reply!r}",
         turns=len(a.messages),
+        metrics=agent_metrics(a),
     )
 
 
@@ -178,12 +184,13 @@ def run_a4() -> Attempt:
         outcome="pass" if ok else "fail",
         detail=f"needle_in_reply={ok} reply={reply!r}",
         turns=len(a.messages),
+        metrics=agent_metrics(a),
     )
 
 
 SPECS = [
-    TaskSpec("A1", "held_in", "A", "fail", run_a1),
-    TaskSpec("A2", "held_in", "A", "fail", run_a2),
+    TaskSpec("A1", "held_in", "A", "pass", run_a1),
+    TaskSpec("A2", "held_in", "A", "pass", run_a2),
     TaskSpec("A3", "held_out", "A", "uncertain", run_a3),
     TaskSpec("A4", "held_out", "A", "uncertain", run_a4),
 ]

@@ -135,6 +135,7 @@ def run_task(
             "detail": att.detail[:2000],
             "approvals": att.approvals,
             "turns": att.turns,
+            "metrics": att.metrics,
             "duration_s": round(time.monotonic() - t0, 1),
             **fingerprint,
         }

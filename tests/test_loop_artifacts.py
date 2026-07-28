@@ -61,6 +61,12 @@ def test_candidate_noop_field_rejected(tmp_path):
         load_candidates(write(tmp_path, "k.json", [bad]))
 
 
+def test_non_configuration_candidate_is_not_executable(tmp_path):
+    bad = dict(GOOD_CANDIDATE, kind="correctness_defect")
+    with pytest.raises(ValueError, match="only configuration_candidate"):
+        load_candidates(write(tmp_path, "k.json", [bad]))
+
+
 def test_duplicate_candidate_ids_rejected(tmp_path):
     with pytest.raises(ValueError, match="duplicate"):
         load_candidates(write(tmp_path, "k.json", [GOOD_CANDIDATE, GOOD_CANDIDATE]))

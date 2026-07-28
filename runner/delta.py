@@ -83,11 +83,76 @@ def delta(baseline: dict, candidate: dict) -> dict:
         name: candidate["tasks"][name]["pass_fraction"] - baseline["tasks"][name]["pass_fraction"]
         for name in sorted(base_names)
     }
+    regressions = {name: change for name, change in per_task.items() if change < 0}
+    # The aggregate Self-Harness rule can average a total collapse on one task
+    # against a gain on another task in the same split. Refinery observed this
+    # in iteration 1: A1 moved 1.0 -> 0.0 while A2 moved 0.0 -> 1.0, leaving
+    # Δ_in unchanged. Treat a full-pass -> zero-pass movement as a promotion
+    # veto. Smaller negative movements stay visible as regression warnings;
+    # with only 3/5 stochastic attempts, making every single flip a hard veto
+    # would mostly measure sampling noise.
+    catastrophic_regressions = {
+        name: change
+        for name, change in per_task.items()
+        if baseline["tasks"][name]["pass_fraction"] == 1.0
+        and candidate["tasks"][name]["pass_fraction"] == 0.0
+    }
+    aggregate = acceptance(d_in, d_ho)
+    base_summary = baseline.get("summary", {})
+    cand_summary = candidate.get("summary", {})
+    base_metrics = base_summary.get("metrics", {})
+    candidate_metrics = cand_summary.get("metrics", {})
+    # A metric absent on one side was NOT measured as zero. Subtracting against a
+    # default of 0 turns "not measured" into the most favourable number available
+    # — a large negative cost delta — which the PR body then renders under prose
+    # saying negative means less work for the same score. Compare only what both
+    # sides actually measured, and name the rest instead of imputing it.
+    comparable = sorted(set(base_metrics) & set(candidate_metrics))
+    metric_delta = {
+        name: float(candidate_metrics[name]) - float(base_metrics[name]) for name in comparable
+    }
+    metric_not_compared = sorted(set(base_metrics) ^ set(candidate_metrics))
+
+    # Denominator drift: an attempt that raises records metrics={}, so a task the
+    # candidate BREAKS drops out of a metric's population entirely. Both sides can
+    # then report the same mean over different task sets. Diagnostic only — it
+    # never moves acceptance — but it must be visible, not averaged across.
+    def _pair(key: str) -> dict[str, dict]:
+        base, cand = base_summary.get(key, {}), cand_summary.get(key, {})
+        return {
+            name: {"baseline": base.get(name), "candidate": cand.get(name)}
+            for name in sorted(set(base) | set(cand))
+        }
+
+    metric_task_counts = _pair("metric_task_counts")
+    # Attempt counts as well as task counts. Task counts alone are blind to the
+    # commonest case: a candidate whose attempts start ERRORING keeps every task in
+    # the population (same task count) while the mean silently covers a third as
+    # many attempts, which reads as a large cost win.
+    metric_attempt_counts = _pair("metric_attempt_counts")
+    metric_denominator_drift = sorted(
+        {
+            name
+            for counts in (metric_task_counts, metric_attempt_counts)
+            for name, pair in counts.items()
+            if pair["baseline"] != pair["candidate"]
+        }
+    )
     return {
         "baseline_fingerprint": base_fp,
         "candidate_fingerprint": cand_fp,
         "delta_in": d_in,
         "delta_ho": d_ho,
         "per_task": per_task,
-        **acceptance(d_in, d_ho),
+        "regressions": regressions,
+        "catastrophic_regressions": catastrophic_regressions,
+        "baseline_metrics": base_metrics,
+        "candidate_metrics": candidate_metrics,
+        "metric_delta": metric_delta,
+        "metric_not_compared": metric_not_compared,
+        "metric_task_counts": metric_task_counts,
+        "metric_attempt_counts": metric_attempt_counts,
+        "metric_denominator_drift": metric_denominator_drift,
+        "aggregate_accepted": aggregate["accepted"],
+        "accepted": aggregate["accepted"] and not catastrophic_regressions,
     }

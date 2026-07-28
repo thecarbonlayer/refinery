@@ -5,11 +5,18 @@
 > opens a PR — it never merges.
 
 The measurement half of the self-evolving-harness project: runs a fixed task
-suite (`runner/tasks/`) against a live Gemma agent driven by the
+suite (`runner/tasks/`) against a live Carbon agent driven by the
 [carbon](https://github.com/thecarbonlayer/carbon) harness, repeatedly per task
 (held-out gets more samples than held-in), aggregates pass fractions
 (averaged, never majority-voted), and computes Δ_in/Δ_ho between two harness
-states for the acceptance rule `Δ_in ≥ 0, Δ_ho ≥ 0, max(Δ_in, Δ_ho) > 0`.
+states for the aggregate acceptance rule
+`Δ_in ≥ 0, Δ_ho ≥ 0, max(Δ_in, Δ_ho) > 0`.
+
+There is one additional promotion veto: a candidate that moves any task from a
+1.0 baseline pass fraction to 0.0 is rejected even if another task's gain hides
+the collapse inside the split average. Smaller per-task regressions remain
+visible as warnings rather than hard failures because three- and five-attempt
+fractions are noisy.
 
 **Why this is its own repo:** the task definitions, verifier code, pinned
 commands, and oracle hashes must never share a home with the editable surface
@@ -41,7 +48,14 @@ stamped with a "filter" field and refuse to overwrite a full run's JSON.
 mismatched models by design — a Δ is only meaningful like-for-like.
 Results are also stamped with `runner_sha` (the verifier's own version);
 deltas across different runner versions are refused, so re-measure the
-baseline after changing runner code.
+baseline after changing runner code. The harness-quality tasks added after the
+first recorded iteration deliberately change this hash; old results remain
+historical evidence and are not comparable to a new run.
+
+Every attempt can also record tokens, cost, model/tool calls, compactions,
+tool errors, and incomplete responses. Candidate deltas report those values
+next to success rates. They explain tradeoffs; they never turn a failing
+candidate into a passing one.
 
 To measure a different harness state: check out the branch in carbon
 (the editable dependency points at that working tree), run with a new label,
@@ -56,14 +70,26 @@ and land as fixed JSON artifacts in `iterations/<iter>/` (`clusters.json`,
 candidate is applied to the carbon WORKING TREE (never committed — a
 rejected candidate leaves no trace there), the suite runs in a fresh
 subprocess (config values bind at import), the edit is reverted, and the
-acceptance rule `Δ_in ≥ 0, Δ_ho ≥ 0, max > 0` decides. Accepted edits each get
-their own branch off `self-improvement` in carbon and a PR targeting it
+aggregate rule plus the catastrophic per-task regression veto decides.
+Accepted edits each get their own branch off `self-improvement` in carbon and a PR targeting it
 (explicit base — never `main`), with the evidence (cluster, knobs, per-task Δ,
 provenance) in the body. The pipeline never merges.
 
-    uv run python -m loop.cli dry-run  --iteration iter-01 --candidate clamp-12k --tasks A2 D1
-    uv run python -m loop.cli validate --iteration iter-01 [--candidate clamp-12k]
-    uv run python -m loop.cli pr       --iteration iter-01 --candidate clamp-12k
+Before proposing, inspect the live contract:
+
+    uv run python -m loop.cli surface
+
+It lists only fields Refinery may edit, including each bounded strategy menu,
+and separately lists Carbon's immutable invariants. `require_run`,
+`approval_tools`, code-extension gate triggers, workspace/secret boundaries,
+tool validation, unique edits, worker workspace identity, and strategy
+registration are deliberately unavailable to candidates. An unexpressible
+policy improvement is a `strategy_surface_gap`; a broken invariant is a
+`correctness_defect`. Neither should be disguised as a configuration edit.
+
+    uv run python -m loop.cli dry-run  --iteration iter-02 --candidate output-policy --tasks E2 D1
+    uv run python -m loop.cli validate --iteration iter-02 [--candidate output-policy]
+    uv run python -m loop.cli pr       --iteration iter-02 --candidate output-policy
 
 ## Layout
 
@@ -74,8 +100,17 @@ provenance) in the body. The pipeline never merges.
   transcript/hash utilities
 - results/ — committed measurement artifacts
 - loop/ — the validate→branch→PR pipeline (imports runner.suite / runner.delta)
+- loop/knob_coverage.py — which tasks can observe each editable knob, and in what
+  role. Governance metadata, deliberately outside runner/ so correcting a row does
+  not change runner_sha and invalidate every recorded baseline
 - iterations/ — per-iteration artifacts: mining notes, clusters, candidates,
   validation records (rejected candidates included — they are the honest bulk)
+
+The task clusters currently cover context loss, verification integrity,
+containment, tool use, large-item access, tool semantics and execution depth,
+response completeness, repeated compaction, and subagent workspace binding.
+See `docs/carbon-quality-review.md` for the failure each newer diagnostic is
+designed to isolate and the recommended Carbon implementation order.
 
 ## Offline tests
 

@@ -38,9 +38,44 @@ def known_knobs() -> dict[str, dict]:
     """carbon's editable-surface schema, keyed by field name: what knobs exist, their
     type, and which are collections / positive-int — the generic knob catalogue the
     editor and the propose side read instead of hardcoding field names."""
-    from carbon import config_schema
+    from carbon import surface_manifest
 
-    return {field["name"]: field for field in config_schema()}
+    # carbon has already partitioned on `editable`; re-filtering here would be
+    # dead code that hides a shape change instead of failing on it.
+    return {field["name"]: field for field in surface_manifest()["editable"]}
+
+
+def immutable_invariants() -> dict[str, str]:
+    """Carbon's explicit do-not-propose list, keyed by invariant name."""
+    from carbon import surface_manifest
+
+    return {item["name"]: item["reason"] for item in surface_manifest()["immutable"]}
+
+
+def proposal_surface() -> dict:
+    """The complete proposer contract: selectable knobs and locked boundaries.
+
+    Reads the manifest exactly once, so every section describes the same carbon
+    state even if the file underneath is changing.
+    """
+    from carbon import surface_manifest
+
+    manifest = surface_manifest()
+    return {
+        "editable": {field["name"]: field for field in manifest["editable"]},
+        "locked_fields": {
+            item["name"]: item.get("locked_reason")
+            or item.get("deprecated")
+            or "Managed by Carbon or the pipeline."
+            for item in manifest["locked_fields"]
+        },
+        "immutable": {item["name"]: item["reason"] for item in manifest["immutable"]},
+        "candidate_kinds": {
+            "configuration_candidate": "Can be applied and evaluated automatically.",
+            "strategy_surface_gap": "Needs a reviewed Carbon strategy implementation first.",
+            "correctness_defect": "Needs a locked Carbon fix; must not become a knob.",
+        },
+    }
 
 
 def apply_candidate(carbon_root: str | Path, candidate: Candidate) -> dict:
