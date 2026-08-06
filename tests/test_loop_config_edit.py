@@ -89,6 +89,7 @@ def test_known_knobs_reflects_carbon_schema():
     assert knobs["compaction"]["strategies"] == [
         "structured_checkpoint",
         "summarize_middle",
+        "token_budget_checkpoint",
     ]
 
 

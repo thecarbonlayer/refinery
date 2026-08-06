@@ -47,6 +47,7 @@ def test_registry_membership():
         "G2",
         "G3",
         "G4",
+        "G5",
         "H1",
         "H2",
         "H3",
@@ -68,6 +69,7 @@ def test_registry_membership():
         "G1",
         "G3",
         "G4",
+        "G5",
         "H1",
         "H3",
     }

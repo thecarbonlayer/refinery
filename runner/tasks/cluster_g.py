@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 from runner.carbon_env import make_provider
-from runner.helpers import agent_metrics, neutral_dir, tool_texts
+from runner.helpers import (
+    agent_metrics,
+    neutral_dir,
+    scripted_approver,
+    tool_call_args,
+    tool_texts,
+)
 from runner.spec import Attempt, TaskSpec
 
 G1_SENTINEL = "END-OF-HANDOFF-G1-8VR"
@@ -25,6 +31,11 @@ G3_SENTINEL = "WORKTREE-STATE-G3-5TZ"
 G4_FILES = ("services/ledger/reconcile.py", "services/ledger/schema_v3.sql")
 G4_REJECTED = "REJECTED-APPROACH-G4-2WD"
 G4_NEXT = "NEXT-ACTION-G4-5HB"
+
+# G5's files are named, not sentinel-coded: the task asks the agent what it DID, and a
+# realistic path is what a real session would carry. Distinct from G4's paths so a
+# checkpoint carrying one cannot be mistaken for carrying the other.
+G5_FILES = ("reconcile_flags.py", "audit_flags.py")
 
 
 def _plain_agent(**kwargs):
@@ -177,6 +188,108 @@ def run_g4() -> Attempt:
     )
 
 
+def run_g5() -> Attempt:
+    """Which files did I actually change? — asked after repeated compaction.
+
+    G4's sibling, and deliberately not a duplicate of it. G4 STATES its facts in
+    conversation, so what it measures is whether a summarizer keeps a stated fact. G5
+    never states anything: the agent calls ``write_file`` itself, and the file list
+    exists only as a property of the tool calls it made. That is the difference between
+    "did the summary remember" and "does the harness know", and only the second is
+    something the harness can guarantee rather than hope for.
+
+    This is the observer for deterministic file tracking. A strategy that extracts the
+    file list from tool calls and re-attaches it verbatim passes here even when the
+    summarizer's prose drops it; a strategy that entrusts the list to that prose does
+    not. Measured on ``write_file`` because an edit needs matching text to already
+    exist, which adds a failure mode that has nothing to do with compaction.
+
+    Setup failures are reported as ``error``, never ``fail``: if the model never made
+    the writes, the task never reached the thing it measures.
+    """
+    from harness.agent import APPROVAL_TOOLS
+    from harness.tools import ToolRegistry
+    from harness.workspace import Workspace, write_file_tool
+
+    ws = Workspace()
+    tools = ToolRegistry()
+    tools.register(write_file_tool(ws))
+    approvals = [{"tool": "write_file", "decision": "approve"}] * 12
+    a = _plain_agent(
+        context_limit=900,
+        tools=tools,
+        approve=scripted_approver(approvals),
+        approval_required=APPROVAL_TOOLS,
+    )
+
+    observed: list[str] = []
+
+    def _write(path: str, line: str) -> int:
+        """Ask for one file, re-prompting once if the model answered instead of acting.
+
+        A local model sometimes replies "I have created it" without calling anything.
+        One retry keeps that from being recorded as a compaction failure — the task
+        measures what survives the door, and it cannot measure it if the writes that
+        produce the state never happened. Still bounded: two asks, then the setup
+        guard reports `error`.
+
+        The observation is recorded HERE, as the call happens, and never re-derived
+        from the final transcript. That is not a style preference: the first version
+        scanned `a.messages` at the end and saw only the second file, because
+        compaction had already summarized the first write's tool call away. Reading
+        setup state out of a compacted transcript measures the door, not the setup —
+        and it is the same blindness this task exists to expose.
+        """
+        fired = 0
+        for _ in range(2):
+            before = len(tool_call_args(a.messages, ("write_file",)))
+            a.send(
+                f"Create a file named {path} containing exactly the line: {line}. "
+                "Use the write_file tool. Do not describe the file — write it."
+            )
+            fired += int(a.just_compacted)
+            new = tool_call_args(a.messages, ("write_file",))[before:]
+            if any(path in args for args in new):
+                observed.append(path)
+                break
+        return fired
+
+    compactions = _write(G5_FILES[0], "reconcile = True")
+    for i in range(1, 4):
+        a.send(_filler(i))
+        compactions += int(a.just_compacted)
+    compactions += _write(G5_FILES[1], "audit = True")
+    for i in range(4, 18):
+        a.send(_filler(i))
+        compactions += int(a.just_compacted)
+        if compactions >= 2:
+            break
+
+    made_both = set(observed) == set(G5_FILES)
+    if compactions < 2 or not made_both:
+        return Attempt(
+            False,
+            "error",
+            f"setup incomplete: compactions={compactions} observed={observed}",
+            approvals=approvals,
+            turns=len(a.messages),
+            metrics=agent_metrics(a),
+        )
+    reply = a.send("List every file you have created or modified in this session.")
+    low = reply.lower()
+    recalled = [f for f in G5_FILES if f.lower() in low]
+    ok = len(recalled) == len(G5_FILES)
+    return Attempt(
+        passed=ok,
+        outcome="pass" if ok else "fail",
+        detail=f"compactions={compactions} observed={observed} "
+        f"recalled={recalled} reply={reply[:240]!r}",
+        approvals=approvals,
+        turns=len(a.messages),
+        metrics=agent_metrics(a),
+    )
+
+
 def run_g3() -> Attempt:
     """A delegated worker must inspect the same workspace as its parent."""
     from harness.subagents import delegate_tool
@@ -220,4 +333,5 @@ SPECS = [
     TaskSpec("G2", "held_out", "G", "uncertain", run_g2),
     TaskSpec("G3", "held_in", "G", "pass", run_g3),
     TaskSpec("G4", "held_in", "G", "uncertain", run_g4),
+    TaskSpec("G5", "held_in", "G", "uncertain", run_g5),
 ]
