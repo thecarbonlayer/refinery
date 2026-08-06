@@ -11,6 +11,21 @@ G2_FACT_A = "EARLY-DECISION-G2-3LK"
 G2_FACT_B = "LATE-DECISION-G2-6QW"
 G3_SENTINEL = "WORKTREE-STATE-G3-5TZ"
 
+# G4 is the HELD-IN repeated-compaction miner. G2 measures the same door but is
+# held-out, and mining a held-out task spends the generalization claim it exists to
+# make — the coverage table named G2 a miner, which was that rule contradicting
+# itself. G4 takes the mining role; G2 keeps the guarding one.
+#
+# Structurally different from G2 on purpose, or the "guard" is just a second run of
+# the miner: G2 carries two homogeneous decision codes and asks for both at the end,
+# while G4 carries three HETEROGENEOUS kinds of harness state and a deeper window.
+# The kinds are chosen to be the ones a summarizer paraphrases away first, and are
+# exactly what the reference harness tracks deterministically rather than entrusting
+# to summary prose — modified files, a rejected approach, and the pending next action.
+G4_FILES = ("services/ledger/reconcile.py", "services/ledger/schema_v3.sql")
+G4_REJECTED = "REJECTED-APPROACH-G4-2WD"
+G4_NEXT = "NEXT-ACTION-G4-5HB"
+
 
 def _plain_agent(**kwargs):
     from harness.agent import DEFAULT_SYSTEM, Agent
@@ -96,6 +111,72 @@ def run_g2() -> Attempt:
     )
 
 
+def run_g4() -> Attempt:
+    """Heterogeneous harness state must survive REPEATED compaction, not just facts.
+
+    Three kinds of state go in, spread across the trajectory rather than clustered:
+    the set of modified files, an approach already tried and rejected, and the pending
+    next action. All three are the sort of thing a general "be terse but lose nothing"
+    summarizer drops or paraphrases first — a file list becomes "some files", a
+    rejected approach becomes "explored options" — and all three are load-bearing for
+    the next turn.
+
+    Graded per property, not as one boolean, so a partial retention is visible in the
+    detail string and the failure says WHICH kind of state was lost.
+    """
+    a = _plain_agent(context_limit=900)
+    a.send("We are mid-migration on the ledger service. Acknowledge briefly.")
+    a.send(
+        f"Record the files changed so far, exactly: {G4_FILES[0]} and {G4_FILES[1]}. "
+        "Acknowledge briefly."
+    )
+    compactions = int(a.just_compacted)
+    for i in range(1, 4):
+        a.send(_filler(i))
+        compactions += int(a.just_compacted)
+    a.send(
+        f"Record that this approach was tried and rejected: {G4_REJECTED} "
+        "(it deadlocked under concurrent writes). Acknowledge briefly."
+    )
+    compactions += int(a.just_compacted)
+    for i in range(4, 8):
+        a.send(_filler(i))
+        compactions += int(a.just_compacted)
+    a.send(f"Record the pending next action, exactly: {G4_NEXT}. Acknowledge briefly.")
+    compactions += int(a.just_compacted)
+    for i in range(8, 18):
+        a.send(_filler(i))
+        compactions += int(a.just_compacted)
+        if compactions >= 2:
+            break
+    if compactions < 2:
+        return Attempt(
+            False,
+            "error",
+            f"repeated-compaction setup did not fire twice (count={compactions})",
+            turns=len(a.messages),
+            metrics=agent_metrics(a),
+        )
+    reply = a.send(
+        "Report three things exactly as recorded: the files changed so far, the "
+        "approach that was tried and rejected, and the pending next action."
+    )
+    low = reply.lower()
+    has_files = all(f.lower() in low for f in G4_FILES)
+    has_rejected = G4_REJECTED.lower() in low
+    has_next = G4_NEXT.lower() in low
+    ok = has_files and has_rejected and has_next
+    return Attempt(
+        passed=ok,
+        outcome="pass" if ok else "fail",
+        detail=f"compactions={compactions} files_recalled={has_files} "
+        f"rejected_recalled={has_rejected} next_action_recalled={has_next} "
+        f"reply={reply[:240]!r}",
+        turns=len(a.messages),
+        metrics=agent_metrics(a),
+    )
+
+
 def run_g3() -> Attempt:
     """A delegated worker must inspect the same workspace as its parent."""
     from harness.subagents import delegate_tool
@@ -138,4 +219,5 @@ SPECS = [
     TaskSpec("G1", "held_in", "G", "uncertain", run_g1),
     TaskSpec("G2", "held_out", "G", "uncertain", run_g2),
     TaskSpec("G3", "held_in", "G", "pass", run_g3),
+    TaskSpec("G4", "held_in", "G", "uncertain", run_g4),
 ]

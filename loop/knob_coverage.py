@@ -76,14 +76,14 @@ SUITE_WIDE_KNOBS = frozenset({"system_prompt", "temperature"})
 # here either, and that is now a property of the code: their leak predicates read
 # the RAW tool result (see cluster_c's `recording_tool` wiring), precisely so a
 # candidate cannot raise a containment score by clamping away the evidence.
-_TOOL_RESULT_READERS = ("D3", "E2", "F1", "F2", "G3")
+_TOOL_RESULT_READERS = ("D3", "E1", "E2", "E3", "F1", "F2", "G3")
 
 # Every task that makes any tool call at all, so the per-turn round budget binds
 # it. A different mechanism from result truncation, and therefore a different set
 # — sharing one list between the two was a false claim about both.
 _TOOL_USERS = (
     "A2", "B1", "B2", "B3", "C1", "C2", "C3", "D1", "D2", "D3",
-    "E1", "E2", "F1", "F2", "G3",
+    "E1", "E2", "E3", "F1", "F2", "G3",
 )  # fmt: skip
 
 KNOB_COVERAGE: dict[str, dict[str, tuple[str, ...]]] = {
@@ -102,15 +102,16 @@ KNOB_COVERAGE: dict[str, dict[str, tuple[str, ...]]] = {
     # text. A4 is the suite's sole `@path` sender and has no tools, so the
     # injected block is its only route to the answer — see UNGUARDED_KNOBS.
     "file_injection": {"observers": ("A4",), "miners": ("A4",), "guards": ()},
-    # E1 is deliberately NOT an observer any more. It now requires the needle to be
-    # retrieved without flooding the window, and the only value that delivered it
-    # took 24% of the file into context — so no legal value moves its verdict, and
-    # what it needs is a middle-preserving strategy that does not exist yet. E2 is
-    # the only task distinguishing tail-preserving from head-only truncation; D3 is
-    # a second guard at lower budgets.
+    # E3 carries the capability gap: a midpoint needle in OPAQUE command output, which
+    # no positional strategy reaches and no query tool can route around. It is not a
+    # miner — no legal value moves its verdict — so it is registered in CAPABILITY_GAPS
+    # instead. E1 is an observer again now that it holds the real retrieval belt
+    # (search_text plus ranged read_file); what it measures is retrieval ECONOMY, which
+    # the budget genuinely moves. E2 distinguishes tail-preserving from head-only
+    # truncation; D3 is a second guard at lower budgets.
     "tool_output": {
         "observers": _TOOL_RESULT_READERS,
-        "miners": (),
+        "miners": ("E1",),
         "guards": ("E2", "D3"),
     },
     # F2 forces 10 model calls and fails at any budget <= 9 — the only binding
@@ -139,15 +140,23 @@ KNOB_COVERAGE: dict[str, dict[str, tuple[str, ...]]] = {
     # worse. A3 never compacts, so nothing in the object can move it. H2 is NOT an
     # observer: it forces overflow with an injected error and is invariant to
     # strategy, keep_head, keep_tail, trigger_fraction and summary_max_tokens.
-    "compaction": {"observers": ("A1", "G2"), "miners": ("G2",), "guards": ("A1",)},
+    # G4 mines, G2 guards. G2 was previously both, which contradicted the rule that
+    # mining uses held-in evidence only: G2 is held-out, so tuning against it spends
+    # the generalization test. G4 is the held-in counterpart and carries a different
+    # trajectory shape, so passing it does not entail passing G2.
+    "compaction": {
+        "observers": ("A1", "G2", "G4"),
+        "miners": ("G4",),
+        "guards": ("A1", "G2"),
+    },
     # Same observers, and for a sharper reason: H2 detects the summarizer by
     # payload SHAPE precisely so that rewriting this knob cannot fool it, which by
     # construction makes it blind to the knob. `tests/test_registry.py` asserts
     # that invariance directly.
     "compaction_prompt": {
-        "observers": ("A1", "G2"),
-        "miners": ("G2",),
-        "guards": ("A1",),
+        "observers": ("A1", "G2", "G4"),
+        "miners": ("G4",),
+        "guards": ("A1", "G2"),
     },
     # `verify_attempts` is gated on a test command in the task's instruction root,
     # and cluster B is the only cluster that ships one — every other task uses a
@@ -190,10 +199,6 @@ GUARD_ONLY_KNOBS: dict[str, str] = {
     "default_context_limit": (
         "A1 and A3 both hold at the shipped window; no observer fails on context size."
     ),
-    "tool_output": (
-        "E2 and D3 hold at the shipped budget, and E1's gap needs a middle-preserving "
-        "strategy rather than a different number — a capability request, not a candidate."
-    ),
 }
 
 # Capability gaps: a task fails, and NO value of any current setting can fix it because
@@ -201,11 +206,13 @@ GUARD_ONLY_KNOBS: dict[str, str] = {
 # right answer does not exist yet — a written request for a person, never a setting
 # change that approximates one.
 CAPABILITY_GAPS: dict[str, str] = {
-    "E1": (
+    "E3": (
         "Needs a tool_output strategy that preserves the MIDDLE of a large result — "
-        "summarize-the-middle, or an index the model can query. Both shipped strategies "
-        "are positional (head, or head plus tail), so at any sane budget neither reaches "
-        "a fact in the middle, and the budget that does reach it floods the window."
+        "summarize-the-middle, or an offload that hands back a retrievable path. Both "
+        "shipped strategies are positional (head, or head plus tail), so at any sane "
+        "budget neither reaches a fact in the middle, and the budget that does reach it "
+        "floods the window. Measured on opaque command output, where — unlike E1's file "
+        "fixture — no query tool can route around the door."
     ),
 }
 

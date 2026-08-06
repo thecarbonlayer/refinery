@@ -40,11 +40,13 @@ def test_registry_membership():
         "D3",
         "E1",
         "E2",
+        "E3",
         "F1",
         "F2",
         "G1",
         "G2",
         "G3",
+        "G4",
         "H1",
         "H2",
         "H3",
@@ -61,9 +63,11 @@ def test_registry_membership():
         "D1",
         "D2",
         "E1",
+        "E3",
         "F1",
         "G1",
         "G3",
+        "G4",
         "H1",
         "H3",
     }
@@ -135,6 +139,48 @@ def test_e_fixtures_are_hidden_by_carbons_own_truncation():
         "E2's tag survives even a head-only policy — the task cannot tell "
         "tail-preserving from head-only truncation any more"
     )
+
+
+def test_e3_needle_is_unreachable_by_every_shipped_strategy():
+    """E3's claim is "no legal value passes this", so the fixture must earn it.
+
+    E1 and E2 are positional at one end, so a single probe settles each. E3 asserts
+    something stronger — that the midpoint is reachable by NEITHER shipped strategy —
+    and that is exactly the kind of premise that rots silently when a fixture is
+    resized or a tail_fraction moves. Probing both strategies, at a budget generous
+    relative to the fixture, keeps the task honest: if either one ever retains the
+    needle, E3 has stopped measuring a capability gap and this test says so.
+    """
+    from dataclasses import replace
+
+    from harness.harness_config import CONFIG
+    from harness.limits import truncate
+
+    from runner.tasks.cluster_e import E3_SENTINEL, e3_script
+
+    output = _e3_output(e3_script())
+    assert E3_SENTINEL in output, "fixture does not contain its own sentinel"
+    # A THIRD of the stream, not a tenth: a deliberately generous budget, so the test
+    # fails if the needle is merely hard to reach rather than genuinely out of reach.
+    budget = len(output) // 3
+    for strategy, tail_fraction in (("head_tail", 0.5), ("head_tail", 0.9), ("keep_head", 0.0)):
+        policy = replace(
+            CONFIG.tool_output, strategy=strategy, budget=budget, tail_fraction=tail_fraction
+        )
+        assert E3_SENTINEL not in truncate(output, policy), (
+            f"E3's midpoint needle survives {strategy} at tail_fraction={tail_fraction} "
+            f"and a third of the stream — the task no longer reports a real capability gap"
+        )
+
+
+def _e3_output(script: str) -> str:
+    """Run E3's script the way the task does, so the probe reads the real bytes."""
+    import subprocess
+    import sys
+
+    return subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, check=True
+    ).stdout
 
 
 def test_f1_expected_differs_from_source_on_exactly_the_beta_line():

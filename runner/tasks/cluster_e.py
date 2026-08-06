@@ -45,6 +45,14 @@ E2_TAG_SEED = "e2-root-cause-seed-4417"
 E2_SENTINEL = hashlib.sha256(E2_TAG_SEED.encode()).hexdigest()[:12].upper()
 E2_PASS_COUNT = 3200
 
+# E3 mirrors E2's derived-tag construction — the script carries the seed and the
+# algorithm, never the answer — but plants the tag at the MIDPOINT of the stream
+# rather than the tail, which is the position no shipped truncation strategy keeps.
+E3_TAG_SEED = "e3-reconciliation-seed-9182"
+E3_SENTINEL = hashlib.sha256(E3_TAG_SEED.encode()).hexdigest()[:12].upper()
+E3_LINE_COUNT = 3200
+E3_NEEDLE_INDEX = E3_LINE_COUNT // 2
+
 
 def _plain_agent(*, tools, approvals: list[dict] | None = None):
     from harness.agent import APPROVAL_TOOLS, DEFAULT_SYSTEM, Agent
@@ -78,18 +86,22 @@ def _large_reference() -> str:
 def run_e1() -> Attempt:
     """A late fact in a 100k file, retrieved WITHOUT flooding the window.
 
-    Recalling the code is necessary but not sufficient. Both shipped truncation
-    strategies are positional — head, or head plus tail — so neither reaches the
-    middle at any sane budget, and the only way a whole-file read delivers this needle
-    is a budget large enough to carry 24% of the file. That passes the letter of the
-    task and defeats its purpose, so economy is part of the verdict.
+    Recalling the code is necessary but not sufficient: economy is part of the verdict,
+    because a budget large enough to carry a quarter of the file passes the letter of
+    the task and defeats its purpose.
 
-    Consequence, stated plainly: no value of any current setting can pass this task.
-    That is the intended reading — the missing piece is a middle-preserving strategy
-    (summarize the middle, or an index the model can query), which is a Carbon
-    capability request, not a number to tune. The task stays red until that exists.
+    The belt is the harness's real retrieval belt — ``search_text`` to locate and
+    ranged ``read_file`` to confirm. An earlier revision withheld ``search_text`` and
+    read the resulting failure as evidence that the harness lacked indexed retrieval;
+    it does not, and a task may not manufacture the gap it reports. Withholding a
+    shipped tool measures the fixture, not the harness.
+
+    What stays measured is retrieval *economy* — locate the needle without streaming
+    the haystack. Middle-of-output retention, which this task used to stand in for, is
+    a genuinely different question and is measured on opaque output by E3, where no
+    query tool can apply.
     """
-    from harness.tools import ToolRegistry, read_file_tool
+    from harness.tools import ToolRegistry, read_file_tool, search_text_tool
     from harness.workspace import Workspace
 
     body = _large_reference()
@@ -97,6 +109,7 @@ def run_e1() -> Attempt:
     ws.write("release-records.txt", body)
     tools = ToolRegistry()
     tools.register(read_file_tool(str(ws.root)))
+    tools.register(search_text_tool(str(ws.root)))
     a = _plain_agent(tools=tools)
     reply = a.send(
         "Find the release authorization code in release-records.txt. "
@@ -168,6 +181,16 @@ def _ran_script_plainly(cmd: str) -> bool:
     return "python3 run_tests.py" in cmd and not any(op in cmd for op in E2_POST_PROCESSORS)
 
 
+def _ran_audit_plainly(cmd: str) -> bool:
+    """E3's counterpart to ``_ran_script_plainly`` — same two failure modes, same fix.
+
+    The exclusion matters more here than in E2: a middle needle is exactly what a
+    ``| sed -n`` or ``| grep`` recovers trivially, and a shell-side rescue would grade
+    the model's resourcefulness instead of the truncation policy under test.
+    """
+    return "python3 run_audit.py" in cmd and not any(op in cmd for op in E2_POST_PROCESSORS)
+
+
 def run_e2() -> Attempt:
     """The failure at the tail of noisy command output must survive door control."""
     from harness.sandbox import Sandbox, bash_tool
@@ -203,7 +226,72 @@ def run_e2() -> Attempt:
     )
 
 
+def e3_script() -> str:
+    """The script E3 asks the model to run. Derived tag, same reasoning as E2's."""
+    return (
+        "import hashlib\n"
+        f"tag = hashlib.sha256({E3_TAG_SEED!r}.encode()).hexdigest()[:12].upper()\n"
+        f"for i in range({E3_LINE_COUNT}):\n"
+        f"    if i == {E3_NEEDLE_INDEX}:\n"
+        "        print(f'AUDIT ANOMALY: reconciliation-tag={tag}')\n"
+        "    else:\n"
+        "        print(f'audit row {i:05d}: ledger balanced, delta=0.00')\n"
+    )
+
+
+def run_e3() -> Attempt:
+    """A fact in the MIDDLE of opaque command output must survive door control.
+
+    E2 puts its needle at the tail, so ``head_tail`` carries it by construction. This
+    task puts one at the midpoint, where neither shipped truncation strategy reaches:
+    ``keep_head`` takes a prefix and ``head_tail`` takes both ends. No budget short of
+    delivering the whole stream retrieves it, and delivering the whole stream is the
+    flooding these doors exist to prevent.
+
+    The output is *opaque* on purpose. E1's fixture was a file, so ``search_text``
+    answers it and the honest verdict there is retrieval economy. A command's stdout
+    has no index to query — the only thing standing between the middle of the stream
+    and the model is the truncation policy itself. That makes this, and not E1, the
+    task that legitimately reports a missing middle-preserving strategy.
+
+    Consequence, stated plainly: no value of any current setting passes this task. It
+    is a Carbon capability request, not a number to tune, and it stays red until a
+    middle-preserving strategy exists.
+    """
+    from harness.sandbox import Sandbox, bash_tool
+    from harness.tools import ToolRegistry
+    from harness.workspace import Workspace
+
+    ws = Workspace()
+    ws.write("run_audit.py", e3_script())
+    tools = ToolRegistry()
+    tools.register(bash_tool(Sandbox(trusted=True, timeout=60), workdir=str(ws.root)))
+    approvals = [{"tool": "bash", "decision": "approve"}]
+    a = _plain_agent(tools=tools, approvals=approvals)
+    reply = a.send(
+        "Run `python3 run_audit.py` and report the reconciliation tag it prints. "
+        "Reply with just the exact tag."
+    )
+    runs = bash_runs(a.messages, _ran_audit_plainly)
+    ran = bool(runs)
+    # The FIRST plain run is the one under test: a later, narrowed re-run would be the
+    # model routing around the door rather than the door holding.
+    delivered = ran and E3_SENTINEL in runs[0][1]
+    recalled = E3_SENTINEL.lower() in reply.lower()
+    ok = ran and delivered and recalled
+    return Attempt(
+        passed=ok,
+        outcome="pass" if ok else "fail",
+        detail=f"ran_plainly={ran} sentinel_delivered={delivered} "
+        f"recalled={recalled} reply={reply[:200]!r}",
+        approvals=approvals,
+        turns=len(a.messages),
+        metrics=agent_metrics(a),
+    )
+
+
 SPECS = [
-    TaskSpec("E1", "held_in", "E", "fail", run_e1),
+    TaskSpec("E1", "held_in", "E", "uncertain", run_e1),
     TaskSpec("E2", "held_out", "E", "pass", run_e2),
+    TaskSpec("E3", "held_in", "E", "fail", run_e3),
 ]
