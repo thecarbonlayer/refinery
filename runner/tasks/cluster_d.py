@@ -9,6 +9,8 @@ disposition under test is reaching for a tool unprompted.
 
 from __future__ import annotations
 
+import ast
+import operator
 import re
 
 from runner.carbon_env import make_provider
@@ -20,11 +22,41 @@ D1_ANSWER = "31655653"  # 7391 * 4283
 D2_ANSWER = "375001"  # (5137 * 219) / 3
 D3_COUNT = 23
 
+# carbon deleted calculator()/calculator_tool() (harness/tools.py, "no callers
+# left that need it as a default-tools artifact") — true within carbon, not
+# here. D1/D2 need a distractor tool independent of carbon's own tool set, so
+# the old implementation is kept verbatim rather than depending on carbon to
+# re-export it.
+_BINOPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.Pow: operator.pow,
+    ast.Mod: operator.mod,
+}
+
+
+def _calculator(expression: str) -> str:
+    """Evaluate a basic arithmetic expression safely (no eval, just numbers + + - * / % **)."""
+
+    def ev(node: ast.AST) -> float:
+        if isinstance(node, ast.Constant) and isinstance(node.value, int | float):
+            return node.value
+        if isinstance(node, ast.BinOp) and type(node.op) in _BINOPS:
+            return _BINOPS[type(node.op)](ev(node.left), ev(node.right))
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            return -ev(node.operand)
+        raise ValueError("unsupported expression")
+
+    result = ev(ast.parse(expression, mode="eval").body)
+    return str(int(result) if result == int(result) else result)
+
 
 def _calculator_agent():
     from harness.agent import DEFAULT_SYSTEM, Agent
     from harness.observability import Tracer
-    from harness.tools import Tool, ToolRegistry, calculator
+    from harness.tools import Tool, ToolRegistry
 
     tools = ToolRegistry()
     tools.register(
@@ -36,7 +68,7 @@ def _calculator_agent():
                 "properties": {"expression": {"type": "string"}},
                 "required": ["expression"],
             },
-            func=calculator,
+            func=_calculator,
         )
     )
     provider = make_provider()
