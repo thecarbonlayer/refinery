@@ -1,0 +1,47 @@
+[
+  {
+    "id": "compaction-v4-switch",
+    "cluster_id": "CL-2-compaction-state-erosion",
+    "proposer": "Fable",
+    "proposer_detail": "claude-fable-5, in-session (Claude Code) — mining and proposal done as reasoning over baseline-main-r4 held-in traces",
+    "fields": {
+      "compaction": {
+        "old": { "strategy": "structured_checkpoint", "keep_head": 2, "keep_tail": 4, "trigger_fraction": 0.8, "summary_max_tokens": 1024 },
+        "new": { "strategy": "token_budget_checkpoint", "keep_head": 2, "keep_tail": 4, "trigger_fraction": 0.8, "summary_max_tokens": 1024 }
+      }
+    },
+    "rationale": "Minimal strategy selection: every shape parameter stays, only how state is carried changes. token_budget_checkpoint is incremental (the previous checkpoint is passed to the summarizer as settled state and removed from the compressible middle, so a fact is compressed once, not once per compaction) and deterministically stateful (read/modified file paths are extracted from tool calls and re-attached verbatim, never trusted to prose). The optional token-budget knobs are left at their neutral defaults, so the cut itself is unchanged — this candidate isolates the state-carrying mechanism from any cut-size change. Same cut, different memory.",
+    "expected_effect": "G4 recovers if checkpoint erosion is the mechanism: facts stated early survive repeated compaction as settled state. G5 recovers via deterministic file-op re-attachment, which does not depend on the summarizer's prose at all. Tasks that compact at most once (A1) see the same cut boundaries and should be unchanged.",
+    "regression_risk": "The incremental prompt and stateful finalize produce differently-worded checkpoints, which pressures the compaction-era recall guards (A1, A3) if the new checkpoint format is terser about stated facts. H2 detects the summarizer structurally, not by prompt text, and must keep passing. The checkpoint_fallback door (head_tail) engages only when a checkpoint outgrows summary_max_tokens — new behavior with no baseline coverage."
+  },
+  {
+    "id": "compaction-v4-budgeted",
+    "cluster_id": "CL-2-compaction-state-erosion",
+    "proposer": "Fable",
+    "proposer_detail": "claude-fable-5, in-session (Claude Code) — mining and proposal done as reasoning over baseline-main-r4 held-in traces",
+    "fields": {
+      "compaction": {
+        "old": { "strategy": "structured_checkpoint", "keep_head": 2, "keep_tail": 4, "trigger_fraction": 0.8, "summary_max_tokens": 1024 },
+        "new": { "strategy": "token_budget_checkpoint", "keep_head": 2, "keep_tail": 4, "trigger_fraction": 0.8, "summary_max_tokens": 1024, "recent_token_reserve": 1200, "completion_reserve": 512 }
+      }
+    },
+    "rationale": "The full v4 mechanism set: the strategy switch of compaction-v4-switch plus an active token budget. A keep_tail message count is a proxy that fails both ways — four messages are nearly nothing after a turn of acknowledgements and far over budget after a turn that read a file. Reserving 1200 of the 4000-token window keeps the recent turns constant-sized regardless of shape, and a 512-token completion reserve fires compaction before the window is too full to answer, which also shrinks what the summarizer is handed (the class of provider-door rejection observed in G5 attempt 1).",
+    "expected_effect": "As compaction-v4-switch on G4/G5, plus steadier window pressure over long sessions: fewer emergency compactions, a bounded summarize payload, and a tail whose size no longer depends on turn shape.",
+    "regression_risk": "The trigger moves: compaction fires earlier and possibly more often, which shifts compaction timing suite-wide. A1's setup requires compaction to actually fire within its filler budget — timing changes cut both ways. A token-sized tail can retain fewer than four messages after verbose turns, pressuring recall of recently stated facts (A3). Two knobs changed at once, so a regression is harder to attribute than in the minimal switch."
+  },
+  {
+    "id": "structured-keep-tail-8",
+    "cluster_id": "CL-2-compaction-state-erosion",
+    "proposer": "Fable",
+    "proposer_detail": "claude-fable-5, in-session (Claude Code) — mining and proposal done as reasoning over baseline-main-r4 held-in traces",
+    "fields": {
+      "compaction": {
+        "old": { "strategy": "structured_checkpoint", "keep_head": 2, "keep_tail": 4, "trigger_fraction": 0.8, "summary_max_tokens": 1024 },
+        "new": { "strategy": "structured_checkpoint", "keep_head": 2, "keep_tail": 8, "trigger_fraction": 0.8, "summary_max_tokens": 1024 }
+      }
+    },
+    "rationale": "The control. Iteration 1's lesson replayed as a live candidate: is this failure fixable by turning a number inside the incumbent strategy, or does it need a different strategy? Doubling the kept tail keeps facts native for longer before they ever reach the summarizer. If this matches the strategy switch, the switch is unjustified complexity; if it does not, the gap between them is the measured value of changing the shape of the mechanism rather than its size.",
+    "expected_effect": "G4 improves at most partially: facts stated within the last eight messages survive longer, but 4-6 compactions still re-compress everything older. G5 should not recover — the writes happen early, and file state is carried only in prose regardless of how many tail messages are kept.",
+    "regression_risk": "A doubled tail raises window pressure, so compaction fires more often everywhere (A1 timing, A3 recall through extra rounds). It does nothing for the unbudgeted summarize payload, so the provider-door rejection class observed in G5 attempt 1 remains reachable. Known blind spot of this shape from iteration 1: an aggregate that barely moves can hide a task collapsing — read every task's numbers individually."
+  }
+]

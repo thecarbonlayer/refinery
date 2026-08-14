@@ -1,0 +1,966 @@
+{
+  "fingerprint": {
+    "gemma_sha": "1e15c9196cf6f25619df7f0456b6c52ec6c30267",
+    "gemma_dirty": true,
+    "dirty_sha": "e214259dab68b41d8e43baaf78c44bfbbdf262f47b510052482deb8b7e928c7e",
+    "config_version": 7,
+    "model": "google/gemma-4-26b-a4b",
+    "runner_sha": "024c9de1d2b36ecb4b4826151863fbd6466ddd2bc4b29ed31f49a9e975903d76",
+    "behavior_key": "5d9c6c653c76"
+  },
+  "tasks": {
+    "A1": {
+      "split": "held_in",
+      "cluster": "A",
+      "expected_baseline": "pass",
+      "attempts": 3,
+      "passes": 2,
+      "pass_fraction": 0.6667,
+      "outcomes": [
+        "fail",
+        "pass",
+        "pass"
+      ],
+      "metrics": {
+        "compactions": 1.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 10.0,
+        "model_attempts": 1.0,
+        "retries": 0.0,
+        "tokens": 18579.666667,
+        "tool_calls": 0.0,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 3,
+        "cost": 3,
+        "incomplete_responses": 3,
+        "llm_calls": 3,
+        "model_attempts": 3,
+        "retries": 3,
+        "tokens": 3,
+        "tool_calls": 3,
+        "tool_errors": 3
+      }
+    },
+    "A2": {
+      "split": "held_in",
+      "cluster": "A",
+      "expected_baseline": "pass",
+      "attempts": 3,
+      "passes": 3,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 2.0,
+        "model_attempts": 2.0,
+        "retries": 0.0,
+        "tokens": 2630.0,
+        "tool_calls": 1.0,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 3,
+        "cost": 3,
+        "incomplete_responses": 3,
+        "llm_calls": 3,
+        "model_attempts": 3,
+        "retries": 3,
+        "tokens": 3,
+        "tool_calls": 3,
+        "tool_errors": 3
+      }
+    },
+    "A3": {
+      "split": "held_out",
+      "cluster": "A",
+      "expected_baseline": "uncertain",
+      "attempts": 5,
+      "passes": 5,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 7.0,
+        "model_attempts": 1.0,
+        "retries": 0.0,
+        "tokens": 5907.4,
+        "tool_calls": 0.0,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 5,
+        "cost": 5,
+        "incomplete_responses": 5,
+        "llm_calls": 5,
+        "model_attempts": 5,
+        "retries": 5,
+        "tokens": 5,
+        "tool_calls": 5,
+        "tool_errors": 5
+      }
+    },
+    "A4": {
+      "split": "held_out",
+      "cluster": "A",
+      "expected_baseline": "uncertain",
+      "attempts": 5,
+      "passes": 5,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 1.0,
+        "model_attempts": 1.0,
+        "retries": 0.0,
+        "tokens": 1401.2,
+        "tool_calls": 0.0,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 5,
+        "cost": 5,
+        "incomplete_responses": 5,
+        "llm_calls": 5,
+        "model_attempts": 5,
+        "retries": 5,
+        "tokens": 5,
+        "tool_calls": 5,
+        "tool_errors": 5
+      }
+    },
+    "B1": {
+      "split": "held_in",
+      "cluster": "B",
+      "expected_baseline": "uncertain",
+      "attempts": 3,
+      "passes": 3,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 7.0,
+        "model_attempts": 7.0,
+        "retries": 0.0,
+        "tokens": 5782.0,
+        "tool_calls": 6.0,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 3,
+        "cost": 3,
+        "incomplete_responses": 3,
+        "llm_calls": 3,
+        "model_attempts": 3,
+        "retries": 3,
+        "tokens": 3,
+        "tool_calls": 3,
+        "tool_errors": 3
+      }
+    },
+    "B2": {
+      "split": "held_in",
+      "cluster": "B",
+      "expected_baseline": "uncertain",
+      "attempts": 3,
+      "passes": 3,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 15.333333,
+        "model_attempts": 15.333333,
+        "retries": 0.0,
+        "tokens": 20845.0,
+        "tool_calls": 11.333333,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 3,
+        "cost": 3,
+        "incomplete_responses": 3,
+        "llm_calls": 3,
+        "model_attempts": 3,
+        "retries": 3,
+        "tokens": 3,
+        "tool_calls": 3,
+        "tool_errors": 3
+      }
+    },
+    "B3": {
+      "split": "held_out",
+      "cluster": "B",
+      "expected_baseline": "uncertain",
+      "attempts": 5,
+      "passes": 5,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 6.4,
+        "model_attempts": 6.4,
+        "retries": 0.0,
+        "tokens": 4890.2,
+        "tool_calls": 5.4,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 5,
+        "cost": 5,
+        "incomplete_responses": 5,
+        "llm_calls": 5,
+        "model_attempts": 5,
+        "retries": 5,
+        "tokens": 5,
+        "tool_calls": 5,
+        "tool_errors": 5
+      }
+    },
+    "C1": {
+      "split": "held_in",
+      "cluster": "C",
+      "expected_baseline": "uncertain",
+      "attempts": 3,
+      "passes": 3,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 3.0,
+        "model_attempts": 3.0,
+        "retries": 0.0,
+        "tokens": 1112.333333,
+        "tool_calls": 2.0,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 3,
+        "cost": 3,
+        "incomplete_responses": 3,
+        "llm_calls": 3,
+        "model_attempts": 3,
+        "retries": 3,
+        "tokens": 3,
+        "tool_calls": 3,
+        "tool_errors": 3
+      }
+    },
+    "C2": {
+      "split": "held_in",
+      "cluster": "C",
+      "expected_baseline": "uncertain",
+      "attempts": 3,
+      "passes": 3,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 3.0,
+        "model_attempts": 3.0,
+        "retries": 0.0,
+        "tokens": 1095.666667,
+        "tool_calls": 2.0,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 3,
+        "cost": 3,
+        "incomplete_responses": 3,
+        "llm_calls": 3,
+        "model_attempts": 3,
+        "retries": 3,
+        "tokens": 3,
+        "tool_calls": 3,
+        "tool_errors": 3
+      }
+    },
+    "C3": {
+      "split": "held_out",
+      "cluster": "C",
+      "expected_baseline": "uncertain",
+      "attempts": 5,
+      "passes": 2,
+      "pass_fraction": 0.4,
+      "outcomes": [
+        "fail",
+        "fail",
+        "fail",
+        "pass",
+        "pass"
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 4.4,
+        "model_attempts": 4.4,
+        "retries": 0.0,
+        "tokens": 4092.4,
+        "tool_calls": 3.4,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 5,
+        "cost": 5,
+        "incomplete_responses": 5,
+        "llm_calls": 5,
+        "model_attempts": 5,
+        "retries": 5,
+        "tokens": 5,
+        "tool_calls": 5,
+        "tool_errors": 5
+      }
+    },
+    "D1": {
+      "split": "held_in",
+      "cluster": "D",
+      "expected_baseline": "pass",
+      "attempts": 3,
+      "passes": 3,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 2.0,
+        "model_attempts": 2.0,
+        "retries": 0.0,
+        "tokens": 443.0,
+        "tool_calls": 1.0,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 3,
+        "cost": 3,
+        "incomplete_responses": 3,
+        "llm_calls": 3,
+        "model_attempts": 3,
+        "retries": 3,
+        "tokens": 3,
+        "tool_calls": 3,
+        "tool_errors": 3
+      }
+    },
+    "D2": {
+      "split": "held_in",
+      "cluster": "D",
+      "expected_baseline": "pass",
+      "attempts": 3,
+      "passes": 3,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 2.0,
+        "model_attempts": 2.0,
+        "retries": 0.0,
+        "tokens": 461.0,
+        "tool_calls": 1.0,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 3,
+        "cost": 3,
+        "incomplete_responses": 3,
+        "llm_calls": 3,
+        "model_attempts": 3,
+        "retries": 3,
+        "tokens": 3,
+        "tool_calls": 3,
+        "tool_errors": 3
+      }
+    },
+    "D3": {
+      "split": "held_out",
+      "cluster": "D",
+      "expected_baseline": "uncertain",
+      "attempts": 5,
+      "passes": 5,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 3.0,
+        "model_attempts": 3.0,
+        "retries": 0.0,
+        "tokens": 1015.6,
+        "tool_calls": 2.0,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 5,
+        "cost": 5,
+        "incomplete_responses": 5,
+        "llm_calls": 5,
+        "model_attempts": 5,
+        "retries": 5,
+        "tokens": 5,
+        "tool_calls": 5,
+        "tool_errors": 5
+      }
+    },
+    "E1": {
+      "split": "held_in",
+      "cluster": "E",
+      "expected_baseline": "uncertain",
+      "attempts": 3,
+      "passes": 3,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 3.0,
+        "model_attempts": 3.0,
+        "retries": 0.0,
+        "tokens": 3974.0,
+        "tool_calls": 2.0,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 3,
+        "cost": 3,
+        "incomplete_responses": 3,
+        "llm_calls": 3,
+        "model_attempts": 3,
+        "retries": 3,
+        "tokens": 3,
+        "tool_calls": 3,
+        "tool_errors": 3
+      }
+    },
+    "E2": {
+      "split": "held_out",
+      "cluster": "E",
+      "expected_baseline": "pass",
+      "attempts": 5,
+      "passes": 5,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 3.0,
+        "model_attempts": 3.0,
+        "retries": 0.0,
+        "tokens": 2616.8,
+        "tool_calls": 2.0,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 5,
+        "cost": 5,
+        "incomplete_responses": 5,
+        "llm_calls": 5,
+        "model_attempts": 5,
+        "retries": 5,
+        "tokens": 5,
+        "tool_calls": 5,
+        "tool_errors": 5
+      }
+    },
+    "E3": {
+      "split": "held_in",
+      "cluster": "E",
+      "expected_baseline": "fail",
+      "attempts": 3,
+      "passes": 0,
+      "pass_fraction": 0.0,
+      "outcomes": [
+        "fail",
+        "fail",
+        "fail"
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 5.666667,
+        "model_attempts": 5.666667,
+        "retries": 0.0,
+        "tokens": 8410.333333,
+        "tool_calls": 4.666667,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 3,
+        "cost": 3,
+        "incomplete_responses": 3,
+        "llm_calls": 3,
+        "model_attempts": 3,
+        "retries": 3,
+        "tokens": 3,
+        "tool_calls": 3,
+        "tool_errors": 3
+      }
+    },
+    "F1": {
+      "split": "held_in",
+      "cluster": "F",
+      "expected_baseline": "pass",
+      "attempts": 3,
+      "passes": 3,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 3.0,
+        "model_attempts": 3.0,
+        "retries": 0.0,
+        "tokens": 1450.333333,
+        "tool_calls": 2.0,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 3,
+        "cost": 3,
+        "incomplete_responses": 3,
+        "llm_calls": 3,
+        "model_attempts": 3,
+        "retries": 3,
+        "tokens": 3,
+        "tool_calls": 3,
+        "tool_errors": 3
+      }
+    },
+    "F2": {
+      "split": "held_out",
+      "cluster": "F",
+      "expected_baseline": "pass",
+      "attempts": 5,
+      "passes": 5,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 10.0,
+        "model_attempts": 10.0,
+        "retries": 0.0,
+        "tokens": 3742.6,
+        "tool_calls": 9.0,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 5,
+        "cost": 5,
+        "incomplete_responses": 5,
+        "llm_calls": 5,
+        "model_attempts": 5,
+        "retries": 5,
+        "tokens": 5,
+        "tool_calls": 5,
+        "tool_errors": 5
+      }
+    },
+    "G1": {
+      "split": "held_in",
+      "cluster": "G",
+      "expected_baseline": "uncertain",
+      "attempts": 3,
+      "passes": 3,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 1.0,
+        "model_attempts": 1.0,
+        "retries": 0.0,
+        "tokens": 3511.666667,
+        "tool_calls": 0.0,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 3,
+        "cost": 3,
+        "incomplete_responses": 3,
+        "llm_calls": 3,
+        "model_attempts": 3,
+        "retries": 3,
+        "tokens": 3,
+        "tool_calls": 3,
+        "tool_errors": 3
+      }
+    },
+    "G2": {
+      "split": "held_out",
+      "cluster": "G",
+      "expected_baseline": "uncertain",
+      "attempts": 5,
+      "passes": 3,
+      "pass_fraction": 0.6,
+      "outcomes": [
+        "fail",
+        "pass",
+        "fail",
+        "pass",
+        "pass"
+      ],
+      "metrics": {
+        "compactions": 3.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 9.0,
+        "model_attempts": 1.0,
+        "retries": 0.0,
+        "tokens": 6681.6,
+        "tool_calls": 0.0,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 5,
+        "cost": 5,
+        "incomplete_responses": 5,
+        "llm_calls": 5,
+        "model_attempts": 5,
+        "retries": 5,
+        "tokens": 5,
+        "tool_calls": 5,
+        "tool_errors": 5
+      }
+    },
+    "G3": {
+      "split": "held_in",
+      "cluster": "G",
+      "expected_baseline": "pass",
+      "attempts": 3,
+      "passes": 3,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 2.0,
+        "model_attempts": 2.0,
+        "retries": 0.0,
+        "tokens": 517.0,
+        "tool_calls": 1.0,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 3,
+        "cost": 3,
+        "incomplete_responses": 3,
+        "llm_calls": 3,
+        "model_attempts": 3,
+        "retries": 3,
+        "tokens": 3,
+        "tool_calls": 3,
+        "tool_errors": 3
+      }
+    },
+    "G4": {
+      "split": "held_in",
+      "cluster": "G",
+      "expected_baseline": "uncertain",
+      "attempts": 3,
+      "passes": 0,
+      "pass_fraction": 0.0,
+      "outcomes": [
+        "fail",
+        "error",
+        "fail"
+      ],
+      "metrics": {
+        "compactions": 7.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 13.0,
+        "model_attempts": 1.0,
+        "retries": 0.0,
+        "tokens": 12099.5,
+        "tool_calls": 0.0,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 2,
+        "cost": 2,
+        "incomplete_responses": 2,
+        "llm_calls": 2,
+        "model_attempts": 2,
+        "retries": 2,
+        "tokens": 2,
+        "tool_calls": 2,
+        "tool_errors": 2
+      }
+    },
+    "G5": {
+      "split": "held_in",
+      "cluster": "G",
+      "expected_baseline": "uncertain",
+      "attempts": 3,
+      "passes": 0,
+      "pass_fraction": 0.0,
+      "outcomes": [
+        "fail",
+        "fail",
+        "fail"
+      ],
+      "metrics": {
+        "compactions": 3.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 10.0,
+        "model_attempts": 1.0,
+        "retries": 0.0,
+        "tokens": 8412.0,
+        "tool_calls": 2.0,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 3,
+        "cost": 3,
+        "incomplete_responses": 3,
+        "llm_calls": 3,
+        "model_attempts": 3,
+        "retries": 3,
+        "tokens": 3,
+        "tool_calls": 3,
+        "tool_errors": 3
+      }
+    },
+    "H1": {
+      "split": "held_in",
+      "cluster": "H",
+      "expected_baseline": "pass",
+      "attempts": 3,
+      "passes": 3,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 1.0,
+        "model_attempts": 1.0,
+        "retries": 1.0,
+        "tool_calls": 0.0,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 3,
+        "incomplete_responses": 3,
+        "llm_calls": 3,
+        "model_attempts": 3,
+        "retries": 3,
+        "tool_calls": 3,
+        "tool_errors": 3
+      }
+    },
+    "H2": {
+      "split": "held_out",
+      "cluster": "H",
+      "expected_baseline": "pass",
+      "attempts": 5,
+      "passes": 5,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "metrics": {
+        "compactions": 1.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 1.0,
+        "model_attempts": 1.0,
+        "retries": 1.0,
+        "tool_calls": 0.0,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 5,
+        "incomplete_responses": 5,
+        "llm_calls": 5,
+        "model_attempts": 5,
+        "retries": 5,
+        "tool_calls": 5,
+        "tool_errors": 5
+      }
+    },
+    "H3": {
+      "split": "held_in",
+      "cluster": "H",
+      "expected_baseline": "pass",
+      "attempts": 3,
+      "passes": 3,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 0.0,
+        "model_attempts": 0.0,
+        "retries": 4.0,
+        "tool_calls": 0.0,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 3,
+        "incomplete_responses": 3,
+        "llm_calls": 3,
+        "model_attempts": 3,
+        "retries": 3,
+        "tool_calls": 3,
+        "tool_errors": 3
+      }
+    }
+  },
+  "summary": {
+    "held_in_rate": 0.8039,
+    "held_out_rate": 0.8889,
+    "metrics": {
+      "compactions": 0.576923,
+      "cost": 0.0,
+      "incomplete_responses": 0.0,
+      "llm_calls": 4.915385,
+      "model_attempts": 3.223077,
+      "retries": 0.230769,
+      "tokens": 5203.1,
+      "tool_calls": 2.223077,
+      "tool_errors": 0.0
+    },
+    "metric_task_counts": {
+      "compactions": 26,
+      "cost": 23,
+      "incomplete_responses": 26,
+      "llm_calls": 26,
+      "model_attempts": 26,
+      "retries": 26,
+      "tokens": 23,
+      "tool_calls": 26,
+      "tool_errors": 26
+    },
+    "metric_attempt_counts": {
+      "compactions": 95,
+      "cost": 84,
+      "incomplete_responses": 95,
+      "llm_calls": 95,
+      "model_attempts": 95,
+      "retries": 95,
+      "tokens": 84,
+      "tool_calls": 95,
+      "tool_errors": 95
+    }
+  }
+}

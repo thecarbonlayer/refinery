@@ -1,0 +1,16 @@
+[
+  {
+    "id": "CL-2-compaction-state-erosion",
+    "mechanism": "structured_checkpoint compaction carries all cross-compaction state as prose: the previous checkpoint is re-presented to the summarizer as ordinary compressible transcript on every subsequent compaction, and the agent's own tool-derived file operations exist nowhere except that prose. Repeated compaction therefore erodes both stated facts and the agent's record of what it did.",
+    "tasks": ["G4", "G5"],
+    "hypothesis": "The operative knob is the compaction strategy, not its parameters or prompt. G4 states three heterogeneous facts early, then compacts 4-6 times; the file paths are gone in 3/3 attempts while the most recently stated fact survives, the signature of a checkpoint being re-compressed each round rather than carried forward as settled state. G5 writes two files via tools and is asked what it did; in both completed attempts the model recalls only the later write, because file operations are reconstructed from summarizer prose rather than extracted from tool calls. No compaction_prompt edit can fix this: the summarizer is structurally shown the same content as both settled state and compressible input, and instructions cannot make a model stop compressing what it is asked to compress. Carbon ships a vetted alternative on the menu, token_budget_checkpoint, whose incremental checkpoints remove the prior checkpoint from the compressible middle and whose deterministic state re-attaches tool-derived file paths verbatim.",
+    "evidence": [
+      "G4 attempt 0: compactions=6 files_recalled=False rejected_recalled=True next_action_recalled=True reply='* **Files changed so far**: N/A ...'",
+      "G4 attempt 1: compactions=4 files_recalled=False rejected_recalled=False next_action_recalled=True reply='Files changed so far: None.\\nApproach that was tried and rejected: None.\\nPending next action: NEXT-ACTION-G4-5HB.'",
+      "G4 attempt 2: compactions=6 files_recalled=False rejected_recalled=True next_action_recalled=True reply='Files changed so far: None. ...'",
+      "G5 attempt 0: compactions=2 observed=['reconcile_flags.py', 'audit_flags.py'] recalled=['audit_flags.py'] reply='In this session, I have created:\\n- `audit_flags.py`'",
+      "G5 attempt 2: compactions=2 observed=['reconcile_flags.py', 'audit_flags.py'] recalled=['audit_flags.py'] reply='I have created one file in this session: `audit_flags.py`.'",
+      "G5 attempt 1: outcome=error — the compaction summarize call itself was rejected by the provider (HTTP 400 from the local endpoint, raised inside harness compaction during _summarize) and the attempt aborted; structured_checkpoint ships the serialized middle to the summarizer with no token budget, so a long enough session can overflow the provider window at the compaction door."
+    ]
+  }
+]

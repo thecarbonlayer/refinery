@@ -1,0 +1,179 @@
+{
+  "candidate_id": "compaction-v4-budgeted",
+  "label": "cand-compaction-v4-budgeted",
+  "accepted": true,
+  "delta_in": 0.07842941176470586,
+  "delta_ho": 0.0,
+  "per_task": {
+    "A1": 0.0,
+    "A2": 0.0,
+    "A3": 0.0,
+    "A4": 0.0,
+    "B1": 0.0,
+    "B2": 0.0,
+    "B3": 0.0,
+    "C1": 0.0,
+    "C2": 0.0,
+    "C3": 0.19999999999999996,
+    "D1": 0.0,
+    "D2": 0.0,
+    "D3": 0.0,
+    "E1": 0.0,
+    "E2": 0.0,
+    "E3": 0.0,
+    "F1": 0.0,
+    "F2": 0.0,
+    "G1": 0.0,
+    "G2": -0.2,
+    "G3": 0.0,
+    "G4": 0.3333,
+    "G5": 1.0,
+    "H1": 0.0,
+    "H2": 0.0,
+    "H3": 0.0
+  },
+  "aggregate_accepted": true,
+  "regressions": {
+    "G2": -0.2
+  },
+  "catastrophic_regressions": {},
+  "baseline_metrics": {
+    "compactions": 0.532051,
+    "cost": 0.0,
+    "incomplete_responses": 0.007692,
+    "llm_calls": 4.923077,
+    "model_attempts": 3.230769,
+    "retries": 0.230769,
+    "tokens": 4899.442029,
+    "tool_calls": 2.269231,
+    "tool_errors": 0.0
+  },
+  "candidate_metrics": {
+    "compactions": 0.461538,
+    "cost": 0.0,
+    "incomplete_responses": 0.0,
+    "llm_calls": 5.202564,
+    "model_attempts": 3.3,
+    "retries": 0.230769,
+    "tokens": 5912.086956,
+    "tool_calls": 2.3,
+    "tool_errors": 0.0
+  },
+  "metric_delta": {
+    "compactions": -0.07051300000000005,
+    "cost": 0.0,
+    "incomplete_responses": -0.007692,
+    "llm_calls": 0.2794869999999996,
+    "model_attempts": 0.06923099999999982,
+    "retries": 0.0,
+    "tokens": 1012.6449270000003,
+    "tool_calls": 0.030768999999999824,
+    "tool_errors": 0.0
+  },
+  "metric_not_compared": [],
+  "metric_task_counts": {
+    "compactions": {
+      "baseline": 26,
+      "candidate": 26
+    },
+    "cost": {
+      "baseline": 23,
+      "candidate": 23
+    },
+    "incomplete_responses": {
+      "baseline": 26,
+      "candidate": 26
+    },
+    "llm_calls": {
+      "baseline": 26,
+      "candidate": 26
+    },
+    "model_attempts": {
+      "baseline": 26,
+      "candidate": 26
+    },
+    "retries": {
+      "baseline": 26,
+      "candidate": 26
+    },
+    "tokens": {
+      "baseline": 23,
+      "candidate": 23
+    },
+    "tool_calls": {
+      "baseline": 26,
+      "candidate": 26
+    },
+    "tool_errors": {
+      "baseline": 26,
+      "candidate": 26
+    }
+  },
+  "metric_attempt_counts": {
+    "compactions": {
+      "baseline": 95,
+      "candidate": 96
+    },
+    "cost": {
+      "baseline": 84,
+      "candidate": 85
+    },
+    "incomplete_responses": {
+      "baseline": 95,
+      "candidate": 96
+    },
+    "llm_calls": {
+      "baseline": 95,
+      "candidate": 96
+    },
+    "model_attempts": {
+      "baseline": 95,
+      "candidate": 96
+    },
+    "retries": {
+      "baseline": 95,
+      "candidate": 96
+    },
+    "tokens": {
+      "baseline": 84,
+      "candidate": 85
+    },
+    "tool_calls": {
+      "baseline": 95,
+      "candidate": 96
+    },
+    "tool_errors": {
+      "baseline": 95,
+      "candidate": 96
+    }
+  },
+  "metric_denominator_drift": [
+    "compactions",
+    "cost",
+    "incomplete_responses",
+    "llm_calls",
+    "model_attempts",
+    "retries",
+    "tokens",
+    "tool_calls",
+    "tool_errors"
+  ],
+  "baseline_fingerprint": {
+    "gemma_sha": "1e15c9196cf6f25619df7f0456b6c52ec6c30267",
+    "gemma_dirty": false,
+    "dirty_sha": null,
+    "config_version": 6,
+    "model": "google/gemma-4-26b-a4b",
+    "runner_sha": "024c9de1d2b36ecb4b4826151863fbd6466ddd2bc4b29ed31f49a9e975903d76",
+    "behavior_key": "d76131906bfc"
+  },
+  "candidate_fingerprint": {
+    "gemma_sha": "1e15c9196cf6f25619df7f0456b6c52ec6c30267",
+    "gemma_dirty": true,
+    "dirty_sha": "71407a43e87f809ad8c0b6d9f54ebd991252fd8f386d0193dfec6a4c511242bb",
+    "config_version": 7,
+    "model": "google/gemma-4-26b-a4b",
+    "runner_sha": "024c9de1d2b36ecb4b4826151863fbd6466ddd2bc4b29ed31f49a9e975903d76",
+    "behavior_key": "3c0a21a2f7ba"
+  }
+}
