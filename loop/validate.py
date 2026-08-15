@@ -22,6 +22,7 @@ from pathlib import Path
 
 from loop.artifacts import Candidate, ValidationRecord
 from loop.config_edit import CONFIG_REL, apply_candidate
+from loop.surface_sweep import sweep as run_sweep
 from runner.carbon_env import CARBON_ROOT, _git
 from runner.delta import delta
 from runner.suite import RESULTS_DIR
@@ -58,6 +59,13 @@ def run_harness_gates(carbon_root: Path = CARBON_ROOT, editor_root: Path = EDITO
     Run with the candidate APPLIED, so what is gated is the state the loop proposes to
     ship — and run BEFORE the suite, because a broken harness does not deserve forty
     minutes of model time.
+
+    Three checks, and the third is a different question from the first two. Those ask
+    "is the harness sound at the point this candidate proposes?"; the sweep asks "is it
+    sound at every point the surface publishes?". A no to the first is the candidate's
+    fault. A no to the third never is — it means a test pinned whatever value happened
+    to ship, and the loop is about to be blocked by its own instrument. The sweep costs
+    roughly a fifth of a suite run, against a suite run of about forty minutes.
     """
     if os.environ.get("PYTEST_CURRENT_TEST"):
         # This shells out to `pytest`, so calling it from inside a test spawns a nested
@@ -80,6 +88,28 @@ def run_harness_gates(carbon_root: Path = CARBON_ROOT, editor_root: Path = EDITO
         if not ok:
             out["passed"] = False
             out["checks"][name]["tail"] = tail
+    if not out["passed"]:
+        # A red suite at the shipped point makes every swept point red too, so the
+        # sweep would spend minutes restating one failure.
+        return out
+    # Both suites are green HERE — but "here" is one point on a surface the loop may
+    # move anywhere. The two checks above pass a candidate that is legal; the sweep
+    # asks whether the checks themselves survive every OTHER legal value, which is
+    # the question that has been wrong four times. Without it a fragile test turns
+    # into a candidate veto, reported as a harness break rather than as a worse agent.
+    report = run_sweep(carbon_root, editor_root, log=lambda line: None)
+    reds = [label for label, point in report["points"].items() if not point["passed"]]
+    out["checks"]["surface_sweep"] = {
+        "passed": report["passed"],
+        "probed": report["probed"],
+        "red_points": reds,
+    }
+    if not report["passed"]:
+        out["passed"] = False
+        out["checks"]["surface_sweep"]["tail"] = [
+            f"legal value {label} turns a suite red — fix the test, not the candidate"
+            for label in reds
+        ]
     return out
 
 
