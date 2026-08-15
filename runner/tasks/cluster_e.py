@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shlex
 from pathlib import Path
 
 from runner.carbon_env import make_provider
@@ -194,7 +195,49 @@ def e2_script() -> str:
     )
 
 
-E2_POST_PROCESSORS = ("|", ">", "tail", "head", "grep", "sed", "awk")
+E2_POST_PROCESSORS = ("tail", "head", "grep", "sed", "awk")
+_STDOUT_REDIRECTS = (">", ">>")
+
+
+def _shell_trims_output(cmd: str) -> bool:
+    """Would the SHELL cut this command's output before carbon's door sees it?
+
+    Matched on TOKENS, never on substrings. Substring matching over the whole command
+    was a live false-negative source, and every miss scored a real run 0.000 and
+    charged it to truncation policy:
+
+      - ``python3 run_tests.py 2>&1`` — excluded for containing ``>``. Merging stderr
+        into stdout trims nothing, and it is a very common idiom.
+      - ``cd ahead && python3 run_tests.py`` — excluded because "head" sits inside
+        "ahead". Same for any path with "overhead", "headers", "grepped".
+      - ``# read the header first`` + a plain run — excluded on a comment.
+
+    Redirect handling is file-descriptor aware for the same reason: ``2> err.txt``
+    and ``2>&1`` leave stdout whole, while ``> out.txt`` and ``>> out.txt`` divert it.
+
+    An unparsable command counts as trimming. The alternative is to guess about a
+    command whose shape we cannot read, and this predicate's job is to protect what
+    E2/E3/E4 mean — an over-permissive read grades a shell-side rescue as evidence
+    about the truncation policy.
+    """
+    lexer = shlex.shlex(cmd, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return True
+    for i, token in enumerate(tokens):
+        previous = tokens[i - 1] if i else None
+        following = tokens[i + 1] if i + 1 < len(tokens) else None
+        if token == "|":
+            return True
+        if token in _STDOUT_REDIRECTS and previous != "2":
+            return True
+        if token == ">&" and following != "1":  # `2>&1` merges; `>&file` diverts
+            return True
+        if token in E2_POST_PROCESSORS:
+            return True
+    return False
 
 
 def _ran_script_plainly(cmd: str) -> bool:
@@ -211,7 +254,7 @@ def _ran_script_plainly(cmd: str) -> bool:
     ``... | tail -5`` invocation preserves the tail by shell, not by policy, which is
     the very thing the task is trying to measure. So those are excluded instead.
     """
-    return "python3 run_tests.py" in cmd and not any(op in cmd for op in E2_POST_PROCESSORS)
+    return "python3 run_tests.py" in cmd and not _shell_trims_output(cmd)
 
 
 def _ran_audit_plainly(cmd: str) -> bool:
@@ -221,7 +264,7 @@ def _ran_audit_plainly(cmd: str) -> bool:
     ``| sed -n`` or ``| grep`` recovers trivially, and a shell-side rescue would grade
     the model's resourcefulness instead of the truncation policy under test.
     """
-    return "python3 run_audit.py" in cmd and not any(op in cmd for op in E2_POST_PROCESSORS)
+    return "python3 run_audit.py" in cmd and not _shell_trims_output(cmd)
 
 
 def run_e2() -> Attempt:
@@ -355,7 +398,7 @@ def _ran_settlement_plainly(cmd: str) -> bool:
     """E4's counterpart to ``_ran_script_plainly`` — same wrapping tolerance, same
     post-processor exclusions, for the same reasons. Only the FIRST plain run is
     the door under test; everything after it is recovery, judged separately."""
-    return f"python3 {E4_SCRIPT}" in cmd and not any(op in cmd for op in E2_POST_PROCESSORS)
+    return f"python3 {E4_SCRIPT}" in cmd and not _shell_trims_output(cmd)
 
 
 # A replay is an INVOCATION of the script, not any mention of its name: the offload

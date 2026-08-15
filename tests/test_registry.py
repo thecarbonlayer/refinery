@@ -529,13 +529,27 @@ def test_h_verdicts_are_not_stuck_true():
     from unittest.mock import patch
 
     import harness.agent as ha
+    from harness.harness_config import RetryPolicy
 
     from runner.tasks.cluster_h import run_h1, run_h2, run_h3
 
     with patch("harness.agent.time.sleep"):
         # H1/H3 measure retry. A carbon that classifies nothing as transient never
         # retries, so H1 cannot recover and H3's call count falls short of the bound.
-        with patch.object(ha.Agent, "_transient_error", staticmethod(lambda exc: False)):
+        #
+        # Pin a multi-call policy for this case. Disabling transient classification
+        # yields exactly ONE provider call — which is also what a legal `fail_fast`
+        # policy (any `max_attempts`) or `backoff/1` yields, so H3 correctly PASSES
+        # and this negative assertion misfires on 6 of the 10 legal retry settings.
+        # Carbon reads ``CONFIG.retry`` at call time, so rebinding moves carbon's
+        # behaviour and H3's expectation together and the mutant stays detectable.
+        # Sibling cases at :511 and :714 already branch on ``expected_retry_calls``;
+        # this one was missed. Since ``run_harness_gates`` now runs this suite before
+        # a candidate is measured, the miss vetoed legal candidates as a harness break.
+        with (
+            _rebound_config(retry=RetryPolicy("backoff", 3, 0)),
+            patch.object(ha.Agent, "_transient_error", staticmethod(lambda exc: False)),
+        ):
             assert not run_h1().passed, "H1 passed with retry disabled"
             assert not run_h3().passed, "H3 passed with retry disabled"
         # H2 measures overflow recovery. A carbon that takes the overflow branch but
@@ -622,7 +636,11 @@ def test_h2_survives_every_legal_compaction_and_window_setting():
     from runner.tasks.cluster_h import run_h2
 
     windows = ((1, 1), (2, 9), (6, 6), (10, 10), (2, 20))
-    fractions = (0.02, 0.1, 0.8, 1.0)
+    # 0.999, not 1.0: the interval is OPEN at both ends. It was closed at the top
+    # until carbon narrowed it, and probing the excluded end is the same defect the
+    # E3/E4 premise probes had at `tail_fraction` 0.0/1.0 — a test that only keeps
+    # passing while nothing enforces the schema.
+    fractions = (0.02, 0.1, 0.8, 0.999)
     for keep_head, keep_tail in windows:
         for fraction in fractions:
             policy = replace(
@@ -737,6 +755,14 @@ def test_e2_recognises_the_script_run_however_it_is_wrapped():
         "ls run_tests.py\npython3 run_tests.py",
         "cd . && python3 run_tests.py",
         "  python3 run_tests.py  ",
+        # The exclusion list used to be matched as SUBSTRINGS over the whole command,
+        # so each of these scored a real run 0.000 and charged it to truncation policy.
+        "python3 run_tests.py 2>&1",  # contains ">", trims nothing
+        "python3 run_tests.py 2> err.txt",  # stderr to a file leaves stdout whole
+        "cd ahead && python3 run_tests.py",  # "head" inside a word
+        "cd /tmp/overhead && python3 run_tests.py",
+        "# read the header first\npython3 run_tests.py",  # "head" in a comment
+        "cd greppable && python3 run_tests.py",
     ):
         assert _ran_script_plainly(cmd), f"should count as a plain run: {cmd!r}"
     for cmd in (
@@ -745,6 +771,12 @@ def test_e2_recognises_the_script_run_however_it_is_wrapped():
         "python3 run_tests.py | grep FAILED",
         "cat run_tests.py",
         "ls",
+        # Token matching must not become a hole: these still trim.
+        "python3 run_tests.py|tail -5",  # no spaces around the pipe
+        "python3 run_tests.py >> out.txt",
+        "python3 run_tests.py 1> out.txt",
+        "python3 run_tests.py >& out.txt",
+        "python3 run_tests.py; tail -5 nohup.out",
     ):
         assert not _ran_script_plainly(cmd), f"should NOT count: {cmd!r}"
 
