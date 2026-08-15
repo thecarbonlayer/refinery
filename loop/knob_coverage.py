@@ -76,14 +76,17 @@ SUITE_WIDE_KNOBS = frozenset({"system_prompt", "temperature"})
 # here either, and that is now a property of the code: their leak predicates read
 # the RAW tool result (see cluster_c's `recording_tool` wiring), precisely so a
 # candidate cannot raise a containment score by clamping away the evidence.
-_TOOL_RESULT_READERS = ("D3", "E1", "E2", "E3", "F1", "F2", "G3")
+# E4 is sensitive to the STRATEGY rather than the budget: its verdict turns on
+# whether the door leaves a recoverable artifact behind, which only an
+# offload-shaped strategy does — no budget value alone can move it.
+_TOOL_RESULT_READERS = ("D3", "E1", "E2", "E3", "E4", "F1", "F2", "G3")
 
 # Every task that makes any tool call at all, so the per-turn round budget binds
 # it. A different mechanism from result truncation, and therefore a different set
 # — sharing one list between the two was a false claim about both.
 _TOOL_USERS = (
     "A2", "B1", "B2", "B3", "C1", "C2", "C3", "D1", "D2", "D3",
-    "E1", "E2", "E3", "F1", "F2", "G3",
+    "E1", "E2", "E3", "E4", "F1", "F2", "G3",
 )  # fmt: skip
 
 KNOB_COVERAGE: dict[str, dict[str, tuple[str, ...]]] = {
@@ -102,16 +105,29 @@ KNOB_COVERAGE: dict[str, dict[str, tuple[str, ...]]] = {
     # text. A4 is the suite's sole `@path` sender and has no tools, so the
     # injected block is its only route to the answer — see UNGUARDED_KNOBS.
     "file_injection": {"observers": ("A4",), "miners": ("A4",), "guards": ()},
-    # E3 carries the capability gap: a midpoint needle in OPAQUE command output, which
-    # no positional strategy reaches and no query tool can route around. It is not a
-    # miner — no legal value moves its verdict — so it is registered in CAPABILITY_GAPS
-    # instead. E1 is an observer again now that it holds the real retrieval belt
-    # (search_text plus ranged read_file); what it measures is retrieval ECONOMY, which
-    # the budget genuinely moves. E2 distinguishes tail-preserving from head-only
-    # truncation; D3 is a second guard at lower budgets.
+    # The strategy menu, not the budget, is what this row now mines. E1 measures
+    # retrieval ECONOMY, which the budget genuinely moves. E3's midpoint needle in
+    # OPAQUE command output was this table's standing capability gap — both
+    # positional strategies miss the middle at any sane budget, and the budgets
+    # that do reach it are flood-shaped — until carbon put an offload strategy on
+    # the `tool_output` menu; the weakness E3 reports is now a settable value, so
+    # E3 graduates from CAPABILITY_GAPS to miner. Classified honestly: E3's own
+    # verifier requires the needle INSIDE the first plain run's inline result, so
+    # an excerpt-plus-path configuration leaves E3 itself red, and the only values
+    # that flip it green remain flood-sized budgets — which E1's economy verdict
+    # prices out. E4 is the task an offload configuration can genuinely turn
+    # green, and the proof the mined fix is the recoverable kind rather than the
+    # bigger bucket iteration 1 shipped (the clamp raise of iterations/iter-01,
+    # PR #1): same opaque-stdout shape, needle astride the midpoint
+    # of a stream no honest inline cut can span, pass gated on recovery from the
+    # offloaded artifact itself (attribution in cluster_e), so neither a larger
+    # budget nor a luckier excerpt can fake it. E2 (tail survival through the
+    # inline excerpt) and D3 (a second guard at lower budgets) stay the guards,
+    # unchanged: an offload candidate that floods the window or loses the tail
+    # dies on them, which is exactly the regression they exist to catch.
     "tool_output": {
         "observers": _TOOL_RESULT_READERS,
-        "miners": ("E1",),
+        "miners": ("E1", "E3", "E4"),
         "guards": ("E2", "D3"),
     },
     # F2 forces 10 model calls and fails at any budget <= 9 — the only binding
@@ -205,16 +221,16 @@ GUARD_ONLY_KNOBS: dict[str, str] = {
 # the strategy it needs is not on the menu. These are the loop's honest output when the
 # right answer does not exist yet — a written request for a person, never a setting
 # change that approximates one.
-CAPABILITY_GAPS: dict[str, str] = {
-    "E3": (
-        "Needs a tool_output strategy that preserves the MIDDLE of a large result — "
-        "summarize-the-middle, or an offload that hands back a retrievable path. Both "
-        "shipped strategies are positional (head, or head plus tail), so at any sane "
-        "budget neither reaches a fact in the middle, and the budget that does reach it "
-        "floods the window. Measured on opaque command output, where — unlike E1's file "
-        "fixture — no query tool can route around the door."
-    ),
-}
+#
+# Empty today, and the empty state has a history worth keeping: E3 held this slot —
+# "needs a tool_output strategy that preserves the MIDDLE of a large result, an offload
+# that hands back a retrievable path" — from the suite repair until carbon added such a
+# strategy to the `tool_output` menu. The request was answered, so E3 moved to that
+# knob's miners (see the row above) with E4 alongside it to prove path-recoverability
+# specifically. That is this table working as designed: a gap is a written request for
+# a person, and it leaves when the person ships the strategy, never when the task is
+# softened to stop asking.
+CAPABILITY_GAPS: dict[str, str] = {}
 
 # Knobs whose only observers are their own miners, so no task can guard them.
 # A REAL coverage gap, recorded rather than hidden behind a guard that cannot see

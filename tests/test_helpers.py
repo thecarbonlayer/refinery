@@ -18,12 +18,14 @@ from runner.helpers import (
     neutral_dir,
     scripted_approver,
     snapshot_tree,
+    tool_runs,
     tool_texts,
     tree_changes,
+    workspace_kwargs,
 )
 
 
-def _probe_agent():
+def _probe_agent(**extra):
     from harness.agent import Agent
     from harness.observability import Tracer
     from model import Provider
@@ -34,6 +36,7 @@ def _probe_agent():
         model=provider.model,
         agents_dir=neutral_dir(),
         tracer=Tracer(model=provider.model),
+        **extra,
     )
 
 
@@ -163,6 +166,32 @@ def test_agent_metrics_omits_only_cost_fields_when_asked():
     assert set(agent_metrics(agent, include_cost=False)) == mechanism
 
 
+def test_workspace_kwargs_is_the_kwarg_carbons_agent_actually_takes(tmp_path):
+    """The recovery route a spilled-to-disk tool result leaves behind is a path,
+    and the path only resolves if carbon anchors its writes at the tree the task's
+    ``read_file`` is bound to. That hangs on one kwarg name, feature-detected at
+    run time because carbon is a sibling checkout that gains it on its own
+    schedule — so pin it against the live carbon from both directions.
+
+    The name has to agree with carbon's own signature, or the detect silently
+    reports "not supported" forever and the anchoring never happens; and whatever
+    the helper emits has to be constructible, or every task in three modules dies
+    on a TypeError. Neither failure shows up anywhere else offline — the wiring
+    pin over in ``test_registry`` builds its task agents against a stand-in — so
+    this is the only place carbon's real constructor is asked the question.
+    """
+    from harness.agent import Agent
+
+    kwargs = workspace_kwargs(tmp_path)
+    carbon_takes_it = "workspace_root" in inspect.signature(Agent).parameters
+    assert bool(kwargs) == carbon_takes_it, (
+        f"carbon takes workspace_root={carbon_takes_it} but the helper emitted {kwargs} — "
+        "the detected name has drifted from carbon's parameter"
+    )
+    assert kwargs in ({}, {"workspace_root": str(tmp_path)})
+    _probe_agent(**kwargs)  # must construct against whichever carbon is installed
+
+
 def _bash_call(call_id: str, command: str) -> dict:
     return {
         "role": "assistant",
@@ -196,6 +225,30 @@ def test_bash_runs_pairs_calls_with_results():
     cmd, result = runs[0]
     assert cmd == "python3 test_gate.py"
     assert exit_code_of(result) == 1
+
+
+def test_tool_runs_pairs_named_tools_and_keeps_raw_args():
+    """``tool_runs`` owns the pairing rules ``bash_runs`` rides on, and E4's
+    attribution reads NON-bash calls through it, so the name filter and the
+    raw-args passthrough get pinned directly: args stay exactly as sent (no JSON
+    decode — a ``read_file`` path and a ``bash`` command need the same text view),
+    and only the named tools appear, in call order."""
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "a", "function": {"name": "bash", "arguments": '{"command": "ls"}'}},
+                {"id": "b", "function": {"name": "read_file", "arguments": '{"path": "n.txt"}'}},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "a", "content": "[exit 0 via trusted]\nn.txt"},
+        {"role": "tool", "tool_call_id": "b", "content": "hello"},
+    ]
+    assert tool_runs(messages, ("read_file",)) == [("read_file", '{"path": "n.txt"}', "hello")]
+    both = tool_runs(messages, ("bash", "read_file"))
+    assert [name for name, _, _ in both] == ["bash", "read_file"]
+    assert both[0][1] == '{"command": "ls"}'  # raw, undecoded
 
 
 def test_bash_runs_pairs_structurally_when_ids_are_empty():

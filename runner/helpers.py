@@ -8,6 +8,7 @@ discipline as carbon/tasks/checks.py.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -75,8 +76,8 @@ def tool_call_args(messages: list[dict], names: tuple[str, ...]) -> list[str]:
     return out
 
 
-def bash_runs(messages: list[dict], match: Callable[[str], bool]) -> list[tuple[str, str]]:
-    """(command, paired tool-result) for every bash call whose command matches.
+def tool_runs(messages: list[dict], names: tuple[str, ...]) -> list[tuple[str, str, str]]:
+    """(tool name, raw JSON args, paired tool-result) for every call to ``names``.
 
     Pairing is structural, not a transcript-wide id lookup: carbon's loop appends
     one tool message per call, in call order, immediately after the assistant
@@ -84,8 +85,12 @@ def bash_runs(messages: list[dict], match: Callable[[str], bool]) -> list[tuple[
     empty or duplicated and an id-keyed dict would let a later result clobber
     an earlier one. Within each block we pair by id only when the id is
     non-empty and unique in the block; otherwise positionally (nth call <-> nth
-    tool message). A call with no located result pairs with ""."""
-    out: list[tuple[str, str]] = []
+    tool message). A call with no located result pairs with "".
+
+    Args stay RAW here: only the caller knows each tool's argument shape, and E4's
+    attribution scans need the same text view of a ``bash`` command and a
+    ``read_file`` path, which the raw JSON string already is."""
+    out: list[tuple[str, str, str]] = []
     i = 0
     while i < len(messages):
         m = messages[i]
@@ -108,14 +113,25 @@ def bash_runs(messages: list[dict], match: Callable[[str], bool]) -> list[tuple[
             else:
                 result = str(block[pos].get("content", "")) if pos < len(block) else ""
             fn = tc.get("function", {})
-            if fn.get("name") != "bash":
-                continue
-            try:
-                cmd = str(json.loads(fn.get("arguments") or "{}").get("command", ""))
-            except json.JSONDecodeError:
-                continue
-            if match(cmd):
-                out.append((cmd, result))
+            if fn.get("name") in names:
+                out.append((str(fn.get("name")), str(fn.get("arguments") or ""), result))
+    return out
+
+
+def bash_runs(messages: list[dict], match: Callable[[str], bool]) -> list[tuple[str, str]]:
+    """(command, paired tool-result) for every bash call whose command matches.
+
+    A view over ``tool_runs`` (which owns the pairing rules): the bash args JSON
+    is decoded down to the one field verifiers match on, and undecodable args are
+    skipped rather than matched against raw text — a malformed call never ran."""
+    out: list[tuple[str, str]] = []
+    for _name, raw, result in tool_runs(messages, ("bash",)):
+        try:
+            cmd = str(json.loads(raw or "{}").get("command", ""))
+        except json.JSONDecodeError:
+            continue
+        if match(cmd):
+            out.append((cmd, result))
     return out
 
 
@@ -331,6 +347,35 @@ def neutral_dir() -> str:
     """An empty dir to use as agents_dir so no stray AGENTS.md leaks into the
     system prompt (Agent's default agents_dir='.' would load the workshop's)."""
     return tempfile.mkdtemp(prefix="neutral-")
+
+
+def workspace_kwargs(root: Path | str) -> dict[str, str]:
+    """``workspace_root=<root>`` for carbon's Agent — when this carbon accepts it.
+
+    Tasks bind ``agents_dir=neutral_dir()`` deliberately, but that same directory
+    is where carbon anchors anything its truncation door writes to disk, while the
+    task's ``read_file`` is rooted at the WORKSPACE. Under a strategy that spills
+    the full result to a file, the two disagree: every path the door hands back
+    names a file the model cannot open, so the task would grade this wiring
+    instead of the knob under test — and an offload candidate that works would be
+    recorded as a failure. Passing the workspace explicitly settles it and leaves
+    ``agents_dir`` doing its own, unrelated job: which AGENTS.md, if any, reaches
+    the system prompt.
+
+    Feature-detected, not assumed. carbon is a sibling checkout that moves on its
+    own schedule, and the kwarg arrives with the offload strategy; on a carbon
+    that predates it, passing it is a TypeError at construction. That failure
+    would be nearly invisible — the offline suite builds its task agents against a
+    stand-in, so only a live run would find it, and it would take out every task
+    in the affected modules when it did. Absent the kwarg
+    carbon anchors on ``agents_dir``, which is exactly today's behavior, so the
+    older-carbon path is the unchanged one rather than a degraded one.
+    """
+    from harness.agent import Agent
+
+    if "workspace_root" in inspect.signature(Agent).parameters:
+        return {"workspace_root": str(root)}
+    return {}
 
 
 def task_dirs() -> tuple[Path, Path]:

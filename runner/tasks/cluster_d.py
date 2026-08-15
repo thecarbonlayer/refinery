@@ -14,7 +14,13 @@ import operator
 import re
 
 from runner.carbon_env import make_provider
-from runner.helpers import agent_metrics, neutral_dir, scripted_approver, tool_texts
+from runner.helpers import (
+    agent_metrics,
+    neutral_dir,
+    scripted_approver,
+    tool_texts,
+    workspace_kwargs,
+)
 from runner.spec import Attempt, TaskSpec
 
 # Pinned ground truths (authoring-time oracles — never derived at run time).
@@ -167,6 +173,10 @@ def run_d3() -> Attempt:
         model=provider.model,
         tools=tools,
         agents_dir=neutral_dir(),
+        # Both tools above are bound to the workspace, so anything carbon's
+        # truncation door writes belongs there too — not in the neutral
+        # `agents_dir`, where a `read_file` rooted at the workspace cannot follow.
+        **workspace_kwargs(ws.root),
         approve=scripted_approver(approvals),
         approval_required=APPROVAL_TOOLS,
     )
