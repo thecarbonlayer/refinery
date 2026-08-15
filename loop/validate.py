@@ -22,6 +22,7 @@ from pathlib import Path
 
 from loop.artifacts import Candidate, ValidationRecord
 from loop.config_edit import CONFIG_REL, apply_candidate
+from loop.observed_coverage import observed_activity, partition_deltas, result_files
 from loop.surface_sweep import sweep as run_sweep
 from runner.carbon_env import CARBON_ROOT, _git
 from runner.delta import delta
@@ -113,6 +114,50 @@ def run_harness_gates(carbon_root: Path = CARBON_ROOT, editor_root: Path = EDITO
     return out
 
 
+def coverage_note(candidate: Candidate, per_task: dict[str, float]) -> dict:
+    """Split this candidate's per-task movements by whether the edited knobs reach them.
+
+    Derived from every recorded run, not from an authored table: `loop.knob_coverage`
+    says of itself that it is "a human-audited claim with mechanical guardrails, not a
+    proof", and an audit found six of its rows false at once. What a task actually did
+    is in the attempt logs.
+
+    Reported, never applied. Dropping the unreachable half and re-deciding would be a
+    second acceptance rule hidden inside the first — and the direction it moves the
+    verdict depends entirely on which tasks happen to be unreachable that day. On
+    iteration 3, dropping only the tasks that HURT the candidate flips it to accepted;
+    dropping symmetrically leaves it rejected. A rule you can point either way is not a
+    rule. So the record carries the split and a person reads it.
+    """
+    knobs = sorted(candidate.fields)
+    try:
+        activity = observed_activity(result_files())
+    except OSError:
+        return {"knobs": knobs, "error": "no recorded runs to derive coverage from"}
+    # Unreachable by EVERY edited knob. A candidate editing two knobs reaches a task if
+    # EITHER does, so the sets intersect. The accumulator starts at None rather than {}
+    # because an empty first set is meaningful — it means that knob reaches everything,
+    # which must swallow the whole result, not be mistaken for "nothing seen yet".
+    unreachable: dict[str, float] | None = None
+    for knob in knobs:
+        split = partition_deltas(knob, per_task, activity)
+        if unreachable is None:
+            unreachable = split["unreachable"]
+        else:
+            unreachable = {t: v for t, v in unreachable.items() if t in split["unreachable"]}
+    unreachable = unreachable or {}
+    evidence = {t: v for t, v in per_task.items() if t not in unreachable}
+    return {
+        "knobs": knobs,
+        "evidence": evidence,
+        "unreachable": unreachable,
+        "note": (
+            "`unreachable` movements are on tasks no legal value of the edited knob(s) "
+            "can affect; they are recorded, not subtracted from the delta."
+        ),
+    }
+
+
 def _run_runner(label: str, only: list[str] | None, attempts: int | None) -> None:
     """Run the suite in a fresh interpreter (same venv), cwd at the repo root."""
     cmd = [sys.executable, "-m", "runner.cli", "run", "--label", label]
@@ -167,6 +212,20 @@ def validate_candidate(
         require_clean_tree(carbon_root)  # the revert must actually have reverted
     results = json.loads((results_dir / f"{label}.json").read_text())
     d = delta(baseline, results)
+    # Which of the movements are even ABOUT the candidate. A per-task delta on a task
+    # the edited knob cannot reach is the grader's run-to-run variance wearing the
+    # candidate's name. Iteration 3 was rejected on Δ_in −0.118 of which −1.33 came
+    # from two tasks whose agents have no tool registry at all, while the candidate
+    # edited `tool_output`. This does not change the verdict — the acceptance rule is
+    # what it is, and quietly reweighting it here would be a second, hidden rule — it
+    # records what the verdict was made of, next to the verdict.
+    coverage = coverage_note(candidate, d["per_task"])
+    if coverage.get("unreachable"):
+        log(
+            f"  note: {len(coverage['unreachable'])} of "
+            f"{len(d['per_task'])} per-task movements are on tasks the edited "
+            f"knob(s) cannot reach — see `gates`/`coverage` in the record"
+        )
     record = ValidationRecord(
         candidate_id=candidate.id,
         label=label,
@@ -187,6 +246,7 @@ def validate_candidate(
         baseline_fingerprint=d["baseline_fingerprint"],
         candidate_fingerprint=d["candidate_fingerprint"],
         gates=gates,
+        coverage=coverage,
     )
     log(
         f"candidate {candidate.id}: Δ_in={d['delta_in']:+.4f} Δ_ho={d['delta_ho']:+.4f} "

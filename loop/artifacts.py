@@ -160,6 +160,13 @@ class ValidationRecord:
     # this existed, so the outcome is part of the record rather than a thing someone
     # is trusted to have checked. Empty dict on records written before the gate.
     gates: dict = field(default_factory=dict)
+    # Which per-task movements the edited knob can actually reach, derived from the
+    # attempt logs rather than an authored table. A delta on a task the knob cannot
+    # touch is grader variance, not an effect: two tasks whose agents have no tool
+    # registry at all supplied -1.33 of the -2.00 that made iteration 3's Δ_in
+    # negative, against a candidate that edited `tool_output`. Recorded beside the
+    # verdict, never subtracted from it — see `coverage_note` for why not.
+    coverage: dict = field(default_factory=dict)
 
     def to_json(self) -> dict:
         return {

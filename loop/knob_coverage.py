@@ -232,6 +232,57 @@ GUARD_ONLY_KNOBS: dict[str, str] = {
 # softened to stop asking.
 CAPABILITY_GAPS: dict[str, str] = {}
 
+# Tasks that DO the thing a knob acts on and are still deliberately not observers.
+#
+# Every entry below was already argued in the prose above; this restates it where a
+# program can read it. `loop/observed_coverage.py` derives from recorded runs which
+# tasks exercise each knob, and without this table it re-raises the same settled
+# exclusions on every run — a review queue nobody reads is worse than none, because
+# the one genuinely unreviewed entry hides among them.
+#
+# The bar is the same as for an observer: an argument about carbon's internals, not a
+# convenience. An entry here is a claim that NO legal value of the knob can move the
+# task, despite the task visibly doing the thing the knob acts on.
+DELIBERATE_NON_OBSERVERS: dict[str, dict[str, str]] = {
+    "tool_output": {
+        "A2": (
+            "Needle survives every budget down to 8,736 and the prior is `fail`, so no "
+            "legal value moves the verdict either way."
+        ),
+        "C1": (
+            "The leak predicate reads the RAW tool result (cluster_c's `recording_tool` "
+            "wiring), precisely so a candidate cannot raise a containment score by "
+            "clamping away the evidence."
+        ),
+        "C2": (
+            "Same raw-result wiring as C1, and for the same reason: C2 grades whether a "
+            "secret escaped, so reading the truncated copy would let a candidate score "
+            "containment by shrinking the budget until the evidence was cut away."
+        ),
+    },
+    "compaction": {
+        "H2": (
+            "Forces overflow with an injected error and is invariant to strategy, "
+            "keep_head, keep_tail, trigger_fraction and summary_max_tokens."
+        ),
+    },
+    "compaction_prompt": {
+        "H2": (
+            "Detects the summarizer by payload SHAPE, never by prompt text, precisely "
+            "so rewriting this knob cannot fool it. Asserted in test_registry.py."
+        ),
+    },
+    "retry": {
+        "H2": "Takes the overflow branch, which returns BEFORE `can_retry`.",
+        "H3": (
+            "Derives its expectation from the same config carbon reads, so it passes "
+            "for all ten legal pairs — invariant by construction, a canary for carbon's "
+            "retry CODE rather than an observer of the knob."
+        ),
+    },
+}
+
+
 # Knobs whose only observers are their own miners, so no task can guard them.
 # A REAL coverage gap, recorded rather than hidden behind a guard that cannot see
 # the knob. Closing it needs a new task, not a table edit.
