@@ -147,8 +147,23 @@ def run_h2() -> Attempt:
     # satisfied every `>= 1`. Only a delta separates "the overflow was recovered" from
     # "something compacted at some point". Verified: invariant across 107 legal
     # compaction/context settings, and red for both broken-recovery variants.
-    recovered = len(at_main) == 2 and at_main[1] == (at_main[0][0] + 1, at_main[0][1] + 1)
-    ok = H2_SENTINEL in reply and state["main"] == 2 and recovered
+    # A FOURTH form was needed once the compaction menu grew. The delta above was
+    # positional — exactly two main calls, and the increment between the first two —
+    # which encoded an ordering that only held for the strategy shipped at the time.
+    # Under token_budget_checkpoint at keep_head=6/keep_tail=6/trigger_fraction=0.02,
+    # instrumenting the run shows recovery attempted once, returning True, and really
+    # compacting; the agent recovers and returns the sentinel. Only the BOOKKEEPING
+    # differs: the increment lands between the second and third main call, so a rule
+    # written around call positions reads a healthy recovery as a failure.
+    #
+    # So compare the ends, not the neighbours: the compaction the overflow caused must
+    # appear somewhere between the first main call and the last. That keeps both teeth
+    # the earlier forms were built for. A pre-turn compaction is already baked into
+    # at_main[0], so it cannot satisfy this on its own; and a carbon that takes the
+    # overflow branch while compacting nothing never moves the counter at all. Both are
+    # pinned by the broken-recovery guards in the suite.
+    recovered = len(at_main) >= 2 and at_main[-1][0] > at_main[0][0]
+    ok = H2_SENTINEL in reply and recovered
     detail_counts = (
         f"compactions_at_main={[c for c, _ in at_main]} summaries_at_main={[s for _, s in at_main]}"
     )

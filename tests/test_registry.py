@@ -167,7 +167,9 @@ def test_e3_needle_is_unreachable_by_every_shipped_strategy():
     # A THIRD of the stream, not a tenth: a deliberately generous budget, so the test
     # fails if the needle is merely hard to reach rather than genuinely out of reach.
     budget = len(output) // 3
-    for strategy, tail_fraction in (("head_tail", 0.5), ("head_tail", 0.9), ("keep_head", 0.0)):
+    # keep_head ignores tail_fraction, but the field is legal only in (0, 1) — carbon
+    # validates it at construction now, so the "don't care" probe uses a legal value.
+    for strategy, tail_fraction in (("head_tail", 0.5), ("head_tail", 0.9), ("keep_head", 0.5)):
         policy = replace(
             CONFIG.tool_output, strategy=strategy, budget=budget, tail_fraction=tail_fraction
         )
@@ -226,12 +228,15 @@ def test_e4_needle_is_unreachable_below_half_the_stream(tmp_path):
     # candidate in carbon's working tree must not redden this suite.
     assert len(output) > 800_000, "the stream has shrunk below the scale the task claims"
     assert ceiling >= len(output) // 2 - 200, "the needle no longer sits astride the midpoint"
+    # The extremes are 0.001/0.999, not 0.0/1.0: the field's legal range is the OPEN
+    # interval, and carbon now enforces that at construction. Near-extremes probe the
+    # same corners — all-head and all-tail — while staying inside what the loop may pick.
     for strategy, tail_fraction in (
-        ("head_tail", 0.0),
+        ("head_tail", 0.001),
         ("head_tail", 0.5),
         ("head_tail", 0.9),
-        ("head_tail", 1.0),
-        ("keep_head", 0.0),
+        ("head_tail", 0.999),
+        ("keep_head", 0.5),  # keep_head ignores it; (0, 1) is the legal range
     ):
         policy = replace(
             CONFIG.tool_output, strategy=strategy, budget=ceiling, tail_fraction=tail_fraction
