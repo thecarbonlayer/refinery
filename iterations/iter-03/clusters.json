@@ -1,0 +1,10 @@
+[
+  {
+    "id": "CL-3-tool-output-midstream-loss",
+    "mechanism": "A fact in the middle of a large tool result is unreachable. Both shipped truncation strategies are positional — keep_head takes a prefix, head_tail takes both ends — so whatever sits between the ends is discarded at the door and cannot be recovered by any later call, because the bytes are gone rather than merely unshown.",
+    "tasks": ["E3", "E4"],
+    "hypothesis": "The loss is a property of the strategy menu, not of the budget. No value of budget or tail_fraction reaches a midpoint needle while remaining a truncation: a head keeps it only if the head covers its end, a tail only if the tail covers back to its start, so reaching it requires delivering essentially the whole stream, which is the flooding the door exists to prevent. If that reading is right, a strategy that preserves the discarded bytes somewhere addressable should move these tasks while a larger budget should not.",
+    "evidence": "E3 has been red by construction since the suite repair and was recorded as a capability gap rather than a tuning target — its own docstring states that no value of any current setting passes it. E4 was added as the held-out proof of the same mechanism, with a tag placed astride the exact midpoint of ~840KB of command output and a verifier that requires recovery to be attributed to a tool call naming a file on disk, so neither reading the generator's source nor buying a flood-sized budget can fake it. carbon now ships offload_to_file, which is the strategy that gap requested by name, making the hypothesis testable for the first time.",
+    "note": "Prespecified, not mined. This cluster and both candidates were written from the launch spec before baseline-r5-v7 existed, so the iteration is a confirmatory test of a stated prediction. A mining pass over r5's actual failures has NOT been done and may still be worth doing — it would be the honest source of any ADDITIONAL candidate, and its absence should be stated plainly wherever this iteration's result is reported."
+  }
+]

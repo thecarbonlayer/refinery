@@ -1,0 +1,48 @@
+[
+  {
+    "id": "tool-output-offload",
+    "cluster_id": "CL-3-tool-output-midstream-loss",
+    "proposer": "Fable",
+    "proposer_detail": "claude-fable-5, in-session (Claude Code) — PRESPECIFIED, not mined from a baseline. Both candidates in this iteration were named in the iteration-3 launch spec before baseline-r5-v7 was recorded, so this is a confirmatory pass against a stated prediction rather than a proposal derived from observed failures. Treat it as prespecification (stronger for the claim it tests) rather than as evidence the loop discovered the fix.",
+    "fields": {
+      "tool_output": {
+        "old": {
+          "strategy": "head_tail",
+          "budget": 4000,
+          "tail_fraction": 0.6
+        },
+        "new": {
+          "strategy": "offload_to_file",
+          "budget": 4000,
+          "tail_fraction": 0.6
+        }
+      }
+    },
+    "rationale": "Strategy selection only: budget and tail_fraction are untouched, so the inline excerpt the model reads is the same size and shape as the baseline's. What changes is that the bytes the cut discards are written to a file under the workspace and the excerpt carries a pointer to it, so a fact in the middle of a large tool result stops being unreachable. This is the strategy E3 has been asking for by name since the suite repair: its needle sits at the midpoint of opaque command output, where no positional cut reaches at any budget that is still a truncation rather than a flood.",
+    "expected_effect": "E4 is the direct test and should move from fail toward pass: its tag is astride the midpoint of ~840KB of command output and is reachable only by following the spilled path, with the verifier requiring the recovery be attributed to a tool call that named a file on disk. E3 may or may not move — its own verifier still demands the needle inside the first plain run's inline result, so an excerpt-plus-pointer configuration can leave E3 red while E4 goes green. E1's economy verdict should hold, because the inline delivery share is unchanged.",
+    "regression_risk": "Every truncated tool result now carries a ~450-char footer, which is added instruction surface for a small model and eats budget that previously held content — the recall guards (A1, A3) and the tail-survival guard (E2) are the exposure. Benchmark evidence from SWE-bench Pro (openlibrary-7232, 20 attempts/arm) found the strategy engaged but never followed: zero pointer-follows across 25 attempts, so a null result here would be consistent with prior evidence rather than surprising. read_file results are exempt from offloading by design, so any task whose decisive content arrives via read_file cannot move."
+  },
+  {
+    "id": "tool-output-budget-16k",
+    "cluster_id": "CL-3-tool-output-midstream-loss",
+    "proposer": "Fable",
+    "proposer_detail": "claude-fable-5, in-session (Claude Code) — PRESPECIFIED control arm, named in the launch spec alongside the candidate above.",
+    "fields": {
+      "tool_output": {
+        "old": {
+          "strategy": "head_tail",
+          "budget": 4000,
+          "tail_fraction": 0.6
+        },
+        "new": {
+          "strategy": "head_tail",
+          "budget": 16000,
+          "tail_fraction": 0.6
+        }
+      }
+    },
+    "rationale": "The control, and this iteration's 'would a bigger number have been enough?' arm — deliberately the same move iteration 1 made and had rejected (PR #1 raised the clamp and was refused, not because it was a number but because that number fixed failures by inhaling more content wholesale rather than reaching what was needed). Running it as a candidate rather than assuming its verdict is the point: if the rule rejects the larger bucket and accepts the strategy switch, iteration 1's lesson is enforced by the acceptance rule instead of by human judgment.",
+    "expected_effect": "PREDICTION ON RECORD: rejected. E1's economy guard exists precisely to price out a budget large enough to carry a whole fixture — it passes only if the needle is retrieved while delivering under a tenth of the file — so a 4x budget should trip it. E4 should stay red regardless, since its needle sits at the midpoint of ~840KB and no budget that is still a truncation reaches it.",
+    "regression_risk": "If E1's guard does NOT trip, that is the finding, not a failure: it would mean the economy verdict is weaker than believed and the suite cannot distinguish 'reach what you need' from 'take more of everything' — which would need fixing before the surface can be trusted to reject this class of change."
+  }
+]

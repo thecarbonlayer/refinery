@@ -1,0 +1,176 @@
+{
+  "candidate_id": "tool-output-offload",
+  "label": "cand-tool-output-offload",
+  "accepted": false,
+  "delta_in": -0.11764117647058825,
+  "delta_ho": 0.07999999999999996,
+  "per_task": {
+    "A1": -1.0,
+    "A2": 0.0,
+    "A3": 0.0,
+    "A4": 0.0,
+    "B1": 0.0,
+    "B2": -0.33330000000000004,
+    "B3": 0.0,
+    "C1": 0.0,
+    "C2": 0.0,
+    "C3": 0.0,
+    "D1": 0.0,
+    "D2": 0.0,
+    "D3": 0.0,
+    "E1": 0.0,
+    "E2": 0.19999999999999996,
+    "E3": 0.0,
+    "E4": 0.8,
+    "F1": 0.0,
+    "F2": 0.0,
+    "G1": 0.3334,
+    "G2": -0.2,
+    "G3": 0.0,
+    "G4": -0.3333,
+    "G5": -0.6667000000000001,
+    "H1": 0.0,
+    "H2": 0.0,
+    "H3": 0.0
+  },
+  "aggregate_accepted": false,
+  "regressions": {
+    "A1": -1.0,
+    "B2": -0.33330000000000004,
+    "G2": -0.2,
+    "G4": -0.3333,
+    "G5": -0.6667000000000001
+  },
+  "catastrophic_regressions": {
+    "A1": -1.0
+  },
+  "baseline_metrics": {
+    "compactions": 0.555556,
+    "cost": 0.0,
+    "incomplete_responses": 0.007407,
+    "llm_calls": 5.106173,
+    "model_attempts": 3.501235,
+    "retries": 0.222222,
+    "tokens": 5590.583333,
+    "tool_calls": 2.538272,
+    "tool_errors": 0.007407
+  },
+  "candidate_metrics": {
+    "compactions": 0.555556,
+    "cost": 0.0,
+    "incomplete_responses": 0.02963,
+    "llm_calls": 4.950617,
+    "model_attempts": 3.345679,
+    "retries": 0.222222,
+    "tokens": 5291.713889,
+    "tool_calls": 2.37037,
+    "tool_errors": 0.0
+  },
+  "metric_delta": {
+    "compactions": 0.0,
+    "cost": 0.0,
+    "incomplete_responses": 0.022223,
+    "llm_calls": -0.1555559999999998,
+    "model_attempts": -0.1555559999999998,
+    "retries": 0.0,
+    "tokens": -298.86944399999993,
+    "tool_calls": -0.16790200000000022,
+    "tool_errors": -0.007407
+  },
+  "metric_not_compared": [],
+  "metric_task_counts": {
+    "compactions": {
+      "baseline": 27,
+      "candidate": 27
+    },
+    "cost": {
+      "baseline": 24,
+      "candidate": 24
+    },
+    "incomplete_responses": {
+      "baseline": 27,
+      "candidate": 27
+    },
+    "llm_calls": {
+      "baseline": 27,
+      "candidate": 27
+    },
+    "model_attempts": {
+      "baseline": 27,
+      "candidate": 27
+    },
+    "retries": {
+      "baseline": 27,
+      "candidate": 27
+    },
+    "tokens": {
+      "baseline": 24,
+      "candidate": 24
+    },
+    "tool_calls": {
+      "baseline": 27,
+      "candidate": 27
+    },
+    "tool_errors": {
+      "baseline": 27,
+      "candidate": 27
+    }
+  },
+  "metric_attempt_counts": {
+    "compactions": {
+      "baseline": 101,
+      "candidate": 101
+    },
+    "cost": {
+      "baseline": 90,
+      "candidate": 90
+    },
+    "incomplete_responses": {
+      "baseline": 101,
+      "candidate": 101
+    },
+    "llm_calls": {
+      "baseline": 101,
+      "candidate": 101
+    },
+    "model_attempts": {
+      "baseline": 101,
+      "candidate": 101
+    },
+    "retries": {
+      "baseline": 101,
+      "candidate": 101
+    },
+    "tokens": {
+      "baseline": 90,
+      "candidate": 90
+    },
+    "tool_calls": {
+      "baseline": 101,
+      "candidate": 101
+    },
+    "tool_errors": {
+      "baseline": 101,
+      "candidate": 101
+    }
+  },
+  "metric_denominator_drift": [],
+  "baseline_fingerprint": {
+    "gemma_sha": "d053583e29943d446b33838bb778ccff6ba59918",
+    "gemma_dirty": false,
+    "dirty_sha": null,
+    "config_version": 7,
+    "model": "google/gemma-4-26b-a4b",
+    "runner_sha": "286bfcda93c188c7ced483b1b1054716a8bb160da6e03fb15c70076d79cbf8cd",
+    "behavior_key": "dc717b0b0161"
+  },
+  "candidate_fingerprint": {
+    "gemma_sha": "d053583e29943d446b33838bb778ccff6ba59918",
+    "gemma_dirty": true,
+    "dirty_sha": "65e775569c728182c1b7c2e3291ee99fe1a2b3a955f975797713fff31907c867",
+    "config_version": 8,
+    "model": "google/gemma-4-26b-a4b",
+    "runner_sha": "286bfcda93c188c7ced483b1b1054716a8bb160da6e03fb15c70076d79cbf8cd",
+    "behavior_key": "e6ceee71b710"
+  }
+}
