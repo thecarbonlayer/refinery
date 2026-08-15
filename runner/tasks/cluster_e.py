@@ -23,9 +23,19 @@ every fact that lives there.
 from __future__ import annotations
 
 import hashlib
+import re
+from pathlib import Path
 
 from runner.carbon_env import make_provider
-from runner.helpers import agent_metrics, bash_runs, neutral_dir, scripted_approver, tool_texts
+from runner.helpers import (
+    agent_metrics,
+    bash_runs,
+    neutral_dir,
+    scripted_approver,
+    tool_runs,
+    tool_texts,
+    workspace_kwargs,
+)
 from runner.spec import Attempt, TaskSpec
 
 E1_SENTINEL = "RANGE-ACCESS-E1-7QK"
@@ -53,8 +63,30 @@ E3_SENTINEL = hashlib.sha256(E3_TAG_SEED.encode()).hexdigest()[:12].upper()
 E3_LINE_COUNT = 3200
 E3_NEEDLE_INDEX = E3_LINE_COUNT // 2
 
+# E4 is E3 at the scale where recovery, not delivery, is the only question left.
+# Same derived-tag discipline, but the needle sits astride the exact midpoint of a
+# stream so large that an inline excerpt reaching it would have to carry HALF the
+# stream — so E3 asks whether the shipped cut reaches the middle, and E4 asks
+# whether the middle is still recoverable after the cut has done its work.
+E4_TAG_SEED = "e4-settlement-seed-7305"
+E4_SENTINEL = hashlib.sha256(E4_TAG_SEED.encode()).hexdigest()[:12].upper()
+E4_LINE_COUNT = 20_000
+E4_NEEDLE_INDEX = E4_LINE_COUNT // 2
+E4_SCRIPT = "run_settlement.py"
+E4_STAMP = ".settlement-consumed"
 
-def _plain_agent(*, tools, approvals: list[dict] | None = None):
+
+def _plain_agent(*, tools, workspace_root: Path | str, approvals: list[dict] | None = None):
+    """Every E task's agent. ``workspace_root`` is required, not defaulted.
+
+    E4's whole subject is a path the model has to be able to open, and the two
+    directories in play are easy to conflate: ``agents_dir`` stays neutral so no
+    stray AGENTS.md reaches the system prompt, while the workspace is the tree the
+    tools are bound to and the only tree a task's ``read_file`` can reach. A
+    default here would let a later task inherit the mismatch silently, which is
+    the failure mode ``workspace_kwargs`` exists to end — so each caller names the
+    workspace it wired its tools to.
+    """
     from harness.agent import APPROVAL_TOOLS, DEFAULT_SYSTEM, Agent
     from harness.observability import Tracer
 
@@ -65,6 +97,7 @@ def _plain_agent(*, tools, approvals: list[dict] | None = None):
         model=provider.model,
         tools=tools,
         agents_dir=neutral_dir(),
+        **workspace_kwargs(workspace_root),
         approve=scripted_approver(approvals) if approvals is not None else None,
         approval_required=APPROVAL_TOOLS if approvals is not None else set(),
         tracer=Tracer(model=provider.model),
@@ -110,7 +143,7 @@ def run_e1() -> Attempt:
     tools = ToolRegistry()
     tools.register(read_file_tool(str(ws.root)))
     tools.register(search_text_tool(str(ws.root)))
-    a = _plain_agent(tools=tools)
+    a = _plain_agent(tools=tools, workspace_root=ws.root)
     reply = a.send(
         "Find the release authorization code in release-records.txt. "
         "Reply with just the exact code."
@@ -202,7 +235,7 @@ def run_e2() -> Attempt:
     tools = ToolRegistry()
     tools.register(bash_tool(Sandbox(trusted=True, timeout=60), workdir=str(ws.root)))
     approvals: list[dict] = []
-    a = _plain_agent(tools=tools, approvals=approvals)
+    a = _plain_agent(tools=tools, workspace_root=ws.root, approvals=approvals)
     reply = a.send(
         "Run `python3 run_tests.py` and report the exact root-cause-tag from the failed test. "
         "Reply with just the tag."
@@ -267,7 +300,7 @@ def run_e3() -> Attempt:
     tools = ToolRegistry()
     tools.register(bash_tool(Sandbox(trusted=True, timeout=60), workdir=str(ws.root)))
     approvals = [{"tool": "bash", "decision": "approve"}]
-    a = _plain_agent(tools=tools, approvals=approvals)
+    a = _plain_agent(tools=tools, workspace_root=ws.root, approvals=approvals)
     reply = a.send(
         "Run `python3 run_audit.py` and report the reconciliation tag it prints. "
         "Reply with just the exact tag."
@@ -290,8 +323,177 @@ def run_e3() -> Attempt:
     )
 
 
+def e4_script() -> str:
+    """The script E4 asks the model to run. Derived tag, per E2/E3 — plus a stamp.
+
+    The stamp makes the stream ONE-SHOT: the first run writes a consumed marker and
+    any later run refuses with a single line instead of replaying. E2 and E3 keep
+    shell-side rescues out by excluding post-processed invocations at the verifier,
+    but E4 cannot: recovery through LATER commands is the very thing it measures, so
+    a re-run piped through ``grep`` would be indistinguishable from the recovery it
+    exists to detect. The fixture closes that route instead — a stream that cannot
+    be regenerated is also the honest shape, because an output nobody can cheaply
+    reproduce is exactly the output worth writing to disk.
+    """
+    return (
+        "import hashlib, os\n"
+        f"if os.path.exists({E4_STAMP!r}):\n"
+        "    print('settlement stream already consumed; a re-run cannot regenerate it')\n"
+        "    raise SystemExit(1)\n"
+        f"with open({E4_STAMP!r}, 'w') as fh:\n"
+        "    fh.write('consumed')\n"
+        f"tag = hashlib.sha256({E4_TAG_SEED!r}.encode()).hexdigest()[:12].upper()\n"
+        f"for i in range({E4_LINE_COUNT}):\n"
+        f"    if i == {E4_NEEDLE_INDEX}:\n"
+        "        print(f'SETTLEMENT ANOMALY: settlement-tag={tag}')\n"
+        "    else:\n"
+        "        print(f'ledger row {i:05d}: settled, carryover=0.00')\n"
+    )
+
+
+def _ran_settlement_plainly(cmd: str) -> bool:
+    """E4's counterpart to ``_ran_script_plainly`` — same wrapping tolerance, same
+    post-processor exclusions, for the same reasons. Only the FIRST plain run is
+    the door under test; everything after it is recovery, judged separately."""
+    return f"python3 {E4_SCRIPT}" in cmd and not any(op in cmd for op in E2_POST_PROCESSORS)
+
+
+# A replay is an INVOCATION of the script, not any mention of its name: the offload
+# file's own name is harness-chosen and could embed the generating command, so a
+# bare substring match would let a legitimate `grep` of the artifact taint the very
+# file it reads. Requiring interpreter-then-whitespace excludes hyphen/slug forms.
+_E4_REPLAY_RE = re.compile(rf"python[\w.]*\s+\S*{re.escape(E4_SCRIPT)}")
+_E4_DERIVE_MARKS = (E4_TAG_SEED, "hashlib")
+
+
+def _e4_regenerates_or_derives(call_text: str) -> bool:
+    """Does this tool call MAKE the tag rather than read it back?
+
+    Two make-routes, both real: re-running the generator (the stamp refuses it, but
+    the refusal must not depend on the stamp file surviving an agent-writable
+    workspace), and computing ``sha256(seed)`` directly — the derived-tag
+    discipline necessarily leaves seed and algorithm readable in the script, so a
+    model that reads the source can mint the tag without ever touching the
+    offloaded file. Any command that types the seed, or reaches for ``hashlib``,
+    is derivation-shaped; a read of an on-disk artifact never needs either.
+
+    Enumerated residuals, not oversights: hashing binaries other than python
+    (``shasum``, ``openssl``) escape when the seed itself was laundered through a
+    file first, and a multi-step rename chain can wash the taint off a regenerated
+    dump. Both take a model deliberately optimizing against a verifier it cannot
+    see — the graded party is a CONFIG value, and no legal config value can induce
+    either sequence."""
+    return bool(_E4_REPLAY_RE.search(call_text)) or any(m in call_text for m in _E4_DERIVE_MARKS)
+
+
+def _e4_recovered_from_disk(messages: list[dict], root: Path) -> bool:
+    """Did the tag reach the model by READING an on-disk artifact it can name?
+
+    The offload contract this task measures is outcome-shaped on purpose: the
+    complete raw result lands in a file under the agent's working directory, at a
+    relative path the marker makes discoverable. The marker's wording, the
+    directory, and the filename are all carbon's to choose and to change, so
+    nothing here parses a marker or pins a path. Attribution is positive instead:
+    some file under the workspace contains the sentinel, and some tool call both
+    names a component of that file's path and came back with the sentinel in its
+    result. A `grep`/`sed` names the file or globs its directory; `read_file`
+    names it in its args; `find | xargs` names neither and is NOT credited — the
+    conservative direction, since a missed legitimate read under-reports the
+    strategy and never over-reports it.
+
+    The taint rule closes the fabrication route: a file whose path is named by any
+    replay- or derivation-shaped command (a regenerated ``> dump.txt``, a minted
+    ``> tag.txt``) is disqualified as an attribution target, so making the tag and
+    then reading it back does not count as recovering it."""
+    calls = tool_runs(messages, ("bash", "read_file"))
+    marker_texts = [args for _name, args, _result in calls if _e4_regenerates_or_derives(args)]
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(errors="replace")
+        except OSError:
+            continue
+        if E4_SENTINEL not in text:
+            continue
+        parts = set(path.relative_to(root).parts)
+        if any(part in marker for marker in marker_texts for part in parts):
+            continue  # named by a command that makes the tag: fabricated, not offloaded
+        for _name, args, result in calls:
+            if E4_SENTINEL in result and any(part in args for part in parts):
+                return True
+    return False
+
+
+def run_e4() -> Attempt:
+    """A fact cut away at the door must be RECOVERABLE from disk afterwards.
+
+    E3 established that no positional strategy reaches the middle of opaque command
+    output; this task states the requirement the E-cluster was building toward: the
+    door may withhold the middle, but it must not DESTROY it. The stream here is
+    ~840KB with the needle astride the exact midpoint, so an inline excerpt reaches
+    it only when the budget exceeds half the stream — at that size the excerpt is
+    not a truncation policy but a flood, and the verifier refuses it separately
+    (``withheld``). At every honest budget, under every tail split, the inline text
+    is dark; the only route to the tag is out-of-band: notice that the result was
+    truncated, follow the path the door left behind, page or search the artifact,
+    and read the tag back. A strategy that offloads the full result to a file
+    passes; a strategy that merely excerpts has nothing on disk to find, which is
+    why this task is red by design until such a strategy is configured.
+
+    Four conjuncts, each carrying one claim: ``ran`` — the plain, un-postprocessed
+    first run is the door under test (E2/E3's discipline); ``withheld`` — the
+    needle was NOT delivered inline, so a flood-sized budget cannot buy the pass
+    E1 exists to price out; ``recovered`` — the tag came back from an on-disk
+    artifact the transcript actually names (see ``_e4_recovered_from_disk``; bare
+    tag presence is not enough, because the derived-tag discipline leaves the tag
+    computable from the readable script source, and a computed tag would grade
+    model cleverness under every strategy alike); ``recalled`` — it reached the
+    final answer. The fixture is one-shot (``e4_script``), so a failed door cannot
+    be papered over by regenerating the stream into a shell filter.
+    """
+    from harness.sandbox import Sandbox, bash_tool
+    from harness.tools import ToolRegistry, read_file_tool
+    from harness.workspace import Workspace
+
+    ws = Workspace()
+    ws.write(E4_SCRIPT, e4_script())
+    tools = ToolRegistry()
+    tools.register(bash_tool(Sandbox(trusted=True, timeout=60), workdir=str(ws.root)))
+    # The harness's own paging belt rides along: the offload convention hands back
+    # a relative path meant for ranged reads, and withholding the tool that reads
+    # ranges would manufacture the failure this task exists to measure.
+    tools.register(read_file_tool(str(ws.root)))
+    approvals: list[dict] = []
+    # The workspace is named explicitly so an offloaded artifact lands in the tree
+    # `read_file` above is bound to: this task's only route to the tag is a file
+    # the door left behind, and a file the model cannot open is no route at all.
+    a = _plain_agent(tools=tools, workspace_root=ws.root, approvals=approvals)
+    reply = a.send(
+        f"Run `python3 {E4_SCRIPT}` and report the settlement tag from the anomaly "
+        "line. The stream is generated once — a re-run will not replay it. "
+        "Reply with just the exact tag."
+    )
+    plain = bash_runs(a.messages, _ran_settlement_plainly)
+    ran = bool(plain)
+    withheld = ran and E4_SENTINEL not in plain[0][1]
+    recovered = _e4_recovered_from_disk(a.messages, ws.root)
+    recalled = E4_SENTINEL.lower() in reply.lower()
+    ok = ran and withheld and recovered and recalled
+    return Attempt(
+        passed=ok,
+        outcome="pass" if ok else "fail",
+        detail=f"ran_plainly={ran} needle_withheld_inline={withheld} "
+        f"recovered_from_disk={recovered} recalled={recalled} reply={reply[:200]!r}",
+        approvals=approvals,
+        turns=len(a.messages),
+        metrics=agent_metrics(a),
+    )
+
+
 SPECS = [
     TaskSpec("E1", "held_in", "E", "uncertain", run_e1),
     TaskSpec("E2", "held_out", "E", "pass", run_e2),
     TaskSpec("E3", "held_in", "E", "fail", run_e3),
+    TaskSpec("E4", "held_out", "E", "fail", run_e4),
 ]

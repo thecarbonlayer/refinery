@@ -85,7 +85,17 @@ def test_known_knobs_reflects_carbon_schema():
     assert "approval_tools" not in knobs
     assert "require_run" not in knobs
     assert "version" not in knobs
-    assert knobs["tool_output"]["strategies"] == ["head_tail", "keep_head"]
+    # The tool_output menu is mid-transition: carbon is adding `offload_to_file`,
+    # a strategy that writes the full result to a file instead of dropping the cut
+    # bytes, and the E cluster is already wired to measure it (E4). Pinned to the
+    # exact menu on either side of that landing, so the suite is green against a
+    # carbon that has it and one that does not — and never loosened to a subset
+    # check, which would stop reporting a fourth name or a rename, the one thing
+    # a menu pin is for.
+    assert knobs["tool_output"]["strategies"] in (
+        ["head_tail", "keep_head"],
+        ["head_tail", "keep_head", "offload_to_file"],
+    )
     assert knobs["compaction"]["strategies"] == [
         "structured_checkpoint",
         "summarize_middle",

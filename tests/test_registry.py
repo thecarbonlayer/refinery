@@ -1,4 +1,5 @@
 import contextlib
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -41,6 +42,7 @@ def test_registry_membership():
         "E1",
         "E2",
         "E3",
+        "E4",
         "F1",
         "F2",
         "G1",
@@ -73,7 +75,7 @@ def test_registry_membership():
         "H1",
         "H3",
     }
-    assert held_out == {"A3", "A4", "B3", "C3", "D3", "E2", "F2", "G2", "H2"}
+    assert held_out == {"A3", "A4", "B3", "C3", "D3", "E2", "E4", "F2", "G2", "H2"}
 
 
 def test_e_fixtures_are_hidden_by_carbons_own_truncation():
@@ -183,6 +185,254 @@ def _e3_output(script: str) -> str:
     return subprocess.run(
         [sys.executable, "-c", script], capture_output=True, text=True, check=True
     ).stdout
+
+
+def _e4_output(script: str, cwd) -> str:
+    """Run E4's script the way the task does. Unlike E3's, it writes its consumed
+    stamp into the cwd, so the probe must run somewhere disposable — never the
+    repo root, where a stray stamp would outlive the test."""
+    return subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, check=True, cwd=cwd
+    ).stdout
+
+
+def test_e4_needle_is_unreachable_below_half_the_stream(tmp_path):
+    """E4's premise is the strongest positional claim a fixture can make.
+
+    E3 probes both shipped strategies at a third of its stream. E4's needle sits
+    astride the exact midpoint, which supports a universally quantified version:
+    the head keeps the sentinel only when the head covers its END, the tail only
+    when the tail covers back to its START, so below ``min(end, len - start)``
+    NO (strategy, tail_fraction) pair can win. The ceiling is derived from the
+    sentinel's own offsets and the probes run AT it — the test fails the moment
+    the needle drifts off-center or the stream shrinks, i.e. the moment "no
+    honest budget reaches it" stops being true rather than merely hard.
+    """
+    from dataclasses import replace
+
+    from harness.harness_config import CONFIG
+    from harness.limits import truncate
+
+    from runner.tasks.cluster_e import E4_SENTINEL, e4_script
+
+    output = _e4_output(e4_script(), tmp_path)
+    assert output.count(E4_SENTINEL) == 1, "the stream must contain its sentinel exactly once"
+    start = output.index(E4_SENTINEL)
+    end = start + len(E4_SENTINEL)
+    ceiling = min(end, len(output) - start) - 1
+    # Scale is the claim: an excerpt reaching the needle must carry half of a
+    # stream that is itself hundreds of times any excerpt-sized budget. Asserted
+    # against the fixture's own size, never the live config — a legal budget
+    # candidate in carbon's working tree must not redden this suite.
+    assert len(output) > 800_000, "the stream has shrunk below the scale the task claims"
+    assert ceiling >= len(output) // 2 - 200, "the needle no longer sits astride the midpoint"
+    for strategy, tail_fraction in (
+        ("head_tail", 0.0),
+        ("head_tail", 0.5),
+        ("head_tail", 0.9),
+        ("head_tail", 1.0),
+        ("keep_head", 0.0),
+    ):
+        policy = replace(
+            CONFIG.tool_output, strategy=strategy, budget=ceiling, tail_fraction=tail_fraction
+        )
+        assert E4_SENTINEL not in truncate(output, policy), (
+            f"E4's needle survives {strategy} at tail_fraction={tail_fraction} even at the "
+            f"half-stream ceiling — the fixture no longer defeats every inline cut"
+        )
+
+
+def test_e4_stream_is_one_shot(tmp_path):
+    """The fixture must enforce its own premise: a stream that cannot be replayed.
+
+    E2/E3 exclude ``| grep``-style rescues at the verifier, on the measured run.
+    E4 cannot use that lever alone — post-processed LATER commands are its
+    legitimate recovery path — so the script itself must refuse to regenerate.
+    If a second run ever streams again, regenerate-and-filter silently becomes a
+    passing route that no truncation strategy earned."""
+    from runner.tasks.cluster_e import E4_SENTINEL, e4_script
+
+    script = e4_script()
+    first = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, cwd=tmp_path
+    )
+    assert first.returncode == 0 and E4_SENTINEL in first.stdout
+    second = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, cwd=tmp_path
+    )
+    assert second.returncode != 0, "a replay must refuse loudly, not stream again"
+    assert E4_SENTINEL not in second.stdout
+    assert len(second.stdout) < 200, "the refusal must be one line, not a second stream"
+
+
+def test_e4_tag_is_absent_from_the_script_the_model_can_read(tmp_path):
+    """Same discipline as E2's: assert on the bytes the model sees, and pin the
+    needle to the line the task's constants promise."""
+    from runner.tasks.cluster_e import (
+        E4_LINE_COUNT,
+        E4_NEEDLE_INDEX,
+        E4_SENTINEL,
+        E4_TAG_SEED,
+        e4_script,
+    )
+
+    script = e4_script()
+    assert E4_SENTINEL not in script, "the tag is readable in the script again"
+    assert E4_TAG_SEED in script, "the seed must be present for the run to derive the tag"
+    assert "hashlib.sha256" in script, "the tag must be derived, not stored"
+    lines = _e4_output(script, tmp_path).splitlines()
+    assert len(lines) == E4_LINE_COUNT
+    assert lines[E4_NEEDLE_INDEX].endswith(E4_SENTINEL), "the needle left its pinned line"
+
+
+def test_e4_recognises_the_script_run_however_it_is_wrapped():
+    """E2's matcher lesson, applied to E4: wrapping counts, shell trimming does not."""
+    from runner.tasks.cluster_e import _ran_settlement_plainly
+
+    for cmd in (
+        "python3 run_settlement.py",
+        "ls run_settlement.py\npython3 run_settlement.py",
+        "cd . && python3 run_settlement.py",
+        "  python3 run_settlement.py  ",
+    ):
+        assert _ran_settlement_plainly(cmd), f"should count as a plain run: {cmd!r}"
+    for cmd in (
+        "python3 run_settlement.py | tail -5",
+        "python3 run_settlement.py > out.txt",
+        "python3 run_settlement.py | grep ANOMALY",
+        "cat run_settlement.py",
+        "ls",
+    ):
+        assert not _ran_settlement_plainly(cmd), f"should NOT count: {cmd!r}"
+
+
+def _tool_msgs(name: str, args: str, result: str) -> list[dict]:
+    return [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c1", "function": {"name": name, "arguments": args}}],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": result},
+    ]
+
+
+def _bash_msgs(cmd: str, result: str) -> list[dict]:
+    return _tool_msgs("bash", json.dumps({"command": cmd}), result)
+
+
+def test_e4_recovery_credits_only_reads_of_an_offloaded_artifact(tmp_path):
+    """The attribution predicate is E4's verifier core, so both directions are
+    pinned offline: reads of an on-disk artifact count however they are spelled
+    (explicit path, directory glob, ``read_file`` args — and a harness-chosen
+    filename that happens to embed the script's name must not read as a replay),
+    while every make-the-tag route is refused (typed-seed derivation, derivation
+    laundered through a file the derivation names, a regenerated dump), and an
+    unattributable arrival is refused CONSERVATIVELY — under-crediting the
+    strategy is acceptable, over-crediting it never is."""
+    from runner.tasks.cluster_e import E4_SENTINEL, E4_TAG_SEED, _e4_recovered_from_disk
+
+    tagline = f"SETTLEMENT ANOMALY: settlement-tag={E4_SENTINEL}"
+    spool = tmp_path / "outbox"
+    spool.mkdir()
+    (spool / "result-0001.txt").write_text("ledger row: settled\n" * 40 + tagline + "\n")
+    plain = _bash_msgs("python3 run_settlement.py", "[exit 0 via trusted]\nledger row …")
+
+    read = _bash_msgs("grep ANOMALY outbox/result-0001.txt", tagline)
+    assert _e4_recovered_from_disk(plain + read, tmp_path)
+
+    glob = _bash_msgs("grep ANOMALY outbox/*.txt", tagline)
+    assert _e4_recovered_from_disk(plain + glob, tmp_path)
+
+    paged = _tool_msgs(
+        "read_file", json.dumps({"path": "outbox/result-0001.txt", "start_line": 30}), tagline
+    )
+    assert _e4_recovered_from_disk(plain + paged, tmp_path)
+
+    (spool / "python3-run_settlement.py-0002.txt").write_text("row\n" * 40 + tagline + "\n")
+    collide = _bash_msgs("grep ANOMALY outbox/python3-run_settlement.py-0002.txt", tagline)
+    assert _e4_recovered_from_disk(plain + collide, tmp_path), (
+        "a filename embedding the script's name tainted the artifact it names"
+    )
+
+    unnamed = _bash_msgs("find . -type f | xargs grep ANOMALY", tagline)
+    assert not _e4_recovered_from_disk(plain + unnamed, tmp_path), (
+        "an arrival that names no artifact must not be credited"
+    )
+
+    derive = _bash_msgs(
+        f'python3 -c "import hashlib; print(hashlib.sha256({E4_TAG_SEED!r}.encode())'
+        '.hexdigest()[:12].upper())"',
+        E4_SENTINEL,
+    )
+    assert not _e4_recovered_from_disk(plain + derive, tmp_path), (
+        "a computed tag must not read as a recovered one"
+    )
+
+    (tmp_path / "tag.txt").write_text(E4_SENTINEL + "\n")
+    laundered = _bash_msgs('python3 -c "import hashlib" > tag.txt', "") + _bash_msgs(
+        "cat tag.txt", E4_SENTINEL
+    )
+    assert not _e4_recovered_from_disk(plain + laundered, tmp_path), (
+        "a derivation laundered through a file it names must stay tainted"
+    )
+
+    (tmp_path / "dump.txt").write_text("row\n" * 40 + tagline + "\n")
+    replay = _bash_msgs(
+        "rm .settlement-consumed && python3 run_settlement.py > dump.txt && grep ANOMALY dump.txt",
+        tagline,
+    )
+    assert not _e4_recovered_from_disk(plain + replay, tmp_path), (
+        "a regenerated dump is a replay, not a recovery"
+    )
+
+
+def test_workspace_bound_tasks_anchor_carbon_at_the_workspace(monkeypatch):
+    """A task's tools are rooted at its workspace; ``agents_dir`` deliberately is not.
+
+    Anything carbon writes to disk when a result is too large to deliver has to land
+    in the first tree, because the second is empty by construction and nothing the
+    task hands the model can read out of it. E4 is where that becomes a verdict — its
+    only route to the tag is a file the door left behind — so a wiring anchored on the
+    neutral dir would hand the model a path it cannot open, and the task would report
+    a working strategy as a failure while actually measuring this file.
+
+    The stand-in below plays a carbon that HAS ``workspace_root``, so the pin holds on
+    both sides of that kwarg's arrival instead of passing vacuously until it lands.
+    Each task is then asked for the real thing: the root it gives carbon must be the
+    tree its own fixture sits in, and ``agents_dir`` must still be the empty one.
+    """
+    from runner.tasks import cluster_d, cluster_e, cluster_f
+
+    seen: list[dict] = []
+
+    class _CapturingAgent:
+        def __init__(self, *, agents_dir=".", workspace_root=None, **kwargs):
+            seen.append({"agents_dir": agents_dir, "workspace_root": workspace_root})
+            self.messages: list[dict] = []
+            self.tracer = None
+
+        def send(self, prompt: str) -> str:
+            return ""
+
+    monkeypatch.setattr("harness.agent.Agent", _CapturingAgent)
+
+    for run, fixture in (
+        (cluster_e.run_e4, cluster_e.E4_SCRIPT),
+        (cluster_d.run_d3, "tasks.txt"),
+        (cluster_f.run_f1, "timeouts.py"),
+    ):
+        seen.clear()
+        run()
+        assert len(seen) == 1, f"{run.__name__} built {len(seen)} agents, expected 1"
+        wiring = seen[0]
+        assert (Path(wiring["workspace_root"] or "") / fixture).is_file(), (
+            f"{run.__name__} anchored carbon at {wiring['workspace_root']!r}, which is not "
+            f"the workspace holding {fixture} — a spilled result would be unreachable there"
+        )
+        assert not list(Path(wiring["agents_dir"]).iterdir()), (
+            f"{run.__name__}'s agents_dir is no longer the neutral, empty dir"
+        )
 
 
 def test_f1_expected_differs_from_source_on_exactly_the_beta_line():

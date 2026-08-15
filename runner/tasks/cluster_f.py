@@ -8,9 +8,16 @@ current declared budget can.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from runner.carbon_env import make_provider
-from runner.helpers import agent_metrics, neutral_dir, scripted_approver, tool_call_args
+from runner.helpers import (
+    agent_metrics,
+    neutral_dir,
+    scripted_approver,
+    tool_call_args,
+    workspace_kwargs,
+)
 from runner.spec import Attempt, TaskSpec
 
 F1_SOURCE = """\
@@ -31,7 +38,18 @@ F2_SENTINEL = "DEPTH-COMPLETE-F2-4MN"
 F2_CODES = ("start", "quartz", "maple", "cobalt", "ember", "delta", "lumen", "orbit", "raven")
 
 
-def _agent(*, tools, approvals: list[dict] | None = None):
+def _agent(
+    *,
+    tools,
+    workspace_root: Path | str | None = None,
+    approvals: list[dict] | None = None,
+):
+    """``workspace_root`` is optional here, unlike cluster E's, and the asymmetry
+    is the point: F1's tools are bound to a workspace, so anything carbon's
+    truncation door writes has to land in that same tree. F2's ``advance`` is pure
+    in-memory state with no tree behind it at all — there is no root to name, so
+    the default stands and carbon anchors on ``agents_dir`` as it does today.
+    """
     from harness.agent import APPROVAL_TOOLS, DEFAULT_SYSTEM, Agent
     from harness.observability import Tracer
 
@@ -42,6 +60,7 @@ def _agent(*, tools, approvals: list[dict] | None = None):
         model=provider.model,
         tools=tools,
         agents_dir=neutral_dir(),
+        **(workspace_kwargs(workspace_root) if workspace_root is not None else {}),
         approve=scripted_approver(approvals) if approvals is not None else None,
         approval_required=APPROVAL_TOOLS if approvals is not None else set(),
         tracer=Tracer(model=provider.model),
@@ -58,7 +77,7 @@ def run_f1() -> Attempt:
     tools.register(read_file_tool(str(ws.root)))
     tools.register(edit_file_tool(ws))
     approvals: list[dict] = []
-    a = _agent(tools=tools, approvals=approvals)
+    a = _agent(tools=tools, workspace_root=ws.root, approvals=approvals)
     reply = a.send(
         "In timeouts.py, change only beta_timeout's timeout from 5 to 30. "
         "Do not change alpha_timeout."
