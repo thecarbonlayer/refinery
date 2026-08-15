@@ -14,6 +14,7 @@ Acceptance is the Self-Harness rule as implemented in ``runner.delta``:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Callable
@@ -43,6 +44,45 @@ def revert_config(carbon_root: Path = CARBON_ROOT) -> None:
     _git(carbon_root, "checkout", "--", str(CONFIG_REL))
 
 
+def run_harness_gates(carbon_root: Path = CARBON_ROOT, editor_root: Path = EDITOR_ROOT) -> dict:
+    """Both repos' own test suites, run against the candidate as applied.
+
+    The task suite answers "does the agent do better work?". It cannot answer "is the
+    harness still sound?" — a config value can turn either repo red without moving a
+    single task score, because no task asserts on carbon's invariants or on this
+    repo's fixtures. Three such breakages reached a merged branch before this existed:
+    a checked-in-defaults test pinned to a strategy the loop is allowed to change, a
+    fault-injection guard whose recovery rule assumed one strategy's call ordering,
+    and two premise probes built on a tail_fraction the surface never permitted.
+
+    Run with the candidate APPLIED, so what is gated is the state the loop proposes to
+    ship — and run BEFORE the suite, because a broken harness does not deserve forty
+    minutes of model time.
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        # This shells out to `pytest`, so calling it from inside a test spawns a nested
+        # full run — minutes of it, once per call. Fail loudly instead: a test that
+        # wants a verdict passes one through `run_gates=`.
+        raise RuntimeError(
+            "run_harness_gates() shells out to pytest and must not run inside pytest; "
+            "inject a stub via validate_candidate(run_gates=...)"
+        )
+    checks = (
+        ("carbon_verify", carbon_root, ["uv", "run", "verify"]),
+        ("refinery_pytest", editor_root, ["uv", "run", "pytest", "-q"]),
+    )
+    out: dict = {"passed": True, "checks": {}}
+    for name, cwd, cmd in checks:
+        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+        ok = proc.returncode == 0
+        tail = (proc.stdout + proc.stderr).strip().splitlines()[-12:]
+        out["checks"][name] = {"passed": ok, "exit_code": proc.returncode}
+        if not ok:
+            out["passed"] = False
+            out["checks"][name]["tail"] = tail
+    return out
+
+
 def _run_runner(label: str, only: list[str] | None, attempts: int | None) -> None:
     """Run the suite in a fresh interpreter (same venv), cwd at the repo root."""
     cmd = [sys.executable, "-m", "runner.cli", "run", "--label", label]
@@ -59,6 +99,7 @@ def validate_candidate(
     label: str | None = None,
     carbon_root: Path = CARBON_ROOT,
     run_runner: Callable[[str, list[str] | None, int | None], None] = _run_runner,
+    run_gates: Callable[[Path], dict] = run_harness_gates,
     results_dir: Path = RESULTS_DIR,
     log=print,
 ) -> ValidationRecord:
@@ -73,6 +114,23 @@ def validate_candidate(
         + f" (config v{new_config['version']})"
     )
     try:
+        gates = run_gates(carbon_root)
+        if not gates["passed"]:
+            broken = [n for n, c in gates["checks"].items() if not c["passed"]]
+            log(f"candidate {candidate.id}: HARNESS GATE FAILED ({', '.join(broken)}) — REJECTED")
+            for name in broken:
+                for line in gates["checks"][name].get("tail", []):
+                    log(f"    {name}: {line}")
+            # Vetoed before the suite runs, so there is no Δ to report and none is
+            # invented: zeros here mean "not measured", which the gates field explains.
+            return ValidationRecord(
+                candidate_id=candidate.id,
+                label=label,
+                accepted=False,
+                delta_in=0.0,
+                delta_ho=0.0,
+                gates=gates,
+            )
         run_runner(label, None, None)
     finally:
         revert_config(carbon_root)
@@ -98,6 +156,7 @@ def validate_candidate(
         metric_denominator_drift=d["metric_denominator_drift"],
         baseline_fingerprint=d["baseline_fingerprint"],
         candidate_fingerprint=d["candidate_fingerprint"],
+        gates=gates,
     )
     log(
         f"candidate {candidate.id}: Δ_in={d['delta_in']:+.4f} Δ_ho={d['delta_ho']:+.4f} "

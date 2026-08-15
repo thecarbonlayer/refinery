@@ -65,6 +65,12 @@ def results_json(fractions: dict[str, float], fingerprint=FP, summary=None) -> d
     return {"fingerprint": dict(fingerprint), "tasks": tasks, "summary": summary or {}}
 
 
+def _gates_pass(_carbon_root):
+    """Harness gates stubbed green: these tests are about Δ and telemetry, and the
+    real gate shells out to both repos' suites, which a fixture carbon cannot pass."""
+    return {"passed": True, "checks": {}}
+
+
 def test_validate_carries_every_telemetry_field_onto_the_record(fake_carbon, tmp_path):
     """`validate_candidate` is the only path from delta() to the committed record.
     Dropping a field here — or passing a literal `[]` — silently loses the evidence:
@@ -96,6 +102,7 @@ def test_validate_carries_every_telemetry_field_onto_the_record(fake_carbon, tmp
         baseline_path=baseline,
         carbon_root=fake_carbon,
         run_runner=fake_runner,
+        run_gates=_gates_pass,
         results_dir=results_dir,
         log=lambda *_: None,
     )
@@ -146,6 +153,7 @@ def test_accepted_candidate_and_revert(fake_carbon, baseline, tmp_path):
         baseline_path=baseline,
         carbon_root=fake_carbon,
         run_runner=fake_runner,
+        run_gates=_gates_pass,
         results_dir=results_dir,
         log=lambda *_: None,
     )
@@ -171,6 +179,7 @@ def test_regression_is_rejected(fake_carbon, baseline, tmp_path):
         baseline_path=baseline,
         carbon_root=fake_carbon,
         run_runner=fake_runner,
+        run_gates=_gates_pass,
         results_dir=results_dir,
         log=lambda *_: None,
     )
@@ -188,6 +197,7 @@ def test_runner_crash_still_reverts(fake_carbon, baseline, tmp_path):
             baseline_path=baseline,
             carbon_root=fake_carbon,
             run_runner=exploding_runner,
+            run_gates=_gates_pass,
             results_dir=tmp_path,
             log=lambda *_: None,
         )
@@ -203,6 +213,93 @@ def test_dirty_tree_refused(fake_carbon, baseline, tmp_path):
             baseline_path=baseline,
             carbon_root=fake_carbon,
             run_runner=lambda *a: None,
+            run_gates=_gates_pass,
             results_dir=tmp_path,
             log=lambda *_: None,
         )
+
+
+def test_a_candidate_that_reddens_either_repo_is_vetoed_before_the_suite_runs(
+    fake_carbon, tmp_path
+):
+    """The gate exists because the task suite cannot see a broken harness.
+
+    A config value can turn carbon's or this repo's own tests red without moving a
+    single task score — no task asserts on carbon's invariants or on these fixtures.
+    Three such breakages reached a merged branch before the gate existed. So the veto
+    must (a) reject, (b) record WHICH check failed rather than a bare False, and
+    (c) fire before the suite, since forty minutes of model time on a harness that no
+    longer holds together is the expensive half of the mistake.
+    """
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps(results_json({"A2": 1.0, "A4": 0.8, "D1": 1.0})))
+    ran: list[str] = []
+
+    def failing_gates(_carbon_root):
+        return {
+            "passed": False,
+            "checks": {
+                "carbon_verify": {"passed": True, "exit_code": 0},
+                "refinery_pytest": {
+                    "passed": False,
+                    "exit_code": 1,
+                    "tail": ["FAILED tests/test_registry.py::test_some_invariant"],
+                },
+            },
+        }
+
+    record = validate_candidate(
+        CANDIDATE,
+        baseline_path=baseline,
+        carbon_root=fake_carbon,
+        run_runner=lambda label, *_: ran.append(label),
+        run_gates=failing_gates,
+        results_dir=tmp_path / "results",
+        log=lambda *_: None,
+    )
+
+    assert record.accepted is False
+    assert ran == [], "the suite ran anyway — the veto is supposed to come first"
+    assert record.gates["passed"] is False
+    assert record.gates["checks"]["refinery_pytest"]["passed"] is False
+    assert record.gates["checks"]["carbon_verify"]["passed"] is True
+
+
+def test_a_passing_gate_is_recorded_too_not_just_a_failing_one(fake_carbon, tmp_path):
+    """A record that only carries the veto when it fires cannot distinguish "checked
+    and clean" from "never checked" — which is exactly the ambiguity that let three
+    breakages through."""
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    fractions = {"A2": 1.0, "A4": 0.8, "D1": 1.0}
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps(results_json(fractions)))
+
+    def fake_runner(label, only, attempts):
+        (results_dir / f"{label}.json").write_text(json.dumps(results_json(fractions)))
+
+    record = validate_candidate(
+        CANDIDATE,
+        baseline_path=baseline,
+        carbon_root=fake_carbon,
+        run_runner=fake_runner,
+        run_gates=lambda _r: {
+            "passed": True,
+            "checks": {
+                "carbon_verify": {"passed": True, "exit_code": 0},
+                "refinery_pytest": {"passed": True, "exit_code": 0},
+            },
+        },
+        results_dir=results_dir,
+        log=lambda *_: None,
+    )
+    assert record.gates["passed"] is True
+    assert set(record.gates["checks"]) == {"carbon_verify", "refinery_pytest"}
+
+
+def test_the_real_gate_refuses_to_recurse_into_pytest():
+    """It shells out to `pytest`; called from inside a test that is a nested full run."""
+    from loop.validate import run_harness_gates
+
+    with pytest.raises(RuntimeError, match="must not run inside pytest"):
+        run_harness_gates()

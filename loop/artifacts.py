@@ -153,6 +153,13 @@ class ValidationRecord:
     metric_denominator_drift: list[str] = field(default_factory=list)
     baseline_fingerprint: dict = field(default_factory=dict)
     candidate_fingerprint: dict = field(default_factory=dict)
+    # Harness-suite veto, recorded whether it fired or not. A candidate is a config
+    # value, and a config value can break BOTH repos' own tests without moving a
+    # single task score — the suite measures behaviour on tasks, not whether the
+    # harness still holds together. Three such breakages shipped unnoticed before
+    # this existed, so the outcome is part of the record rather than a thing someone
+    # is trusted to have checked. Empty dict on records written before the gate.
+    gates: dict = field(default_factory=dict)
 
     def to_json(self) -> dict:
         return {
