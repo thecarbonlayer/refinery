@@ -123,9 +123,12 @@ def select_attempts(jsonl: Path, result_json: Path) -> tuple[list[dict], dict]:
     `coverage.cohort` truthfully names the file.
 
     Duplicates take the LAST row, because that is what the runner does. ``load_done``
-    assigns each key into a dict in file order (``done[(task, attempt)] = rec``), so a
-    resumed run legitimately leaves an earlier row shadowed and the result JSON
-    summarizes the later one. An earlier version REFUSED duplicates, reasoning that
+    assigns each key into a dict in file order (``done[(task, attempt)] = rec``), so
+    where a log already holds a duplicate the later row is the one the result JSON
+    summarizes. Normal resume does NOT create that shape — existing keys are resumed
+    and skipped, never appended again — so this is a rule for reading a log that is
+    already duplicated, not for one the runner produces. An earlier version REFUSED
+    duplicates, reasoning that
     keeping either copy picks a winner with no rule behind it — but there is a rule, it
     lives in ``runner/run.py``, and refusing rejected a log shape the runner accepts.
     Matching it is the only way this reads the attempts ``delta`` actually compared.

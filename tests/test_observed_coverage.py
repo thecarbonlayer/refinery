@@ -578,10 +578,14 @@ def test_a_duplicated_attempt_takes_the_LAST_row_as_the_runner_does(tmp_path):
 
     An earlier version refused duplicates, reasoning that keeping either copy picks a
     winner with no rule behind it. There is a rule: `load_done` assigns each key into a
-    dict in file order, so the last row wins and a resumed run legitimately leaves an
-    earlier one shadowed. The result JSON summarizes the LAST row, so refusing rejected
-    a log shape the runner accepts, and reading the first would read attempts `delta`
-    never saw. Both copies here disagree on exactly the metric an exclusion turns on.
+    dict in file order, so where a log already holds a duplicate the LAST row is the one
+    the result JSON summarizes. Refusing therefore rejected a log shape the runner
+    accepts, and reading the first would read an attempt `delta` never saw.
+
+    Normal resume does not produce this shape — existing keys are resumed and skipped,
+    never appended again. This is a rule for reading an already-duplicated log, not for
+    one ordinary execution creates. Both copies here disagree on exactly the metric an
+    exclusion turns on, which is the case where picking the wrong one is invisible.
     """
     jsonl, result = _run_files(
         tmp_path,
