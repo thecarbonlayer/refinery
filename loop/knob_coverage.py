@@ -146,7 +146,11 @@ KNOB_COVERAGE: dict[str, dict[str, tuple[str, ...]]] = {
     # `deliver()` applies file_injection ONLY on an `@path` match in the user
     # text. A4 is the suite's sole `@path` sender and has no tools, so the
     # injected block is its only route to the answer — see UNGUARDED_KNOBS.
-    "file_injection": {"observers": ("A4",), "miners": ("A4",), "guards": ()},
+    # A4 mines (needle at the END, so `keep_head` loses it); A5 guards (needle in the
+    # HEAD, so a legal `tail_fraction` near 1 loses it). The pair pins opposite ends of
+    # the same interval, which is why one could not stand in for the other and why this
+    # knob went unguarded until A5 was authored.
+    "file_injection": {"observers": ("A4", "A5"), "miners": ("A4",), "guards": ("A5",)},
     # The strategy menu, not the budget, is what this row now mines. E1 measures
     # retrieval ECONOMY, which the budget genuinely moves. E3's midpoint needle in
     # OPAQUE command output was this table's standing capability gap — both
@@ -374,9 +378,10 @@ DELIBERATE_NON_OBSERVERS: dict[str, dict[str, str]] = {
 # Knobs whose only observers are their own miners, so no task can guard them.
 # A REAL coverage gap, recorded rather than hidden behind a guard that cannot see
 # the knob. Closing it needs a new task, not a table edit.
-UNGUARDED_KNOBS: dict[str, str] = {
-    "file_injection": (
-        "A4 is the suite's only `@path` sender and it is the miner. Guarding this "
-        "knob needs a second `@path` task with a passing prior."
-    ),
-}
+#
+# EMPTY as of 2026-08-15. `file_injection` was the sole entry — "A4 is the suite's only
+# `@path` sender and it is the miner. Guarding this knob needs a second `@path` task
+# with a passing prior." A5 is that task: same `@path` mechanism, needle in the HEAD
+# window instead of the tail, `pass` prior so it can actually regress. The entry left
+# because someone wrote the task, which is the only way an entry here may leave.
+UNGUARDED_KNOBS: dict[str, str] = {}

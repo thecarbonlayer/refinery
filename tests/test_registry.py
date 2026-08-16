@@ -30,6 +30,7 @@ def test_registry_membership():
         "A2",
         "A3",
         "A4",
+        "A5",
         "B1",
         "B2",
         "B3",
@@ -59,6 +60,7 @@ def test_registry_membership():
     assert held_in == {
         "A1",
         "A2",
+        "A5",
         "B1",
         "B2",
         "C1",
@@ -1055,3 +1057,44 @@ def test_b_seeds_are_really_broken():
             for path, content in seed.items():
                 ws.write(path, content)
             assert rerun_pinned(command, ws.root).exit_code != 0, command
+
+
+def test_a5_guards_the_head_window_that_a4_cannot_see():
+    """A5 exists to guard `file_injection`, and a guard that cannot regress is nothing.
+
+    Derived from carbon's real `truncate()`, never from a reimplementation. The two
+    tasks are deliberate mirrors and the pair is what closes the gap:
+
+      A4 — needle at the END. Survives `head_tail`, LOST under `keep_head`. That is why
+           it mines the strategy, and why it can say nothing about `tail_fraction`.
+      A5 — needle in the HEAD. Survives `head_tail` and `keep_head` alike, and is LOST
+           at a legal `tail_fraction` near 1, where the head shrinks to a few chars.
+
+    If either half of A5's claim broke — the needle stopped surviving the shipped
+    policy, or stopped dying at the interval's top end — it would be a `pass`-prior task
+    that no legal value can move, i.e. exactly the decorative coverage
+    `knob_coverage` warns about. Both halves are asserted.
+    """
+    from dataclasses import replace
+
+    from harness.harness_config import CONFIG
+    from harness.limits import truncate
+
+    from runner.tasks.cluster_a import A5_SENTINEL, AUTHORED_CLAMP, a5_body
+
+    # THE TASK'S bytes, not a copy of them. Rebuilding the fixture inline asserts a
+    # property of this test's own string: moving the needle to the tail — which turns A5
+    # into a duplicate of A4 and leaves `file_injection` unguarded again — left an
+    # inline version of this test green.
+    body = a5_body()
+    assert len(body) > AUTHORED_CLAMP, "the fixture must exceed the clamp or nothing truncates"
+
+    live = CONFIG.file_injection
+    assert A5_SENTINEL in truncate(body, live), "A5 must PASS at the shipped policy"
+    assert A5_SENTINEL in truncate(body, replace(live, strategy="keep_head")), (
+        "a head-only policy keeps a head needle; A5 must not duplicate A4's discrimination"
+    )
+    # The regression it exists to catch: the top of the legal open interval.
+    assert A5_SENTINEL not in truncate(
+        body, replace(live, strategy="head_tail", tail_fraction=0.999)
+    ), "A5 cannot guard `tail_fraction` if a near-1 value still leaves its needle in the head"

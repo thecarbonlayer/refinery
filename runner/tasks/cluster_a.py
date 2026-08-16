@@ -20,6 +20,19 @@ A1_SENTINEL = "TUESDAY-KEY-9X"
 A2_SENTINEL = "K4Q7-ROLLOUT-9Z"
 A3_VALUES = {"A": "ALPHA-CODE-D4T", "B": "BRAVO-CODE-M7Q", "C": "CHARLIE-CODE-X2R"}
 A4_SENTINEL = "ZQ-PASS-77KD"
+# A5 is A4's mirror, and the pair is the point. A4's needle sits at the END of an
+# oversized `@path` block, so a tail-preserving policy keeps it and `keep_head` loses
+# it — that is what makes A4 a MINER for `file_injection`. Nothing guarded the knob:
+# A4 was its only observer and also its only miner, so the loop could tune
+# `file_injection` against A4 with nothing able to catch a regression, which
+# `knob_coverage.UNGUARDED_KNOBS` recorded as a real hole rather than hiding.
+#
+# A5 puts the needle in the HEAD window instead. It survives the shipped policy and
+# `keep_head` alike, and dies at a legal `tail_fraction` near 1, where the head shrinks
+# to a few characters. Verified against carbon's real `truncate()`: kept at 0.5 and at
+# 0.001, kept under `keep_head`, LOST at 0.999. So the two tasks pin opposite ends of
+# the same interval and neither can stand in for the other.
+A5_SENTINEL = "HK-HEAD-31RB"
 A1_MAX_FILLER_TURNS = 22
 # The clamp value the A2/A4 fixtures were sized against, pinned at AUTHORING
 # time (config v1's max_item_chars, 2026-07-10) — hard constraint 5. The setup
@@ -188,9 +201,64 @@ def run_a4() -> Attempt:
     )
 
 
+def a5_body() -> str:
+    """A5's fixture, as a function so a test can assert on the EXACT bytes.
+
+    The same reason cluster_e exposes its scripts. A test that rebuilds the fixture
+    inline asserts a property of its own string: moving the needle to the tail — which
+    would turn A5 into a duplicate of A4 and leave `file_injection` unguarded again —
+    left such a test green.
+    """
+    filler = "\n".join(
+        f"appendix {i:03d}: routine maintenance entry, no action required" for i in range(200)
+    )
+    body = (
+        f"## Incident summary\nThe rollback token issued for this incident is "
+        f"{A5_SENTINEL}.\n\n## Appendix\n{filler}\n"
+    )
+    assert len(body) > AUTHORED_CLAMP, "authoring bug: file must exceed the baseline clamp"
+    assert body.index(A5_SENTINEL) < 200, "authoring bug: needle must sit in the head window"
+    return body
+
+
+def run_a5() -> Attempt:
+    """A fact in the HEAD of an oversized `@path` block — `file_injection`'s guard.
+
+    The sibling of A4, deliberately inverted. A4 asks whether the END of an injected
+    file survives, so it fails under `keep_head` and mines the strategy. A5 asks whether
+    the BEGINNING survives, which the shipped policy and `keep_head` both manage, and
+    which a legal `tail_fraction` approaching 1 destroys by shrinking the head to a
+    handful of characters.
+
+    Prior is `pass` on purpose: a guard has to be able to REGRESS, and a task already at
+    zero cannot drop. That is exactly what `UNGUARDED_KNOBS` said this knob was missing.
+
+    The filler is deliberately uninformative and the question is answerable ONLY from
+    the first section, so a model that receives a truncated head has nothing to fall
+    back on and cannot pass by guessing.
+    """
+    d = Path(mkdtemp(prefix="a5-"))
+    body = a5_body()
+    notes = d / "incident.txt"
+    notes.write_text(body)
+    a = _plain_agent()
+    reply = a.send(
+        f"@{notes} What rollback token does the incident summary give? Reply with just the token."
+    )
+    ok = A5_SENTINEL.lower() in reply.lower()
+    return Attempt(
+        passed=ok,
+        outcome="pass" if ok else "fail",
+        detail=f"needle_in_reply={ok} reply={reply!r}",
+        turns=len(a.messages),
+        metrics=agent_metrics(a),
+    )
+
+
 SPECS = [
     TaskSpec("A1", "held_in", "A", "pass", run_a1),
     TaskSpec("A2", "held_in", "A", "pass", run_a2),
     TaskSpec("A3", "held_out", "A", "uncertain", run_a3),
     TaskSpec("A4", "held_out", "A", "uncertain", run_a4),
+    TaskSpec("A5", "held_in", "A", "pass", run_a5),
 ]
