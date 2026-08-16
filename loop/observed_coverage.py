@@ -14,12 +14,19 @@ candidate's fault. Nothing in the pipeline noticed, because nothing related a pe
 delta to whether the edited knob could reach that task.
 
 **Strength of the claim, stated per knob.** "No observed activity" is not one kind of
-fact. For ``tool_output`` it is close to proof: a task that made no tool call has no
-tool result, and truncation policy acts on nothing else. For ``compaction`` it is
-merely evidence, because ``trigger_fraction`` is part of that knob and lowering it can
-make a task compact that never did. ``REQUIRES`` records which is which, and callers
-that want only the airtight exclusions filter on it. A silent mix of the two would be
-the same defect one level up — an authored claim wearing mechanical clothes.
+fact. For ``tool_output`` and ``max_tool_steps`` it is close to proof: a task that made
+no tool call has no tool result, and truncation policy acts on nothing else. For the
+rest it is evidence only, and for two distinct reasons — ``compaction`` because
+``trigger_fraction`` belongs to that knob and lowering it makes a task compact that
+never did, and ``compaction_prompt`` because a wording that makes the summarizer call
+FAIL changes the verdict while the count stays zero.
+
+``REQUIRES`` records which is which and every caller now honours it: ``partition_deltas``
+reports the two grades in separate buckets, ``contradicted_observers`` grades its claim,
+and only a proof-grade contradiction exits non-zero. An earlier version stored the grade
+and then ignored it at every call site, which let the report say "no legal value can
+affect this task" about a knob whose own entry said otherwise — the authored claim
+wearing mechanical clothes, one level up from the table this module was built to check.
 
 Lives in ``loop/`` for the reason ``knob_coverage`` gives: ``runner_sha`` is a content
 hash of the runner package, so anything kept there invalidates every baseline when it
@@ -87,11 +94,16 @@ REQUIRES: dict[str, Requirement] = {
     ),
     "compaction_prompt": Requirement(
         metric="compactions",
-        airtight=True,
+        airtight=False,
         why=(
-            "The prompt is read only inside `compact()`. Unlike the `compaction` object "
-            "it carries no field that can cause compaction to fire, so a task that "
-            "never compacts cannot be reached by any wording."
+            "The prompt is read only inside `compact()`, which is why this looked "
+            "airtight: unlike the `compaction` object it carries no field that can make "
+            "compaction fire. But `compact()` sends the prompt to the provider, that "
+            "call can raise, and carbon increments `compaction_count` only AFTER "
+            "`compact()` returns — so a legal wording that makes the summarizer request "
+            "fail changes the verdict while the recorded count stays zero. Proving the "
+            "prompt is not read BEFORE a compaction attempt is not the same as proving "
+            "every effect of it produces a counted, successful compaction."
         ),
     ),
 }
@@ -138,8 +150,16 @@ def unreachable(knob: str, activity: dict[str, dict[str, float]], *, airtight_on
     requirement = REQUIRES.get(knob)
     if requirement is None or (airtight_only and not requirement.airtight):
         return set()
+    # The metric must be PRESENT and zero. `.get(metric, 0.0)` read a missing metric as a
+    # measured zero, which fails in the dangerous direction: an attempt row that carries
+    # no metrics at all — 298 of them exist in `results/`, written by older runs and by
+    # the error path that reports a raised task without agent metrics — would make a task
+    # look proven-unreachable on the strength of never having been measured. Absence of
+    # evidence had to be spelled `not measured`, not `zero`.
     return {
-        task for task, metrics in activity.items() if metrics.get(requirement.metric, 0.0) == 0.0
+        task
+        for task, metrics in activity.items()
+        if requirement.metric in metrics and metrics[requirement.metric] == 0.0
     }
 
 
@@ -151,12 +171,17 @@ def contradicted_observers(activity: dict[str, dict[str, float]]) -> dict[str, l
     acts on, the claim is false and the coverage it buys is decorative — the exact
     failure the table warns about but no test in this repo could detect.
     """
-    out: dict[str, list[str]] = {}
+    out: dict[str, dict[str, list[str]]] = {}
     for knob, roles in KNOB_COVERAGE.items():
-        dead = unreachable(knob, activity)
-        named = [t for t in roles.get("observers", ()) if t in dead]
-        if named:
-            out[knob] = sorted(named)
+        proven = unreachable(knob, activity, airtight_only=True)
+        probable = unreachable(knob, activity) - proven
+        observers = roles.get("observers", ())
+        graded = {
+            "proven": sorted(t for t in observers if t in proven),
+            "probable": sorted(t for t in observers if t in probable),
+        }
+        if graded["proven"] or graded["probable"]:
+            out[knob] = graded
     return out
 
 
@@ -197,11 +222,21 @@ def partition_deltas(
     surprising one — it is the grader's run-to-run variance wearing the candidate's
     name. Reporting the two together produced a Δ_in of −0.118 for a candidate whose
     reachable tasks moved by −0.33 in total.
+
+    THREE buckets, not two, because the exclusions are not one kind of fact and an
+    earlier version flattened them. `unreachable_proven` holds only airtight
+    exclusions — `tool_output` on a task with no tool registry. `unreachable_probable`
+    holds the evidence-grade ones, where the knob could CREATE the activity whose
+    absence is being read as exclusion: lowering `compaction.trigger_fraction` makes a
+    task compact that never has. Collapsing the two let a caller say "no legal value
+    can affect this task" about a knob whose own `REQUIRES` entry says otherwise.
     """
-    dead = unreachable(knob, activity)
+    proven = unreachable(knob, activity, airtight_only=True)
+    probable = unreachable(knob, activity) - proven
     return {
-        "evidence": {t: d for t, d in per_task.items() if t not in dead},
-        "unreachable": {t: d for t, d in per_task.items() if t in dead},
+        "evidence": {t: d for t, d in per_task.items() if t not in proven | probable},
+        "unreachable_proven": {t: d for t, d in per_task.items() if t in proven},
+        "unreachable_probable": {t: d for t, d in per_task.items() if t in probable},
     }
 
 
@@ -226,11 +261,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {', '.join(dead) if dead else '(none)'}")
 
     denied = contradicted_observers(activity)
-    print("\nknob_coverage observer claims the runs DENY (a false row):")
+    print("\nknob_coverage observer claims the runs deny:")
     if not denied:
         print("  (none)")
-    for knob, tasks in sorted(denied.items()):
-        print(f"  {knob}: {', '.join(tasks)}")
+    for knob, graded in sorted(denied.items()):
+        if graded["proven"]:
+            print(f"  {knob}: FALSE ROW — {', '.join(graded['proven'])}")
+        if graded["probable"]:
+            # Not a false row. The knob could create the missing activity, so absence
+            # is a prompt to re-measure, never a verdict on the claim.
+            print(f"  {knob}: unmeasured, re-check — {', '.join(graded['probable'])}")
 
     # Advisory, and never a failure: activity is necessary for a knob to reach a task,
     # never sufficient. Exiting non-zero on this would make a review queue into a gate.
@@ -240,7 +280,7 @@ def main(argv: list[str] | None = None) -> int:
         print("  (none)")
     for knob, tasks in sorted(extra.items()):
         print(f"  {knob}: {', '.join(tasks)}")
-    return 1 if denied else 0
+    return 1 if any(g["proven"] for g in denied.values()) else 0
 
 
 if __name__ == "__main__":

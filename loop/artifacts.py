@@ -188,4 +188,14 @@ class ValidationRecord:
             "metric_denominator_drift": self.metric_denominator_drift,
             "baseline_fingerprint": self.baseline_fingerprint,
             "candidate_fingerprint": self.candidate_fingerprint,
+            # These two were computed, attached to the record, described in their own
+            # docstrings as "part of the record" — and then dropped here, which is the
+            # only place the record reaches disk (`loop/cli.py` writes `to_json()` and
+            # nothing else). So the harness-gate outcome was never persisted for any
+            # candidate, and neither was the coverage split. A field that a serializer
+            # silently omits is worse than one that was never added: the code reads as
+            # though the evidence exists, and every claim made about the record on the
+            # strength of it was false.
+            "gates": self.gates,
+            "coverage": self.coverage,
         }

@@ -138,22 +138,33 @@ def coverage_note(candidate: Candidate, per_task: dict[str, float]) -> dict:
     # EITHER does, so the sets intersect. The accumulator starts at None rather than {}
     # because an empty first set is meaningful — it means that knob reaches everything,
     # which must swallow the whole result, not be mistaken for "nothing seen yet".
-    unreachable: dict[str, float] | None = None
+    proven: dict[str, float] | None = None
+    probable: dict[str, float] | None = None
     for knob in knobs:
         split = partition_deltas(knob, per_task, activity)
-        if unreachable is None:
-            unreachable = split["unreachable"]
-        else:
-            unreachable = {t: v for t, v in unreachable.items() if t in split["unreachable"]}
-    unreachable = unreachable or {}
-    evidence = {t: v for t, v in per_task.items() if t not in unreachable}
+        for name, acc in (("unreachable_proven", proven), ("unreachable_probable", probable)):
+            merged = (
+                split[name] if acc is None else {t: v for t, v in acc.items() if t in split[name]}
+            )
+            if name == "unreachable_proven":
+                proven = merged
+            else:
+                probable = merged
+    proven, probable = proven or {}, probable or {}
+    # A task can only be PROBABLY unreachable if it is not already PROVABLY so.
+    probable = {t: v for t, v in probable.items() if t not in proven}
+    evidence = {t: v for t, v in per_task.items() if t not in proven and t not in probable}
     return {
         "knobs": knobs,
         "evidence": evidence,
-        "unreachable": unreachable,
+        "unreachable_proven": proven,
+        "unreachable_probable": probable,
         "note": (
-            "`unreachable` movements are on tasks no legal value of the edited knob(s) "
-            "can affect; they are recorded, not subtracted from the delta."
+            "`unreachable_proven` movements are on tasks NO value of the edited knob(s) "
+            "can affect. `unreachable_probable` is weaker: the knob showed no activity "
+            "to act on, but could CREATE it (lowering compaction.trigger_fraction makes "
+            "a task compact that never has), so absence there is a prompt to re-measure "
+            "rather than a verdict. Neither is subtracted from the delta."
         ),
     }
 
@@ -220,11 +231,16 @@ def validate_candidate(
     # what it is, and quietly reweighting it here would be a second, hidden rule — it
     # records what the verdict was made of, next to the verdict.
     coverage = coverage_note(candidate, d["per_task"])
-    if coverage.get("unreachable"):
+    # Count MOVEMENTS, not tasks. `per_task` carries every task including the unmoved
+    # ones, so reporting its length overstated how many actually moved.
+    moved = {t: v for t, v in d["per_task"].items() if v}
+    flagged = {t for t in coverage.get("unreachable_proven", {}) if t in moved}
+    unsure = {t for t in coverage.get("unreachable_probable", {}) if t in moved}
+    if flagged or unsure:
         log(
-            f"  note: {len(coverage['unreachable'])} of "
-            f"{len(d['per_task'])} per-task movements are on tasks the edited "
-            f"knob(s) cannot reach — see `gates`/`coverage` in the record"
+            f"  note: of {len(moved)} tasks that moved, {len(flagged)} cannot be "
+            f"reached by the edited knob(s) at any value and {len(unsure)} showed no "
+            f"activity for it — see `coverage` in the record"
         )
     record = ValidationRecord(
         candidate_id=candidate.id,

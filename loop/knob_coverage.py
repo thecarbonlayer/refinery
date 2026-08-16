@@ -38,8 +38,11 @@ demonstrated a plausible new knob passing the whole contract with no real covera
 So: this file is a human-audited claim with mechanical guardrails, not a proof.
 Changing a row means re-measuring, not editing a tuple.
 
-Nothing in `loop/` reads this table today, which caps the blast radius but also
-means these tests are its ONLY enforcement.
+`loop/observed_coverage.py` now reads this table and checks it against what the
+recorded runs actually show — the first mechanical check on the rows themselves rather
+than on how they relate to each other. It cannot confirm a row, only contradict one:
+observed activity is NECESSARY for a knob to reach a task, never sufficient. So the
+warning above still stands for every row it does not deny.
 """
 
 from __future__ import annotations
@@ -82,41 +85,40 @@ SUITE_WIDE_KNOBS = frozenset({"system_prompt", "temperature"})
 _TOOL_RESULT_READERS = ("D3", "E1", "E2", "E3", "E4", "F1", "F2", "G3")
 
 # ---------------------------------------------------------------------------------
-# The plausibility floor, written down because it was already deciding rows unwritten.
+# The tuning floor — a GOVERNANCE POLICY, not a fact derived from carbon.
 #
-# The criterion above says an observer is a task "whose verdict some legal value of it
-# can move". Taken literally that admits nearly everything: `tool_output.budget` is any
-# positive integer with no lower bound, so a budget of 6 breaks D1 and a budget of 20
-# breaks F1. The file then contradicts itself in prose — "only E1 and E2 are sensitive
-# at PLAUSIBLE budgets" — and it is that second, unwritten rule that actually chose the
-# rows. Two criteria, one written, one used.
+# Two criteria were in use here, one written and one not. Written: an observer is a task
+# "whose verdict some legal value can move". Taken literally that admits nearly every
+# tool-using task, because `tool_output.budget` is any positive integer with no lower
+# bound — a budget of 6 breaks D1, a budget of 20 breaks F1. Unwritten, in this file's
+# own prose: "only E1 and E2 are sensitive at PLAUSIBLE budgets". The second one chose
+# the rows, which is why F1 is listed and three tasks of the same shape and size are not.
 #
-# So: the floor is carbon's OWN `SHRINK_MIN_BUDGET`, imported rather than copied. Carbon
-# refuses to shrink a tool result below it, because below that a cut result cannot carry
-# the marker saying it was cut (the head_tail marker is a flat 43 chars at every budget;
-# an offload footer is up to MAX_FOOTER_CHARS = 450). A budget under the floor does not
-# make the agent tighter, it makes the door incoherent — so a task that breaks only
-# there is reporting a degenerate configuration, not a tuning risk.
+# CORRECTED 2026-08-15, same day, after review. A first version set this floor to
+# carbon's `SHRINK_MIN_BUDGET` and claimed carbon "refuses to shrink a tool result
+# below it". That justification was FALSE as applied. `SHRINK_MIN_BUDGET` appears at
+# exactly two places in carbon: its own definition, and the OVERFLOW-RECOVERY shrink
+# (`agent.py`), which re-cuts an already-active policy after a context overflow. Normal
+# tool-result truncation uses the configured budget directly and carbon refuses nothing
+# below 500. Borrowing an emergency lower bound and presenting it as a statement about
+# primary budgets dressed a policy choice as a derivation.
 #
-# ⚠️ CONSEQUENCE, UNRESOLVED. Applying this floor removes F1 as well, and F1 is listed.
-# Its 113-char source is destroyed by a budget of 20 — which is exactly the argument the
-# comment above uses to justify listing it, and that argument is below the floor. Either
-# F1 leaves `_TOOL_RESULT_READERS` or the floor is wrong. Recorded here rather than
-# silently resolved: dropping a listed observer changes what the loop is allowed to
-# tune, and that is a decision, not a cleanup.
-
-
-def tool_output_plausibility_floor() -> int:
-    """The smallest `tool_output.budget` a task breaking below is NOT evidence about.
-
-    Derived, never copied, and imported lazily so this stays a pure-data governance
-    file that loads without carbon — the same reason `config_edit.known_knobs()` does
-    it this way.
-    """
-    from harness.agent import SHRINK_MIN_BUDGET
-
-    return SHRINK_MIN_BUDGET
-
+# So it is stated as what it is. The number is informed by two measured facts — the
+# head_tail marker is a flat 43 chars at every budget, and an offload footer runs to
+# `MAX_FOOTER_CHARS` (450) — so below roughly 500 a cut result spends more on announcing
+# the cut than on content, and an offload pointer cannot be carried at all. That makes
+# such a budget degenerate rather than merely tight. But "the loop should not propose a
+# degenerate budget" is a decision about this program, and a person made it.
+#
+# The observer contract changes with it: a task qualifies when some value the loop MAY
+# PROPOSE moves its verdict, not merely some value the schema permits.
+#
+# ⚠️ OPEN. Applying the floor removes F1, which is listed. Its 113-char source is
+# destroyed by a budget of 20 — the very argument this file uses to justify listing it,
+# and that argument sits below the floor. Either F1 leaves `_TOOL_RESULT_READERS` or the
+# floor is wrong. Left unresolved on purpose: dropping a listed observer changes what
+# the loop may tune, which is a decision and not a cleanup.
+TOOL_OUTPUT_TUNING_FLOOR = 500
 
 # Measured 2026-08-15, by building each task's real fixture and running its pinned
 # command — no model calls. The number is the budget below which the task's largest
@@ -130,6 +132,7 @@ MEASURED_BREAK_BUDGETS: dict[str, int] = {
     "D2": 6,  # same shape as D1
     "F1": 113,  # LISTED as an observer, and below the floor — see the warning above
 }
+
 
 # Every task that makes any tool call at all, so the per-turn round budget binds
 # it. A different mechanism from result truncation, and therefore a different set
@@ -225,13 +228,26 @@ KNOB_COVERAGE: dict[str, dict[str, tuple[str, ...]]] = {
     # a property of the tool calls it made. A strategy that lifts that list out of the
     # tool calls and re-attaches it passes; one that leaves it to the summarizer's prose
     # does not. That is a discrimination BETWEEN strategies, which is what this row is
-    # for. Held-in with an `uncertain` prior, so it qualifies as a miner. Not a guard,
-    # for the same reason G4 is not: an `uncertain` prior makes a weak one, and G2
-    # already carries that role with the trajectory shape G5 lacks.
+    # for.
+    #
+    # CORRECTED 2026-08-15, same day, after review. G5 was first added here as a MINER
+    # and that was wrong twice over. Mechanically: carbon's checkpoint lifts file paths
+    # out of `tool_calls` deterministically (`harness/checkpoint.py` `file_ops`) and
+    # reattaches them independently of the summary prose — which is exactly what makes
+    # G5 a good STRATEGY observer, and the same fact means better wording cannot mine
+    # it. Empirically: `iterations/iter-02/clusters.json` already records that no
+    # `compaction_prompt` edit fixes the structural failure, and G5 is 3/3 in the v7
+    # baseline, so there is nothing to turn green. Its `uncertain` registry prior passes
+    # the letter of the miner rule while the measurement denies its substance — a prior
+    # is a claim about the suite as authored, not a reading of the current baseline.
+    #
+    # So: observer and GUARD on both rows. That is the real coverage this table gained —
+    # a compaction candidate that loses the file list drops G5 from 1.00, and nothing
+    # was watching that before. A weak guard, on the `uncertain` prior, exactly like D3.
     "compaction": {
         "observers": ("A1", "G2", "G4", "G5"),
-        "miners": ("G4", "G5"),
-        "guards": ("A1", "G2"),
+        "miners": ("G4",),
+        "guards": ("A1", "G2", "G5"),
     },
     # Same observers, and for a sharper reason: H2 detects the summarizer by
     # payload SHAPE precisely so that rewriting this knob cannot fool it, which by
@@ -239,8 +255,8 @@ KNOB_COVERAGE: dict[str, dict[str, tuple[str, ...]]] = {
     # that invariance directly.
     "compaction_prompt": {
         "observers": ("A1", "G2", "G4", "G5"),
-        "miners": ("G4", "G5"),
-        "guards": ("A1", "G2"),
+        "miners": ("G4",),
+        "guards": ("A1", "G2", "G5"),
     },
     # `verify_attempts` is gated on a test command in the task's instruction root,
     # and cluster B is the only cluster that ships one — every other task uses a

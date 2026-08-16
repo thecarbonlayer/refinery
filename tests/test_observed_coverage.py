@@ -53,13 +53,13 @@ def test_partition_splits_iteration_3s_own_deltas(activity):
     per_task = {"A1": -1.0, "B2": -1 / 3, "G1": 1 / 3, "G4": -1 / 3, "G5": -2 / 3}
     split = partition_deltas("tool_output", per_task, activity)
 
-    assert set(split["unreachable"]) == {"A1", "G1", "G4"}
+    assert set(split["unreachable_proven"]) == {"A1", "G1", "G4"}
     # G1 sits in the unreachable half too, and that matters more than it looks: it moved
     # UP. An earlier pass at this analysis dropped only the tasks that hurt the
     # candidate and got Δ_in = 0.0000, which accepts. Dropping symmetrically leaves
     # B2 and G5 and a negative sum, which rejects. A partition that filtered by sign
     # would be a way to fit any verdict you wanted.
-    assert split["unreachable"]["G1"] > 0
+    assert split["unreachable_proven"]["G1"] > 0
     assert set(split["evidence"]) == {"B2", "G5"}
 
 
@@ -77,11 +77,18 @@ def test_airtight_only_drops_the_evidence_grade_exclusions(activity):
     because `trigger_fraction` belongs to that knob and can create the very activity
     its absence is being read as proof of."""
     assert not REQUIRES["compaction"].airtight
-    assert REQUIRES["compaction_prompt"].airtight
+    # `compaction_prompt` looked airtight and is not: `compact()` sends the prompt to the
+    # provider, that call can raise, and carbon increments `compaction_count` only after
+    # `compact()` RETURNS — so a legal wording that makes the summarizer request fail
+    # moves the verdict while the recorded count stays zero. Proving the prompt is not
+    # read before a compaction ATTEMPT is not proving every effect of it is counted.
+    assert not REQUIRES["compaction_prompt"].airtight
+    assert REQUIRES["tool_output"].airtight
 
     assert unreachable("compaction", activity)
     assert unreachable("compaction", activity, airtight_only=True) == set()
-    assert unreachable("compaction_prompt", activity, airtight_only=True)
+    assert unreachable("compaction_prompt", activity, airtight_only=True) == set()
+    assert unreachable("tool_output", activity, airtight_only=True)
 
 
 def test_peak_not_mean_decides_whether_something_ever_happened(tmp_path):
@@ -113,7 +120,10 @@ def test_a_false_observer_row_is_caught(activity):
     fabricated["observers"] = (*fabricated["observers"], "A1")  # A1 has no tools at all
     with pytest.MonkeyPatch.context() as mp:
         mp.setitem(KNOB_COVERAGE, "tool_output", fabricated)
-        assert contradicted_observers(activity)["tool_output"] == ["A1"]
+        # PROVEN, not merely probable: `tool_output` is the airtight grade, so calling
+        # the row false is warranted. On an evidence-grade knob the same absence lands
+        # in `probable`, because the knob could create the activity it is missing.
+        assert contradicted_observers(activity)["tool_output"]["proven"] == ["A1"]
 
 
 def test_the_review_queue_honours_the_argued_exclusions(activity):
@@ -130,8 +140,15 @@ def test_the_review_queue_honours_the_argued_exclusions(activity):
     # it was argued, and it is now IN those rows — so it must have left the queue.
     # Asserting it is still there would pin the bug rather than the mechanism.
     assert "G5" in KNOB_COVERAGE["compaction"]["observers"]
-    assert "G5" in KNOB_COVERAGE["compaction"]["miners"]
     assert "G5" not in queue.get("compaction", [])
+    # GUARD, not miner, on both compaction rows. Carbon's checkpoint lifts file paths out
+    # of `tool_calls` deterministically and reattaches them independently of the summary
+    # prose — the same fact that makes G5 a good STRATEGY observer means better wording
+    # cannot mine it. It is also 3/3 in the v7 baseline, so there is nothing to turn
+    # green. It was first added as a miner; that was wrong on both counts.
+    for row in ("compaction", "compaction_prompt"):
+        assert "G5" in KNOB_COVERAGE[row]["guards"]
+        assert "G5" not in KNOB_COVERAGE[row]["miners"]
 
     # The mechanism must still be able to fire, or emptying the queue would look
     # identical to breaking it.
@@ -179,10 +196,12 @@ def test_a_candidate_editing_two_knobs_is_unreachable_only_where_BOTH_are(activi
 
     per_task = {"A1": -1.0, "B2": -0.5}
     # `tool_output` alone cannot reach A1 (no tool registry at all).
-    assert set(coverage_note(candidate("tool_output"), per_task)["unreachable"]) == {"A1"}
+    note = coverage_note(candidate("tool_output"), per_task)
+    assert set(note["unreachable_proven"]) == {"A1"}
     # `system_prompt` reaches every live task, so pairing it removes every exclusion.
     both = coverage_note(candidate("tool_output", "system_prompt"), per_task)
-    assert both["unreachable"] == {}
+    assert both["unreachable_proven"] == {}
+    assert both["unreachable_probable"] == {}
     assert set(both["evidence"]) == {"A1", "B2"}
 
 
@@ -194,21 +213,24 @@ def test_the_plausibility_floor_is_derived_and_applied_consistently():
     any positive integer — a budget of 6 breaks D1. Unwritten, in prose: "only E1 and
     E2 are sensitive at PLAUSIBLE budgets". The second one chose the rows.
 
-    So the floor is carbon's own `SHRINK_MIN_BUDGET`, not a number invented here, and
-    every measured task must sit on the side of it that its listing implies. F1 is the
-    one exception and it is asserted AS an exception, so it stays visible until someone
-    decides it — a floor that quietly tolerated a contradiction would be decoration.
+    The floor is a POLICY number, not a derivation. A first version anchored it to
+    carbon's `SHRINK_MIN_BUDGET` and claimed carbon refuses budgets below it; that was
+    false — the constant belongs to overflow RECOVERY, and normal truncation uses the
+    configured budget directly. Deliberately NOT asserted against any carbon constant
+    now, because tracking one would restate the same false derivation as a test.
+
+    What is asserted is that every measured task sits on the side of the floor its
+    listing implies. F1 is the one exception and is asserted AS an exception, so it
+    stays visible until someone decides it — a floor that quietly tolerated the
+    contradiction would be decoration.
     """
     from loop.knob_coverage import (
         _TOOL_RESULT_READERS,
         MEASURED_BREAK_BUDGETS,
-        tool_output_plausibility_floor,
     )
-
-    floor = tool_output_plausibility_floor()
-    from harness.agent import SHRINK_MIN_BUDGET
-
-    assert floor == SHRINK_MIN_BUDGET, "the floor must track carbon, not a copy of it"
+    from loop.knob_coverage import (
+        TOOL_OUTPUT_TUNING_FLOOR as floor,
+    )
 
     below = {t for t, b in MEASURED_BREAK_BUDGETS.items() if b < floor}
     listed_but_below = below & set(_TOOL_RESULT_READERS)
@@ -223,3 +245,85 @@ def test_the_plausibility_floor_is_derived_and_applied_consistently():
     for task in ("B1", "B2", "B3", "D1", "D2"):
         assert task not in _TOOL_RESULT_READERS
         assert MEASURED_BREAK_BUDGETS[task] < floor
+
+
+def test_the_written_artifact_carries_the_gate_and_coverage_fields():
+    """The record on DISK, not the object in memory. This is where the bug was.
+
+    `gates` and `coverage` were both attached to `ValidationRecord`, both described in
+    their own docstrings as part of the record, and both dropped by `to_json()` — the
+    only path to disk, since `loop/cli.py` writes `to_json()` and nothing else. So the
+    harness-gate outcome was never persisted for any candidate, and neither was the
+    coverage split, while the code read as though the evidence existed.
+
+    Every test written for either feature exercised the computation. None read the
+    artifact, which is exactly how a serializer omission survives: the thing under test
+    was one call short of the thing being claimed.
+    """
+    import json as _json
+
+    from loop.artifacts import ValidationRecord
+
+    record = ValidationRecord(
+        candidate_id="c",
+        label="l",
+        accepted=False,
+        delta_in=-0.1,
+        delta_ho=0.2,
+        gates={"passed": True, "checks": {"carbon_verify": {"passed": True}}},
+        coverage={"knobs": ["tool_output"], "unreachable_proven": {"A1": -1.0}},
+    )
+    written = _json.loads(_json.dumps(record.to_json()))
+
+    assert written["gates"]["passed"] is True
+    assert written["coverage"]["unreachable_proven"] == {"A1": -1.0}
+    # And every declared field must survive the round trip, so the next one added is
+    # not silently dropped the same way.
+    from dataclasses import fields
+
+    assert set(written) == {f.name for f in fields(ValidationRecord)}, (
+        "to_json() and the dataclass have diverged — a field that exists on the record "
+        "but never reaches disk is worse than one that was never added"
+    )
+
+
+def test_a_task_measured_for_other_metrics_but_not_this_one_is_not_excluded(tmp_path):
+    """Absence of evidence must not be spelled "zero".
+
+    `metrics.get(metric, 0.0)` read a metric that was never recorded as a measured
+    zero, so a task became PROVABLY unreachable on the strength of never having been
+    measured for the thing in question. 298 attempt rows in `results/` carry no metrics
+    at all — older runs, plus the error path that records a raised task without agent
+    metrics — and the failure direction is the dangerous one: it discards real evidence
+    rather than keeping noise.
+    """
+    path = tmp_path / "run.jsonl"
+    path.write_text(json.dumps({"task": "X", "metrics": {"compactions": 2.0}}) + "\n")
+    act = observed_activity([path])
+
+    assert "tool_calls" not in act["X"], "fixture must not record the metric at all"
+    assert unreachable("tool_output", act) == set(), "never measured is not measured zero"
+    # …while a task measured AT zero for that same metric is still excluded, or the fix
+    # would have thrown the mechanism out with the bug.
+    path.write_text(json.dumps({"task": "X", "metrics": {"tool_calls": 0.0}}) + "\n")
+    assert unreachable("tool_output", observed_activity([path])) == {"X"}
+
+
+def test_an_evidence_grade_exclusion_lands_in_probable_never_proven(activity):
+    """The two grades must stay apart at the point a caller reads them.
+
+    `compaction` exclusions are evidence only: `trigger_fraction` belongs to that knob,
+    so lowering it makes a task compact that never has. Collapsing them into one bucket
+    is what let the report claim "no legal value can affect this task" about a knob
+    whose own `REQUIRES` entry says the opposite.
+    """
+    # B1 and D1 never compact in any recorded run; A1 does, so it stays evidence.
+    per_task = {"B1": -0.5, "D1": 0.25, "A1": -0.25}
+    split = partition_deltas("compaction", per_task, activity)
+
+    assert split["unreachable_proven"] == {}, "compaction can never yield a proof"
+    assert set(split["unreachable_probable"]) == {"B1", "D1"}
+    assert set(split["evidence"]) == {"A1"}
+    # And the airtight knob must still produce proofs, so the grades are not simply
+    # both routed to the weaker bucket.
+    assert partition_deltas("tool_output", per_task, activity)["unreachable_proven"]
