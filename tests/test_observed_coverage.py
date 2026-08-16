@@ -154,9 +154,15 @@ def test_the_review_queue_is_not_silenced_by_a_claim_known_to_be_false(activity)
     whole point: suppressing an unresolved warning is a defect, promoting a task to
     observer is a decision about what the loop may tune.
     """
-    assert DELIBERATE_NON_OBSERVERS.get("tool_output", {}) == {}
     queue = unlisted_with_activity(activity)
-    assert {"A2", "C1", "C2", "C3"} <= set(queue["tool_output"])
+    # A2 and C3 have since been CLASSIFIED (guards), so they leave the queue by being
+    # answered rather than by being silenced — which is the distinction. C1/C2 remain,
+    # held out pending a counterfactual sweep rather than on a settled argument.
+    assert {"C1", "C2"} <= set(queue["tool_output"])
+    assert {"A2", "C3"}.isdisjoint(queue["tool_output"])
+    # G5 is suppressed again, and legitimately: its verdict reads the file list off the
+    # tool CALLS, so no budget moves it. Mechanism, not size.
+    assert "G5" in DELIBERATE_NON_OBSERVERS["tool_output"]
 
     # The remaining entries are argued from a mechanism carbon's code makes true, and
     # must still suppress — a queue that raises settled decisions every run is one
@@ -212,34 +218,39 @@ def test_a_candidate_editing_two_knobs_is_unreachable_only_where_BOTH_are(activi
     assert set(both["evidence"]) == {"A1", "B2"}
 
 
-def test_the_tuning_floor_does_not_pretend_to_be_enforced():
-    """The floor constrains nothing, and the test says so rather than blessing it.
+def test_every_measured_task_is_classified_rather_than_excluded_by_a_floor():
+    """The floor is gone; the rows carry the tasks instead.
 
-    A previous version asserted F1 AS a permitted exception — one listed observer whose
-    listing rests on a budget below the floor. That froze an incoherent contract instead
-    of detecting one, which is the failure mode this whole module was built to catch.
+    A plausibility floor was written to keep this row small, then marked NOT ENFORCED
+    because nothing in the proposal path honoured it. The decision was to abandon it
+    rather than enforce it: enforcing adds a real constraint on what the loop may
+    propose in order to fix a bookkeeping inconsistency, and every previous constraint
+    added for tidiness in this program turned into a false veto.
 
-    What is actually true: nothing imports the constant outside this test,
-    `proposal_surface()` still publishes carbon's `positive: true`, and
-    `apply_candidate()` still delegates to carbon, which accepts any positive budget. So
-    the loop can propose 20 today. Until one of the two documented routes is taken —
-    enforce it in the proposal path, or abandon it — this asserts only that the number
-    has no teeth, so that giving it teeth is what turns the test red.
+    So every task measured as breakable by a legal `tool_output` value is now listed,
+    and `MEASURED_BREAK_BUDGETS` is the evidence for each. C1/C2 are the only tasks
+    held out, and held out PENDING a sweep rather than on a settled argument.
     """
-    import loop.config_edit as config_edit
-    from loop.knob_coverage import MEASURED_BREAK_BUDGETS, TOOL_OUTPUT_TUNING_FLOOR
-
-    surface = config_edit.proposal_surface()["editable"]["tool_output"]
-    budget = surface["parameters"]["budget"]
-    assert budget == {"type": "int", "positive": True}, (
-        "the published proposal surface now carries a bound. If the floor was enforced, "
-        "delete this test and add ones covering proposal_surface() and apply_candidate(), "
-        "then settle F1's row — its listing rests on a budget of 20."
+    from loop.knob_coverage import (
+        _TOOL_RESULT_READERS,
+        KNOB_COVERAGE,
+        MEASURED_BREAK_BUDGETS,
     )
-    # Every measured task, F1 included, breaks below the floor. Under the domain the
-    # pipeline actually enforces they are therefore all alike, and F1 being listed while
-    # the other five are not is an inconsistency the floor does not currently resolve.
-    assert all(b < TOOL_OUTPUT_TUNING_FLOOR for b in MEASURED_BREAK_BUDGETS.values())
+
+    assert not hasattr(
+        __import__("loop.knob_coverage", fromlist=["x"]), "TOOL_OUTPUT_TUNING_FLOOR"
+    ), "the floor was abandoned; a constant left behind would invite it back unenforced"
+
+    missing = set(MEASURED_BREAK_BUDGETS) - set(_TOOL_RESULT_READERS)
+    assert not missing, f"measured as breakable but not listed: {sorted(missing)}"
+
+    # A2 is listed on a STRATEGY argument, not a budget one — `keep_head` drops the tail
+    # its sentinel sits in — so it would belong under any floor and has no measurement.
+    assert "A2" in _TOOL_RESULT_READERS and "A2" not in MEASURED_BREAK_BUDGETS
+    assert "A2" in KNOB_COVERAGE["tool_output"]["guards"]
+
+    # C1/C2 are the only held-out tasks, and are held out pending evidence.
+    assert {"C1", "C2"}.isdisjoint(_TOOL_RESULT_READERS)
 
 
 def test_the_written_artifact_carries_the_gate_and_coverage_fields():
@@ -748,3 +759,158 @@ def test_the_recorded_path_never_carries_an_absolute_location(tmp_path, monkeypa
     blob = _json.dumps(out_note)
     assert str(tmp_path) not in blob and "/Users/" not in blob and "/home/" not in blob
     assert not out_note["file"].startswith("results/"), "must not claim to be a repo file"
+
+
+def test_the_causal_verdict_on_iteration_3_itself():
+    """The case this rule exists for, against the real recorded data.
+
+    It does NOT rescue iteration 3, and that is the honest outcome rather than a
+    shortfall. Removing the impossible attributions halves Δ_in (−0.1176 → −0.0588) and
+    clears the catastrophic veto entirely — A1 was its only entry, and A1 builds an
+    agent with no tool registry against a candidate that edited `tool_output`. What
+    remains is G5 (−0.67) and B2 (−0.33), the two held-in tasks that DO make tool calls
+    and therefore cannot be proven unreachable from telemetry.
+
+    So the rejection now rests on evidence instead of on movements the knob could not
+    have caused. That is the whole claim; anything more would mean trusting a
+    hand-authored exclusion to decide acceptance, which is what the derived map exists
+    to avoid — an audit found six such rows false at the same time.
+    """
+    import json as _json
+
+    from loop.artifacts import Candidate
+    from loop.validate import causal_verdict, coverage_note
+    from runner.delta import delta
+
+    base = _json.loads(Path("results/baseline-r5-v7.json").read_text())
+    cand = _json.loads(Path("results/cand-tool-output-offload.json").read_text())
+    d = delta(base, cand)
+    candidate = Candidate(
+        id="tool-output-offload",
+        cluster_id="CL",
+        proposer="p",
+        proposer_detail="d",
+        fields={"tool_output": {"old": 0, "new": 1}},
+        rationale="r",
+        expected_effect="e",
+        regression_risk="g",
+    )
+    coverage = coverage_note(candidate, d["per_task"], COHORT_PAIRS)
+    v = causal_verdict(d, coverage, base)
+
+    assert {"A1", "G4"} <= set(v["excluded"]), "the two no-tool-registry tasks"
+    assert v["delta_in"] > d["delta_in"], "removing impossible attributions must help"
+    assert round(v["delta_in"], 4) == -0.0588 and round(d["delta_in"], 4) == -0.1176
+    # The spurious hard veto is gone: A1 was the only catastrophic entry.
+    assert d["catastrophic_regressions"] and not v["catastrophic_regressions"]
+    # Still rejected, on the two tasks that genuinely make tool calls.
+    assert not v["accepted"] and not v["raw"]["accepted"]
+    assert {"G5", "B2"}.isdisjoint(v["excluded"])
+    # The raw verdict is kept, never discarded.
+    assert v["raw"]["delta_in"] == d["delta_in"]
+
+
+def test_only_proof_grade_exclusions_reach_the_verdict():
+    """An evidence-grade exclusion must NOT zero a movement.
+
+    `compaction`'s absence of activity can be created by the same knob's
+    `trigger_fraction`, so treating it as impossible would discard real movement. And
+    the zeroing must preserve the DENOMINATOR — dropping the task instead changes the
+    split mean for a second, unrelated reason and makes two candidates that exclude
+    different tasks incomparable.
+    """
+    from loop.validate import causal_verdict
+
+    base = {"tasks": {n: {"split": "held_in"} for n in ("X", "Y", "Z")}}
+    d = {
+        "per_task": {"X": -1.0, "Y": -1.0, "Z": 0.0},
+        "delta_in": -2 / 3,
+        "delta_ho": 0.0,
+        "accepted": False,
+        "catastrophic_regressions": {"X": -1.0, "Y": -1.0},
+    }
+    v = causal_verdict(
+        d, {"unreachable_proven": {"X": -1.0}, "unreachable_probable": {"Y": -1.0}}, base
+    )
+
+    assert v["per_task"] == {"X": 0.0, "Y": -1.0, "Z": 0.0}, "probable must survive"
+    assert v["delta_in"] == -1 / 3, "denominator stays 3, not 2"
+    assert list(v["catastrophic_regressions"]) == ["Y"], "veto skips proven only"
+
+
+def test_the_record_takes_the_CAUSAL_verdict_when_the_two_disagree(tmp_path):
+    """The decision itself, end to end, on a case where raw and causal differ.
+
+    This is the whole change: the raw verdict was applied correctly to real
+    measurements and still rejected iteration 3 on movements the edited knob could not
+    have caused. Recording the split beside a verdict the noise still decided left that
+    in place, so the causal verdict decides and the raw one is kept as evidence.
+
+    Constructed so the two genuinely disagree — a task with no tool calls collapses,
+    which sinks raw Δ_in, while a held-out task the knob CAN reach improves.
+    """
+    import json as _json
+
+    from loop.artifacts import Candidate, write_validation_record
+    from loop.validate import validate_candidate
+
+    def write(stem, fracs, calls):
+        (tmp_path / f"{stem}.json").write_text(
+            _json.dumps(
+                {
+                    "fingerprint": {"runner_sha": "deadbeef", "model": "m", "gemma_sha": "c0ffee"},
+                    "tasks": {
+                        "NOTOOLS": {"split": "held_in", "attempts": 1, "pass_fraction": fracs[0]},
+                        "REACHED": {"split": "held_in", "attempts": 1, "pass_fraction": fracs[1]},
+                        "GAIN": {"split": "held_out", "attempts": 1, "pass_fraction": fracs[2]},
+                    },
+                }
+            )
+        )
+        (tmp_path / f"{stem}.jsonl").write_text(
+            "\n".join(
+                _json.dumps({"task": n, "attempt": 0, "metrics": {"tool_calls": calls[n]}})
+                for n in ("NOTOOLS", "REACHED", "GAIN")
+            )
+            + "\n"
+        )
+        return (tmp_path / f"{stem}.jsonl", tmp_path / f"{stem}.json")
+
+    calls = {"NOTOOLS": 0.0, "REACHED": 3.0, "GAIN": 3.0}
+    write("base", (1.0, 1.0, 0.0), calls)
+    write("cand", (0.0, 1.0, 1.0), calls)  # NOTOOLS collapses; GAIN improves
+
+    import loop.validate as validate_mod
+
+    candidate = Candidate(
+        id="x",
+        cluster_id="CL",
+        proposer="p",
+        proposer_detail="d",
+        fields={"tool_output": {"old": 0, "new": 1}},
+        rationale="r",
+        expected_effect="e",
+        regression_risk="g",
+    )
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(validate_mod, "require_clean_tree", lambda *a, **k: None)
+        mp.setattr(validate_mod, "revert_config", lambda *a, **k: None)
+        mp.setattr(validate_mod, "apply_candidate", lambda *a, **k: {"version": 8})
+        record = validate_candidate(
+            candidate,
+            baseline_path=tmp_path / "base.json",
+            label="cand",
+            run_runner=lambda *a, **k: None,
+            run_gates=lambda *a, **k: {"passed": True, "checks": {}},
+            results_dir=tmp_path,
+            carbon_root=tmp_path,
+            log=lambda *_: None,
+        )
+
+    written = _json.loads(write_validation_record(record, tmp_path / "out.json").read_text())
+    assert written["causal"]["raw"]["accepted"] is False, "raw sinks on the unreachable task"
+    assert written["causal"]["accepted"] is True, "causal zeroes it and the gain carries"
+    assert written["accepted"] is True, "the RECORD must take the causal verdict"
+    assert "NOTOOLS" in written["causal"]["excluded"]
+    # The raw numbers survive as evidence rather than being overwritten.
+    assert written["causal"]["raw"]["delta_in"] < written["causal"]["delta_in"]

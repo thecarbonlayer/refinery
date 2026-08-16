@@ -201,6 +201,63 @@ def coverage_note(
     }
 
 
+def causal_verdict(d: dict, coverage: dict, baseline: dict) -> dict:
+    """Acceptance recomputed with impossible attributions removed.
+
+    Iteration 3 was rejected on a Δ_in of −0.118 built from four tasks, two of which
+    build agents with no tool registry at all against a candidate that edited
+    `tool_output`. The raw rule was applied correctly to real measurements; the
+    measurements just did not mean what the rule read them as. Recording that beside the
+    verdict — the previous state of this code — leaves the noisy verdict deciding, so
+    the incident stayed unsolved. The causal verdict decides now; the raw one is kept as
+    audit evidence, never discarded.
+
+    Five choices, each load-bearing:
+
+    - Only PROOF-grade exclusions are removed. Evidence-grade ones stay fully eligible:
+      `compaction`'s absence can be created by the same knob's `trigger_fraction`, so
+      treating it as impossible would discard real movement.
+    - A movement is replaced with ZERO, not dropped. Dropping shrinks the split's
+      denominator, which changes the mean for a second, unrelated reason and makes two
+      candidates excluding different tasks incomparable.
+    - Multi-knob exclusion is the intersection, already computed in `coverage_note`: a
+      task reached by any edited knob is reached.
+    - The catastrophic per-task veto skips the same tasks. Leaving it alone would let a
+      1.00 → 0.00 swing on a task the knob cannot touch veto by itself, which is the
+      original failure wearing a different hat.
+    - Lives in `loop/`, not `runner/`. `runner_sha` is a content hash of that package
+      and every recorded baseline is stamped with it; a governance rule must not cost a
+      re-measurement.
+    """
+    from runner.delta import acceptance
+
+    excluded = set(coverage.get("unreachable_proven", {}))
+    splits = {name: meta["split"] for name, meta in baseline["tasks"].items()}
+    per_task = {n: (0.0 if n in excluded else v) for n, v in d["per_task"].items()}
+
+    def mean(split: str) -> float:
+        vals = [v for n, v in per_task.items() if splits.get(n) == split]
+        return sum(vals) / len(vals) if vals else 0.0
+
+    d_in, d_ho = mean("held_in"), mean("held_out")
+    catastrophic = {n: c for n, c in d["catastrophic_regressions"].items() if n not in excluded}
+    verdict = acceptance(d_in, d_ho)
+    return {
+        "accepted": verdict["accepted"] and not catastrophic,
+        "delta_in": d_in,
+        "delta_ho": d_ho,
+        "excluded": sorted(excluded),
+        "per_task": per_task,
+        "catastrophic_regressions": catastrophic,
+        "raw": {
+            "accepted": d["accepted"],
+            "delta_in": d["delta_in"],
+            "delta_ho": d["delta_ho"],
+            "catastrophic_regressions": d["catastrophic_regressions"],
+        },
+    }
+
+
 def _run_runner(label: str, only: list[str] | None, attempts: int | None) -> None:
     """Run the suite in a fresh interpreter (same venv), cwd at the repo root."""
     cmd = [sys.executable, "-m", "runner.cli", "run", "--label", label]
@@ -282,10 +339,12 @@ def validate_candidate(
             f"reached by the edited knob(s) at any value and {len(unsure)} showed no "
             f"activity for it — see `coverage` in the record"
         )
+    causal = causal_verdict(d, coverage, baseline)
     record = ValidationRecord(
         candidate_id=candidate.id,
         label=label,
-        accepted=d["accepted"],
+        # The CAUSAL verdict. `causal["raw"]` keeps the unadjusted one as evidence.
+        accepted=causal["accepted"],
         delta_in=d["delta_in"],
         delta_ho=d["delta_ho"],
         per_task=d["per_task"],
@@ -303,11 +362,20 @@ def validate_candidate(
         candidate_fingerprint=d["candidate_fingerprint"],
         gates=gates,
         coverage=coverage,
+        causal=causal,
     )
     log(
-        f"candidate {candidate.id}: Δ_in={d['delta_in']:+.4f} Δ_ho={d['delta_ho']:+.4f} "
-        f"-> {'ACCEPTED' if d['accepted'] else 'REJECTED'}"
+        f"candidate {candidate.id}: causal Δ_in={causal['delta_in']:+.4f} "
+        f"Δ_ho={causal['delta_ho']:+.4f} -> "
+        f"{'ACCEPTED' if causal['accepted'] else 'REJECTED'}"
     )
+    if causal["accepted"] != d["accepted"]:
+        log(
+            f"  raw Δ_in={d['delta_in']:+.4f} Δ_ho={d['delta_ho']:+.4f} would have "
+            f"{'ACCEPTED' if d['accepted'] else 'REJECTED'} — the difference is "
+            f"{len(causal['excluded'])} task(s) the edited knob(s) cannot reach: "
+            f"{', '.join(causal['excluded'])}"
+        )
     if d["catastrophic_regressions"]:
         log(
             "  catastrophic per-task regression veto: "

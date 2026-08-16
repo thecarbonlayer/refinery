@@ -167,6 +167,10 @@ class ValidationRecord:
     # negative, against a candidate that edited `tool_output`. Recorded beside the
     # verdict, never subtracted from it — see `coverage_note` for why not.
     coverage: dict = field(default_factory=dict)
+    # Acceptance with impossible attributions removed, and the raw verdict kept inside
+    # it as evidence. `accepted` above is the CAUSAL one: recording the split beside a
+    # verdict the noise still decided left iteration 3's failure in place.
+    causal: dict = field(default_factory=dict)
 
     def to_json(self) -> dict:
         return {
@@ -198,6 +202,7 @@ class ValidationRecord:
             # strength of it was false.
             "gates": self.gates,
             "coverage": self.coverage,
+            "causal": self.causal,
         }
 
 

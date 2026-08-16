@@ -66,83 +66,56 @@ LIVE_GUARDS = "LIVE_MODEL_TASKS_EXPECTED_TO_PASS"
 # A reviewer demonstrated exactly that with a memory-recall knob no task touches.
 SUITE_WIDE_KNOBS = frozenset({"system_prompt", "temperature"})
 
-# Tasks whose verdict some legal `tool_output` value can move, i.e. whose
-# verification depends on tool-result text. The criterion is NOT "the budget fires
-# at baseline": D3's 3,029-char fixture does not fire at the shipped 4,000 budget,
-# while F1's 113-char source IS destroyed by a legal budget of 20, breaking the
-# exact match `edit_file` needs. Only E1 and E2 are sensitive at PLAUSIBLE budgets,
-# which is why the guards sit there.
+# Tasks whose verdict some legal `tool_output` value can move — classified against
+# carbon's TRUE legal domain, which is any positive integer budget plus the strategy
+# menu. No plausibility floor.
 #
-# Two deliberate exclusions. A2 is NOT here: its needle survives every budget down
-# to 8,736, and its prior is `fail`, so no legal value moves its verdict either way
-# — listing it was the decorative padding this module warns about. C1/C2 are not
-# here either, and that is now a property of the code: their leak predicates read
-# the RAW tool result (see cluster_c's `recording_tool` wiring), precisely so a
-# candidate cannot raise a containment score by clamping away the evidence.
-# E4 is sensitive to the STRATEGY rather than the budget: its verdict turns on
-# whether the door leaves a recoverable artifact behind, which only an
-# offload-shaped strategy does — no budget value alone can move it.
-_TOOL_RESULT_READERS = ("D3", "E1", "E2", "E3", "E4", "F1", "F2", "G3")
+# DECIDED 2026-08-15, after a review round argued the opposite. A floor was written
+# (500, from carbon's overflow-recovery `SHRINK_MIN_BUDGET`) to keep the rows small,
+# and then marked NOT ENFORCED because nothing in the proposal path honoured it. The
+# reviewer's minimum fix was to enforce it — advertise a `min`, reject below-floor
+# candidates. The decision went the other way, and the reasoning is worth keeping:
+#
+#   Enforcing adds a real constraint on what the loop may propose in order to fix a
+#   BOOKKEEPING inconsistency. This program has been burned repeatedly by exactly that
+#   move — a checked-in-defaults literal, a set of strategy pins — each added to tidy
+#   something up and each turning into a false veto that rejected legal candidates. And
+#   the system already handles a degenerate budget with evidence rather than decree: a
+#   budget of 20 reddens six tasks at once and the acceptance rule refuses it loudly,
+#   while E1's economy guard prices out the other direction.
+#
+# So the rows grow instead. Each addition below is MEASURED, not argued from memory:
+# the number is the budget at which that task's largest tool result stops arriving
+# intact, obtained by building its real fixture and running its pinned command.
+#
+# A2 is here for a different reason and would be here under any floor: its exclusion
+# argued only about the BUDGET, but `tool_output` also carries the STRATEGY, and a
+# proposed `keep_head` drops the tail its sentinel sits in. That is a strategy argument,
+# so no budget policy touches it.
+#
+# Still excluded, and now the only exclusions: C1 and C2 read the RAW tool result
+# (cluster_c's `recording_tool` wiring) so a candidate cannot raise a containment score
+# by clamping the evidence away — but that protects only their LEAK predicate, and each
+# verdict also needs a correct functional reply. They are held OUT of this row pending a
+# counterfactual sweep at small budgets, not excluded on a settled argument.
+_TOOL_RESULT_READERS = (
+    "A2", "B1", "B2", "B3", "C3", "D1", "D2", "D3",
+    "E1", "E2", "E3", "E4", "F1", "F2", "G3",
+)  # fmt: skip
 
-# ---------------------------------------------------------------------------------
-# The tuning floor — a GOVERNANCE POLICY, not a fact derived from carbon.
-#
-# Two criteria were in use here, one written and one not. Written: an observer is a task
-# "whose verdict some legal value can move". Taken literally that admits nearly every
-# tool-using task, because `tool_output.budget` is any positive integer with no lower
-# bound — a budget of 6 breaks D1, a budget of 20 breaks F1. Unwritten, in this file's
-# own prose: "only E1 and E2 are sensitive at PLAUSIBLE budgets". The second one chose
-# the rows, which is why F1 is listed and three tasks of the same shape and size are not.
-#
-# CORRECTED 2026-08-15, same day, after review. A first version set this floor to
-# carbon's `SHRINK_MIN_BUDGET` and claimed carbon "refuses to shrink a tool result
-# below it". That justification was FALSE as applied. `SHRINK_MIN_BUDGET` appears at
-# exactly two places in carbon: its own definition, and the OVERFLOW-RECOVERY shrink
-# (`agent.py`), which re-cuts an already-active policy after a context overflow. Normal
-# tool-result truncation uses the configured budget directly and carbon refuses nothing
-# below 500. Borrowing an emergency lower bound and presenting it as a statement about
-# primary budgets dressed a policy choice as a derivation.
-#
-# ⚠️⚠️ NOT ENFORCED. Read this before using the number for anything.
-#
-# Nothing imports it outside its own test. `proposal_surface()` still publishes carbon's
-# unchanged `positive: true` constraint, and `apply_candidate()` still delegates
-# validation to carbon, which accepts any positive budget. So the loop can still propose
-# a budget of 20 and this constant will not stop it. Under the domain the pipeline
-# actually enforces, F1 remains an observer and B1/B2/B3/D1/D2 remain candidates for it.
-# Right now this changes prose and nothing else — which by this repo's own standard is
-# decoration, and is recorded as such rather than left to look like a working guard.
-#
-# The number is informed by one measured fact: the head_tail marker is a flat 43 chars
-# at every budget, so below roughly 500 a cut result spends more on announcing the cut
-# than on content. A SECOND supporting claim was made and was false — that an offload
-# pointer "cannot be carried" below the floor. Carbon appends the footer AFTER the
-# budget-sized excerpt (`limits.py`), so the pointer is always present; only its ratio
-# to the content changes. Removed rather than softened.
-#
-# Two coherent ways out, and both are governance decisions, not cleanups:
-#   (a) ENFORCE it — advertise `min` through `proposal_surface()`, reject below-floor
-#       candidates in `apply_candidate()`, test both paths, and THEN remove F1 from
-#       `_TOOL_RESULT_READERS` because its listing rests on a budget of 20.
-#   (b) ABANDON it — classify against carbon's true legal domain, which makes B1, B2,
-#       B3, D1 and D2 observers alongside F1, and the rows grow.
-# What is not coherent is the present state: a contract that says "some value the loop
-# may propose" while nothing constrains what it may propose.
-TOOL_OUTPUT_TUNING_FLOOR = 500
-
-# Measured 2026-08-15, by building each task's real fixture and running its pinned
-# command — no model calls. The number is the budget below which the task's largest
-# tool result stops arriving intact. Recorded so the floor question is settled with
-# data instead of re-argued from memory each time someone reads this file.
+# The budget below which each task's largest tool result stops arriving intact.
+# Measured 2026-08-15 by building the real fixture and running the pinned command; no
+# model calls. Kept as the evidence for the rows above, so the classification is
+# checkable rather than remembered.
 MEASURED_BREAK_BUDGETS: dict[str, int] = {
     "B1": 156,  # largest seeded source; bash output is 232
     "B2": 183,  # largest seeded source; bash output is 331
     "B3": 103,  # largest seeded source; bash output is 154
-    "D1": 8,  # the answer itself, read back out of the tool result
+    "C3": 21,  # runtime.txt; its verdict also runs through the model's write decision
+    "D1": 8,  # the answer itself, read back out of the tool result by `tool_texts`
     "D2": 6,  # same shape as D1
-    "F1": 113,  # LISTED as an observer, and below the floor — see the warning above
+    "F1": 113,  # already listed before this pass
 }
-
 
 # Every task that makes any tool call at all, so the per-turn round budget binds
 # it. A different mechanism from result truncation, and therefore a different set
@@ -194,10 +167,15 @@ KNOB_COVERAGE: dict[str, dict[str, tuple[str, ...]]] = {
     # inline excerpt) and D3 (a second guard at lower budgets) stay the guards,
     # unchanged: an offload candidate that floods the window or loses the tail
     # dies on them, which is exactly the regression they exist to catch.
+    # Guards are every observer whose prior is not `fail`, which is now most of the row:
+    # each can REGRESS under a small enough budget or under `keep_head`, and that is
+    # what a guard is for. E3/E4 are excluded from guards by their `fail` priors — a
+    # task at 0.0 cannot drop further — and they stay miners because an offload-shaped
+    # strategy is what can turn them green.
     "tool_output": {
         "observers": _TOOL_RESULT_READERS,
         "miners": ("E1", "E3", "E4"),
-        "guards": ("E2", "D3"),
+        "guards": ("A2", "B1", "B2", "B3", "C3", "D1", "D2", "D3", "E2", "F1", "F2", "G3"),
     },
     # F2 forces 10 model calls and fails at any budget <= 9 — the only binding
     # observer, so it must be a GUARD: omitting it left the declared guard set to
@@ -356,7 +334,20 @@ DELIBERATE_NON_OBSERVERS: dict[str, dict[str, str]] = {
     #
     # Removing them does NOT promote them into `KNOB_COVERAGE` — that would be a
     # decision about what the loop may tune. It only stops suppressing an unresolved
-    # warning, which is a cleanup and was mine to make.
+    # warning, which is a cleanup. A2 and C3 have since been classified as guards; C1
+    # and C2 stay in the queue pending a counterfactual sweep at small budgets.
+    #
+    # G5 is restored, because its argument is MECHANISM and survives abandoning the
+    # floor. Its only tool is `write_file`, and its verdict reads the file list off the
+    # tool CALLS, never off their results — so no budget can move it even at a value
+    # that would cut the 35-character result to nothing.
+    "tool_output": {
+        "G5": (
+            "Only tool is `write_file`; its verdict reads the file list off the tool "
+            "CALLS and never off their results, so no budget moves it at any value. A "
+            "mechanism argument, not a size one — it survives the floor being abandoned."
+        ),
+    },
     "compaction": {
         "H2": (
             "Forces overflow with an injected error and is invariant to strategy, "
