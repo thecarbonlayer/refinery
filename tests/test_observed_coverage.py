@@ -573,13 +573,15 @@ def test_an_orphaned_attempt_the_summary_excludes_is_not_read(tmp_path):
     )
 
 
-def test_a_duplicated_attempt_is_refused_rather_than_deduplicated(tmp_path):
-    """A repeated `(task, attempt)` key means the log does not describe one run.
+def test_a_duplicated_attempt_takes_the_LAST_row_as_the_runner_does(tmp_path):
+    """Match `runner.run.load_done`, do not out-think it.
 
-    Keeping either copy picks a winner with no rule behind it, and the two copies can
-    disagree about exactly the metric the exclusion turns on. Refusing surfaces it;
-    `coverage_note` reports the cohort as unusable rather than deriving from a log it
-    cannot interpret.
+    An earlier version refused duplicates, reasoning that keeping either copy picks a
+    winner with no rule behind it. There is a rule: `load_done` assigns each key into a
+    dict in file order, so the last row wins and a resumed run legitimately leaves an
+    earlier one shadowed. The result JSON summarizes the LAST row, so refusing rejected
+    a log shape the runner accepts, and reading the first would read attempts `delta`
+    never saw. Both copies here disagree on exactly the metric an exclusion turns on.
     """
     jsonl, result = _run_files(
         tmp_path,
@@ -590,8 +592,11 @@ def test_a_duplicated_attempt_is_refused_rather_than_deduplicated(tmp_path):
             {"task": "T", "attempt": 0, "metrics": {"tool_calls": 7.0}},
         ],
     )
-    with pytest.raises(ValueError, match="duplicate attempt"):
-        select_attempts(jsonl, result)
+    rows, note = select_attempts(jsonl, result)
+
+    assert note["rows_selected"] == 1 and note["rows_in_file"] == 2
+    assert activity_from_rows(rows)["T"]["tool_calls"] == 7.0, "the LAST row is the run"
+    assert unreachable("tool_output", activity_from_rows(rows)) == set()
 
 
 def test_a_summarized_attempt_missing_from_the_log_is_refused(tmp_path):
@@ -606,3 +611,69 @@ def test_a_summarized_attempt_missing_from_the_log_is_refused(tmp_path):
     )
     with pytest.raises(ValueError, match="summarized but not logged"):
         select_attempts(jsonl, result)
+
+
+def test_both_arms_are_required_and_both_are_read(tmp_path):
+    """A cohort missing an arm is unusable, not smaller — and both arms must be read.
+
+    Filtering the supplied pairs to the ones that happen to exist derived coverage from
+    one arm: with the baseline log gone it read the candidate alone, reported NO error,
+    and still emitted `unreachable_proven` — a claim about a comparison made from half
+    of it. The activity here is deliberately ASYMMETRIC, because a fixture where both
+    arms agree cannot tell a two-arm read from a last-arm-only one.
+    """
+    import json as _json
+
+    from loop.artifacts import Candidate
+    from loop.validate import coverage_note
+
+    def write(stem, tool_calls):
+        (tmp_path / f"{stem}.json").write_text(
+            _json.dumps({"tasks": {"T": {"split": "held_in", "attempts": 1}}})
+        )
+        (tmp_path / f"{stem}.jsonl").write_text(
+            _json.dumps(
+                {
+                    "task": "T",
+                    "attempt": 0,
+                    "runner_sha": "abc123",
+                    "config_version": 7,
+                    "model": "m",
+                    "metrics": {"tool_calls": tool_calls},
+                }
+            )
+            + "\n"
+        )
+        return (tmp_path / f"{stem}.jsonl", tmp_path / f"{stem}.json")
+
+    base, cand = write("base", 1.0), write("cand", 0.0)  # baseline ACTIVE, candidate not
+    candidate = Candidate(
+        id="x",
+        cluster_id="CL",
+        proposer="p",
+        proposer_detail="d",
+        fields={"tool_output": {"old": 0, "new": 1}},
+        rationale="r",
+        expected_effect="e",
+        regression_risk="g",
+    )
+
+    both = coverage_note(candidate, {"T": -1.0}, [base, cand])
+    # T made a tool call in the baseline arm, so the pair does NOT prove it unreachable.
+    # Reading only the candidate arm would wrongly call it proven.
+    assert both["unreachable_proven"] == {}, "a single active arm is enough to reach T"
+    assert both["evidence"] == {"T": -1.0}
+    assert {f["file"].split("/")[-1] for f in both["cohort"]["files"]} == {
+        "base.jsonl",
+        "cand.jsonl",
+    }
+    # Provenance must carry real values, not placeholders.
+    for f in both["cohort"]["files"]:
+        assert len(f["selected_sha256"]) == 64
+        assert f["runner_sha"] == ["abc123"] and f["config_version"] == [7] and f["model"] == ["m"]
+    assert len({f["selected_sha256"] for f in both["cohort"]["files"]}) == 2
+
+    (tmp_path / "base.jsonl").unlink()
+    missing = coverage_note(candidate, {"T": -1.0}, [base, cand])
+    assert "cohort incomplete" in missing["error"]
+    assert "unreachable_proven" not in missing, "a partial cohort must yield no claim"

@@ -139,9 +139,16 @@ def coverage_note(
     # `delta` refuses to compare results across runner versions, and a coverage claim
     # assembled across them is the same mistake with none of the refusal. It also let a
     # months-old candidate permanently seed activity for later validations.
-    pairs = [(j, r) for j, r in (cohort_paths or []) if j.exists() and r.exists()]
+    pairs = list(cohort_paths or [])
     if not pairs:
         return {"knobs": knobs, "error": "no cohort supplied; coverage not derived"}
+    # EVERY supplied arm must be readable. Filtering to the ones that happen to exist
+    # silently derived coverage from one arm: with the baseline log missing it read the
+    # candidate alone, reported no error, and still emitted `unreachable_proven` — a
+    # claim about a comparison from half of it. A partial cohort is unusable, not smaller.
+    absent = [str(p) for pair in pairs for p in pair if not p.exists()]
+    if absent:
+        return {"knobs": knobs, "error": f"cohort incomplete, missing: {', '.join(absent)}"}
     rows: list[dict] = []
     provenance: list[dict] = []
     try:

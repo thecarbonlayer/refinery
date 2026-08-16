@@ -44,7 +44,8 @@ from pathlib import Path
 
 from loop.knob_coverage import DELIBERATE_NON_OBSERVERS, KNOB_COVERAGE
 
-RESULTS_DIR = Path(__file__).resolve().parents[1] / "results"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+RESULTS_DIR = REPO_ROOT / "results"
 
 
 @dataclass(frozen=True)
@@ -121,36 +122,41 @@ def select_attempts(jsonl: Path, result_json: Path) -> tuple[list[dict], dict]:
     metric, and one with activity can make an inactive comparison look reachable — while
     `coverage.cohort` truthfully names the file.
 
-    Duplicates are refused rather than deduplicated. A repeated ``(task, attempt)`` key
-    means the log does not describe one run, and silently keeping either copy would pick
-    a winner with no rule behind it.
+    Duplicates take the LAST row, because that is what the runner does. ``load_done``
+    assigns each key into a dict in file order (``done[(task, attempt)] = rec``), so a
+    resumed run legitimately leaves an earlier row shadowed and the result JSON
+    summarizes the later one. An earlier version REFUSED duplicates, reasoning that
+    keeping either copy picks a winner with no rule behind it — but there is a rule, it
+    lives in ``runner/run.py``, and refusing rejected a log shape the runner accepts.
+    Matching it is the only way this reads the attempts ``delta`` actually compared.
+    Making the runner refuse instead would be cleaner and would change ``runner/``,
+    which invalidates every recorded baseline.
     """
     summary = json.loads(result_json.read_text())["tasks"]
     wanted = {(name, i) for name, t in summary.items() for i in range(int(t["attempts"]))}
     raw = [json.loads(line) for line in jsonl.read_text().splitlines() if line.strip()]
-    seen: set[tuple[str, int]] = set()
-    rows: list[dict] = []
+    chosen: dict[tuple, dict] = {}
     for row in raw:
         key = (row.get("task"), row.get("attempt"))
-        if key not in wanted:
-            continue
-        if key in seen:
-            raise ValueError(
-                f"{jsonl.name}: duplicate attempt {key}; log does not describe one run"
-            )
-        seen.add(key)
-        rows.append(row)
-    missing = wanted - seen
+        if key in wanted:
+            chosen[key] = row  # last wins, exactly as `runner.run.load_done` does
+    missing = wanted - set(chosen)
     if missing:
         raise ValueError(f"{jsonl.name}: {len(missing)} attempts summarized but not logged")
+    rows = list(chosen.values())
     digest = hashlib.sha256(
-        json.dumps([r for r in rows], sort_keys=True, separators=(",", ":")).encode()
+        json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     return rows, {
-        "file": str(jsonl.relative_to(jsonl.parents[1])),
+        # Under the repo root this is a stable relative path. Outside it — `--baseline`
+        # takes an arbitrary path — the absolute one is recorded, rather than a relative
+        # string that would read as a repo file and point at the wrong one.
+        "file": str(jsonl.resolve().relative_to(REPO_ROOT))
+        if jsonl.resolve().is_relative_to(REPO_ROOT)
+        else str(jsonl.resolve()),
         "rows_selected": len(rows),
         "rows_in_file": len(raw),
-        "selected_sha256": digest[:32],
+        "selected_sha256": digest,
         "runner_sha": sorted({str(r.get("runner_sha")) for r in rows}),
         "config_version": sorted({r["config_version"] for r in rows if "config_version" in r}),
         "model": sorted({str(r["model"]) for r in rows if r.get("model")}),
