@@ -22,7 +22,7 @@ from pathlib import Path
 
 from loop.artifacts import Candidate, ValidationRecord
 from loop.config_edit import CONFIG_REL, apply_candidate
-from loop.observed_coverage import observed_activity, partition_deltas, result_files
+from loop.observed_coverage import cohort, observed_activity, partition_deltas
 from loop.surface_sweep import sweep as run_sweep
 from runner.carbon_env import CARBON_ROOT, _git
 from runner.delta import delta
@@ -114,7 +114,9 @@ def run_harness_gates(carbon_root: Path = CARBON_ROOT, editor_root: Path = EDITO
     return out
 
 
-def coverage_note(candidate: Candidate, per_task: dict[str, float]) -> dict:
+def coverage_note(
+    candidate: Candidate, per_task: dict[str, float], cohort_paths: list[Path] | None = None
+) -> dict:
     """Split this candidate's per-task movements by whether the edited knobs reach them.
 
     Derived from every recorded run, not from an authored table: `loop.knob_coverage`
@@ -130,35 +132,47 @@ def coverage_note(candidate: Candidate, per_task: dict[str, float]) -> dict:
     rule. So the record carries the split and a person reads it.
     """
     knobs = sorted(candidate.fields)
+    # The EXACT pair this validation compared, not every log on disk. Pooling all of
+    # them mixed runner versions, config versions and partial runs into one claim —
+    # `delta` refuses to compare results across runner versions, and a coverage claim
+    # assembled across them is the same mistake with none of the refusal. It also let a
+    # months-old candidate permanently seed activity for later validations.
+    paths = [p for p in (cohort_paths or []) if p.exists()]
+    if not paths:
+        return {"knobs": knobs, "error": "no cohort supplied; coverage not derived"}
     try:
-        activity = observed_activity(result_files())
-    except OSError:
-        return {"knobs": knobs, "error": "no recorded runs to derive coverage from"}
+        activity = observed_activity(paths)
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"knobs": knobs, "error": f"cohort unreadable: {exc}"}
     # Unreachable by EVERY edited knob. A candidate editing two knobs reaches a task if
     # EITHER does, so the sets intersect. The accumulator starts at None rather than {}
     # because an empty first set is meaningful — it means that knob reaches everything,
     # which must swallow the whole result, not be mistaken for "nothing seen yet".
-    proven: dict[str, float] | None = None
-    probable: dict[str, float] | None = None
+    # Set algebra, and the naive version is wrong. Intersecting the two grades
+    # SEPARATELY loses a task that one knob proves unreachable and another only
+    # probably does: it appears in neither intersection and lands in `evidence`,
+    # asserting the candidate CAN reach a task no edited knob shows any route to.
+    #   proven_all   = ∩ proven_i
+    #   excluded_all = ∩ (proven_i ∪ probable_i)
+    #   probable_all = excluded_all − proven_all
+    proven_sets: list[set[str]] = []
+    excluded_sets: list[set[str]] = []
     for knob in knobs:
         split = partition_deltas(knob, per_task, activity)
-        for name, acc in (("unreachable_proven", proven), ("unreachable_probable", probable)):
-            merged = (
-                split[name] if acc is None else {t: v for t, v in acc.items() if t in split[name]}
-            )
-            if name == "unreachable_proven":
-                proven = merged
-            else:
-                probable = merged
-    proven, probable = proven or {}, probable or {}
-    # A task can only be PROBABLY unreachable if it is not already PROVABLY so.
-    probable = {t: v for t, v in probable.items() if t not in proven}
-    evidence = {t: v for t, v in per_task.items() if t not in proven and t not in probable}
+        proven_sets.append(set(split["unreachable_proven"]))
+        excluded_sets.append(set(split["unreachable_proven"]) | set(split["unreachable_probable"]))
+    proven_all = set.intersection(*proven_sets) if proven_sets else set()
+    excluded_all = set.intersection(*excluded_sets) if excluded_sets else set()
+    probable_all = excluded_all - proven_all
+    proven = {t: v for t, v in per_task.items() if t in proven_all}
+    probable = {t: v for t, v in per_task.items() if t in probable_all}
+    evidence = {t: v for t, v in per_task.items() if t not in excluded_all}
     return {
         "knobs": knobs,
         "evidence": evidence,
         "unreachable_proven": proven,
         "unreachable_probable": probable,
+        "cohort": cohort(paths),
         "note": (
             "`unreachable_proven` movements are on tasks NO value of the edited knob(s) "
             "can affect. `unreachable_probable` is weaker: the knob showed no activity "
@@ -230,7 +244,10 @@ def validate_candidate(
     # edited `tool_output`. This does not change the verdict — the acceptance rule is
     # what it is, and quietly reweighting it here would be a second, hidden rule — it
     # records what the verdict was made of, next to the verdict.
-    coverage = coverage_note(candidate, d["per_task"])
+    baseline_jsonl = Path(baseline_path).with_suffix(".jsonl")
+    coverage = coverage_note(
+        candidate, d["per_task"], [baseline_jsonl, results_dir / f"{label}.jsonl"]
+    )
     # Count MOVEMENTS, not tasks. `per_task` carries every task including the unmoved
     # ones, so reporting its length overstated how many actually moved.
     moved = {t: v for t, v in d["per_task"].items() if v}

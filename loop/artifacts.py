@@ -199,3 +199,16 @@ class ValidationRecord:
             "gates": self.gates,
             "coverage": self.coverage,
         }
+
+
+def write_validation_record(record: ValidationRecord, path: Path) -> Path:
+    """The one path a validation record takes to disk.
+
+    Extracted so it can be tested. `to_json()` silently omitted `gates` and `coverage`
+    for as long as they existed, and every test aimed at those features checked the
+    computation rather than the file — the claim was "the record carries it" and the
+    thing under test was one call short of the claim. A test that only round-trips
+    `to_json()` in memory still cannot see a caller that drops a key before writing.
+    """
+    path.write_text(json.dumps(record.to_json(), indent=2) + "\n")
+    return path

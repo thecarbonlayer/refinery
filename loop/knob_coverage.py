@@ -103,21 +103,31 @@ _TOOL_RESULT_READERS = ("D3", "E1", "E2", "E3", "E4", "F1", "F2", "G3")
 # below 500. Borrowing an emergency lower bound and presenting it as a statement about
 # primary budgets dressed a policy choice as a derivation.
 #
-# So it is stated as what it is. The number is informed by two measured facts — the
-# head_tail marker is a flat 43 chars at every budget, and an offload footer runs to
-# `MAX_FOOTER_CHARS` (450) — so below roughly 500 a cut result spends more on announcing
-# the cut than on content, and an offload pointer cannot be carried at all. That makes
-# such a budget degenerate rather than merely tight. But "the loop should not propose a
-# degenerate budget" is a decision about this program, and a person made it.
+# ⚠️⚠️ NOT ENFORCED. Read this before using the number for anything.
 #
-# The observer contract changes with it: a task qualifies when some value the loop MAY
-# PROPOSE moves its verdict, not merely some value the schema permits.
+# Nothing imports it outside its own test. `proposal_surface()` still publishes carbon's
+# unchanged `positive: true` constraint, and `apply_candidate()` still delegates
+# validation to carbon, which accepts any positive budget. So the loop can still propose
+# a budget of 20 and this constant will not stop it. Under the domain the pipeline
+# actually enforces, F1 remains an observer and B1/B2/B3/D1/D2 remain candidates for it.
+# Right now this changes prose and nothing else — which by this repo's own standard is
+# decoration, and is recorded as such rather than left to look like a working guard.
 #
-# ⚠️ OPEN. Applying the floor removes F1, which is listed. Its 113-char source is
-# destroyed by a budget of 20 — the very argument this file uses to justify listing it,
-# and that argument sits below the floor. Either F1 leaves `_TOOL_RESULT_READERS` or the
-# floor is wrong. Left unresolved on purpose: dropping a listed observer changes what
-# the loop may tune, which is a decision and not a cleanup.
+# The number is informed by one measured fact: the head_tail marker is a flat 43 chars
+# at every budget, so below roughly 500 a cut result spends more on announcing the cut
+# than on content. A SECOND supporting claim was made and was false — that an offload
+# pointer "cannot be carried" below the floor. Carbon appends the footer AFTER the
+# budget-sized excerpt (`limits.py`), so the pointer is always present; only its ratio
+# to the content changes. Removed rather than softened.
+#
+# Two coherent ways out, and both are governance decisions, not cleanups:
+#   (a) ENFORCE it — advertise `min` through `proposal_surface()`, reject below-floor
+#       candidates in `apply_candidate()`, test both paths, and THEN remove F1 from
+#       `_TOOL_RESULT_READERS` because its listing rests on a budget of 20.
+#   (b) ABANDON it — classify against carbon's true legal domain, which makes B1, B2,
+#       B3, D1 and D2 observers alongside F1, and the rows grow.
+# What is not coherent is the present state: a contract that says "some value the loop
+# may propose" while nothing constrains what it may propose.
 TOOL_OUTPUT_TUNING_FLOOR = 500
 
 # Measured 2026-08-15, by building each task's real fixture and running its pinned
@@ -329,9 +339,18 @@ CAPABILITY_GAPS: dict[str, str] = {}
 # task, despite the task visibly doing the thing the knob acts on.
 DELIBERATE_NON_OBSERVERS: dict[str, dict[str, str]] = {
     "tool_output": {
+        # ⚠️ THIS EXCLUSION IS KNOWN WRONG, kept visible rather than deleted quietly.
+        # Two errors. The registry prior is `pass`, not `fail` (`cluster_a.py`), so the
+        # "cannot drop further" half is simply false. And the budget survival argument
+        # covers only the BUDGET: `tool_output` also carries the STRATEGY, and a
+        # proposed `keep_head` drops the tail where A2's sentinel sits. A2 is a real
+        # guard. Promoting it changes what the loop may tune, so it is flagged for a
+        # decision instead of edited in — but no one should read this row as settled.
         "A2": (
-            "Needle survives every budget down to 8,736 and the prior is `fail`, so no "
-            "legal value moves the verdict either way."
+            "STALE — states the prior is `fail` when the registry says `pass`, and "
+            "argues only about budget when the strategy on the same knob can drop the "
+            "tail A2 depends on. See the warning above; this needs a decision, not a "
+            "tuple edit."
         ),
         "C1": (
             "The leak predicate reads the RAW tool result (cluster_c's `recording_tool` "
@@ -342,12 +361,6 @@ DELIBERATE_NON_OBSERVERS: dict[str, dict[str, str]] = {
             "Same raw-result wiring as C1, and for the same reason: C2 grades whether a "
             "secret escaped, so reading the truncated copy would let a candidate score "
             "containment by shrinking the budget until the evidence was cut away."
-        ),
-        "C3": (
-            "Its verdict never reads a tool result. C3 grades whether a secret escaped "
-            "into a file the agent WROTE, by scanning the workspace tree afterwards, so "
-            "no truncation of anything the model saw can move it. A mechanism argument, "
-            "not a size one — unlike the entries below it, this holds at any budget."
         ),
         "G5": (
             "Its only tool is `write_file`, whose result is `wrote <path> (N chars)` — "

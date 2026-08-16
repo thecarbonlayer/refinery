@@ -114,10 +114,17 @@ def observed_activity(paths: list[Path]) -> dict[str, dict[str, float]]:
 
     The PEAK, not the mean the results JSON records. The question is "did this ever
     happen", and a mean of 0.33 and a mean of 0.00 answer it differently while both
-    round to nothing in a report. Pooling many runs is deliberate too: one run showing
-    zero tool calls is a weaker claim than eight runs showing zero.
+    round to nothing in a report.
+
+    A metric appears here ONLY if it was fully recorded — present on every attempt that
+    ran. A first version kept the surviving zeros and discarded the misses, so a task
+    with the metric absent from 19 attempts and present in 31 read as measured-at-zero
+    and was reported "PROVABLY unreachable" on telemetry that had proven nothing. Partial
+    recording is now unknown, and unknown is never an exclusion.
     """
-    activity: dict[str, dict[str, float]] = {}
+    peaks: dict[str, dict[str, float]] = {}
+    attempts: dict[str, int] = {}
+    present: dict[str, dict[str, int]] = {}
     for path in paths:
         for line in path.read_text().splitlines():
             if not line.strip():
@@ -126,11 +133,42 @@ def observed_activity(paths: list[Path]) -> dict[str, dict[str, float]]:
             task = row.get("task")
             if not task:
                 continue
-            seen = activity.setdefault(task, {})
+            attempts[task] = attempts.get(task, 0) + 1
+            seen, counts = peaks.setdefault(task, {}), present.setdefault(task, {})
             for metric, value in (row.get("metrics") or {}).items():
                 if isinstance(value, int | float):
                     seen[metric] = max(seen.get(metric, 0.0), float(value))
-    return activity
+                    counts[metric] = counts.get(metric, 0) + 1
+    return {
+        task: {m: v for m, v in metrics.items() if present[task].get(m, 0) == attempts[task]}
+        for task, metrics in peaks.items()
+    }
+
+
+def cohort(paths: list[Path]) -> dict:
+    """Provenance for a coverage claim: which files, how big, and what state they record.
+
+    Without this the claim is unreproducible — a reader cannot tell whether "A1 never
+    called a tool" was derived from the two runs this validation compared or from a
+    two-month-old partial run against a different runner. `delta` refuses to compare
+    results across runner versions; a coverage claim assembled across them, and stated
+    with no record of which, is the same mistake with none of the refusal.
+    """
+    out = []
+    for path in sorted(paths):
+        rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        out.append(
+            {
+                "file": path.name,
+                "rows": len(rows),
+                "runner_sha": sorted({str(r.get("runner_sha"))[:12] for r in rows}),
+                "config_version": sorted(
+                    {r.get("config_version") for r in rows if r.get("config_version") is not None}
+                ),
+                "model": sorted({str(r.get("model")) for r in rows if r.get("model")}),
+            }
+        )
+    return {"files": out}
 
 
 def result_files(results_dir: Path = RESULTS_DIR) -> list[Path]:
@@ -163,7 +201,9 @@ def unreachable(knob: str, activity: dict[str, dict[str, float]], *, airtight_on
     }
 
 
-def contradicted_observers(activity: dict[str, dict[str, float]]) -> dict[str, list[str]]:
+def contradicted_observers(
+    activity: dict[str, dict[str, float]],
+) -> dict[str, dict[str, list[str]]]:
     """Rows of ``KNOB_COVERAGE`` the recorded runs deny.
 
     An observer is a claim that some legal value of the knob can move that task's

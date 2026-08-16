@@ -16,7 +16,13 @@ import json
 import sys
 from pathlib import Path
 
-from loop.artifacts import Candidate, Cluster, load_candidates, load_clusters
+from loop.artifacts import (
+    Candidate,
+    Cluster,
+    load_candidates,
+    load_clusters,
+    write_validation_record,
+)
 from loop.validate import EDITOR_ROOT, dry_run, validate_candidate
 from runner.suite import RESULTS_DIR
 
@@ -93,8 +99,7 @@ def main() -> None:
         outcomes = []
         for cand in chosen:
             record = validate_candidate(cand, baseline_path=args.baseline)
-            out = it_dir / f"validation-{cand.id}.json"
-            out.write_text(json.dumps(record.to_json(), indent=2) + "\n")
+            out = write_validation_record(record, it_dir / f"validation-{cand.id}.json")
             print(f"wrote {out}")
             outcomes.append((cand.id, record.accepted, record.delta_in, record.delta_ho))
         print("\n=== validation summary ===")

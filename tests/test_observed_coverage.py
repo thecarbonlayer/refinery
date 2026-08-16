@@ -8,6 +8,7 @@ module keep passing while the fact it was built on stopped being true.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -17,16 +18,23 @@ from loop.observed_coverage import (
     contradicted_observers,
     observed_activity,
     partition_deltas,
-    result_files,
     unlisted_with_activity,
     unreachable,
 )
 
+# The exact pair iteration 3 compared. NOT `result_files()`: pooling every log mixes
+# runner versions, config versions and partial runs into one claim, and under the
+# now-strict "fully recorded" rule that mixture leaves almost everything unknown. A
+# coverage claim is only meaningful about a cohort, so the fixture names one.
+COHORT = ["results/baseline-r5-v7.jsonl", "results/cand-tool-output-offload.jsonl"]
+
 
 @pytest.fixture(scope="module")
 def activity():
-    files = result_files()
-    assert files, "no recorded runs to derive coverage from"
+    from pathlib import Path
+
+    files = [Path(f) for f in COHORT]
+    assert all(f.exists() for f in files), f"missing cohort files: {COHORT}"
     return observed_activity(files)
 
 
@@ -194,57 +202,48 @@ def test_a_candidate_editing_two_knobs_is_unreachable_only_where_BOTH_are(activi
             regression_risk="g",
         )
 
+    from pathlib import Path
+
+    paths = [Path(f) for f in COHORT]
     per_task = {"A1": -1.0, "B2": -0.5}
     # `tool_output` alone cannot reach A1 (no tool registry at all).
-    note = coverage_note(candidate("tool_output"), per_task)
+    note = coverage_note(candidate("tool_output"), per_task, paths)
     assert set(note["unreachable_proven"]) == {"A1"}
     # `system_prompt` reaches every live task, so pairing it removes every exclusion.
-    both = coverage_note(candidate("tool_output", "system_prompt"), per_task)
+    both = coverage_note(candidate("tool_output", "system_prompt"), per_task, paths)
     assert both["unreachable_proven"] == {}
     assert both["unreachable_probable"] == {}
     assert set(both["evidence"]) == {"A1", "B2"}
 
 
-def test_the_plausibility_floor_is_derived_and_applied_consistently():
-    """The floor exists because two criteria were in use, one written and one not.
+def test_the_tuning_floor_does_not_pretend_to_be_enforced():
+    """The floor constrains nothing, and the test says so rather than blessing it.
 
-    Written: an observer is a task "whose verdict some legal value can move". Taken
-    literally that admits nearly every tool-using task, since `tool_output.budget` is
-    any positive integer — a budget of 6 breaks D1. Unwritten, in prose: "only E1 and
-    E2 are sensitive at PLAUSIBLE budgets". The second one chose the rows.
+    A previous version asserted F1 AS a permitted exception — one listed observer whose
+    listing rests on a budget below the floor. That froze an incoherent contract instead
+    of detecting one, which is the failure mode this whole module was built to catch.
 
-    The floor is a POLICY number, not a derivation. A first version anchored it to
-    carbon's `SHRINK_MIN_BUDGET` and claimed carbon refuses budgets below it; that was
-    false — the constant belongs to overflow RECOVERY, and normal truncation uses the
-    configured budget directly. Deliberately NOT asserted against any carbon constant
-    now, because tracking one would restate the same false derivation as a test.
-
-    What is asserted is that every measured task sits on the side of the floor its
-    listing implies. F1 is the one exception and is asserted AS an exception, so it
-    stays visible until someone decides it — a floor that quietly tolerated the
-    contradiction would be decoration.
+    What is actually true: nothing imports the constant outside this test,
+    `proposal_surface()` still publishes carbon's `positive: true`, and
+    `apply_candidate()` still delegates to carbon, which accepts any positive budget. So
+    the loop can propose 20 today. Until one of the two documented routes is taken —
+    enforce it in the proposal path, or abandon it — this asserts only that the number
+    has no teeth, so that giving it teeth is what turns the test red.
     """
-    from loop.knob_coverage import (
-        _TOOL_RESULT_READERS,
-        MEASURED_BREAK_BUDGETS,
-    )
-    from loop.knob_coverage import (
-        TOOL_OUTPUT_TUNING_FLOOR as floor,
-    )
+    import loop.config_edit as config_edit
+    from loop.knob_coverage import MEASURED_BREAK_BUDGETS, TOOL_OUTPUT_TUNING_FLOOR
 
-    below = {t for t, b in MEASURED_BREAK_BUDGETS.items() if b < floor}
-    listed_but_below = below & set(_TOOL_RESULT_READERS)
-    assert listed_but_below == {"F1"}, (
-        "exactly one listed observer is known to break only below the floor. If this "
-        "set grew, a new row was added on the criterion the floor rejects; if it "
-        "emptied, F1 was resolved and this assertion should go with it. Either way it "
-        f"is a decision, not a test fix. Currently: {sorted(listed_but_below)}"
+    surface = config_edit.proposal_surface()["editable"]["tool_output"]
+    budget = surface["parameters"]["budget"]
+    assert budget == {"type": "int", "positive": True}, (
+        "the published proposal surface now carries a bound. If the floor was enforced, "
+        "delete this test and add ones covering proposal_surface() and apply_candidate(), "
+        "then settle F1's row — its listing rests on a budget of 20."
     )
-    # And the ones we measured and did NOT list must all be below it — otherwise the
-    # floor is not what kept them out and the real reason is unrecorded.
-    for task in ("B1", "B2", "B3", "D1", "D2"):
-        assert task not in _TOOL_RESULT_READERS
-        assert MEASURED_BREAK_BUDGETS[task] < floor
+    # Every measured task, F1 included, breaks below the floor. Under the domain the
+    # pipeline actually enforces they are therefore all alike, and F1 being listed while
+    # the other five are not is an inconsistency the floor does not currently resolve.
+    assert all(b < TOOL_OUTPUT_TUNING_FLOOR for b in MEASURED_BREAK_BUDGETS.values())
 
 
 def test_the_written_artifact_carries_the_gate_and_coverage_fields():
@@ -261,6 +260,7 @@ def test_the_written_artifact_carries_the_gate_and_coverage_fields():
     was one call short of the thing being claimed.
     """
     import json as _json
+    import pathlib
 
     from loop.artifacts import ValidationRecord
 
@@ -273,7 +273,17 @@ def test_the_written_artifact_carries_the_gate_and_coverage_fields():
         gates={"passed": True, "checks": {"carbon_verify": {"passed": True}}},
         coverage={"knobs": ["tool_output"], "unreachable_proven": {"A1": -1.0}},
     )
-    written = _json.loads(_json.dumps(record.to_json()))
+    # Through the REAL write path, to a REAL file. An in-memory round trip of
+    # `to_json()` checks the serializer and stops there: a caller that drops a key just
+    # before writing survives it, which is one layer away from the omission this test
+    # exists for. `loop/cli.py` now routes through the same helper.
+    import tempfile
+
+    from loop.artifacts import write_validation_record
+
+    with tempfile.TemporaryDirectory() as d:
+        out = write_validation_record(record, pathlib.Path(d) / "validation-c.json")
+        written = _json.loads(out.read_text())
 
     assert written["gates"]["passed"] is True
     assert written["coverage"]["unreachable_proven"] == {"A1": -1.0}
@@ -327,3 +337,118 @@ def test_an_evidence_grade_exclusion_lands_in_probable_never_proven(activity):
     # And the airtight knob must still produce proofs, so the grades are not simply
     # both routed to the weaker bucket.
     assert partition_deltas("tool_output", per_task, activity)["unreachable_proven"]
+
+
+def test_a_task_in_both_grades_is_reported_once_as_proven(activity):
+    """`proven` and `probable` must stay disjoint, whatever a caller is handed.
+
+    An overlap would double-count a movement and let a reader add the buckets to a
+    number larger than the split it came from.
+    """
+    for knob in ("tool_output", "compaction", "compaction_prompt", "retry"):
+        per_task = dict.fromkeys(activity, 1.0)
+        split = partition_deltas(knob, per_task, activity)
+        proven, probable = set(split["unreachable_proven"]), set(split["unreachable_probable"])
+        assert not (proven & probable), f"{knob}: task in both grades"
+        assert not (proven | probable) & set(split["evidence"]), f"{knob}: task in two buckets"
+        assert proven | probable | set(split["evidence"]) == set(per_task)
+
+
+def test_a_probable_contradiction_is_never_reported_as_a_false_row(activity):
+    """Calling a row FALSE on evidence-grade absence is the same overclaim the grades
+    exist to stop, one level up. `main()` must exit non-zero only on a proof."""
+    from loop.observed_coverage import main
+
+    fabricated = dict(KNOB_COVERAGE["compaction"])
+    # B1 never compacts in this cohort, but `trigger_fraction` belongs to this knob and
+    # could make it — so this is `probable`, not a false row.
+    fabricated["observers"] = (*fabricated["observers"], "B1")
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setitem(KNOB_COVERAGE, "compaction", fabricated)
+        graded = contradicted_observers(activity)["compaction"]
+        assert graded["probable"] == ["B1"]
+        assert graded["proven"] == []
+        mp.setattr("loop.observed_coverage.result_files", lambda *a, **k: [Path(f) for f in COHORT])
+        assert main([]) == 0, "a probable contradiction must not fail the check"
+
+
+def test_partial_metric_recording_is_unknown_not_zero(tmp_path):
+    """Recorded on some attempts and absent on others is UNKNOWN.
+
+    Keeping the surviving zeros and discarding the misses made a task with the metric
+    absent from 19 attempts and present in 31 read as measured-at-zero, and it was
+    reported "PROVABLY unreachable" on telemetry that had proven nothing.
+    """
+    path = tmp_path / "run.jsonl"
+    path.write_text(
+        json.dumps({"task": "X", "metrics": {"tool_calls": 0.0}})
+        + "\n"
+        + json.dumps({"task": "X", "metrics": {}})
+        + "\n"
+    )
+    act = observed_activity([path])
+    assert "tool_calls" not in act["X"], "partial recording must not survive as a value"
+    assert unreachable("tool_output", act) == set()
+
+
+def test_the_cohort_is_recorded_so_the_claim_can_be_reproduced():
+    """A coverage claim is about a cohort or it is about nothing.
+
+    `delta` refuses to compare results across runner versions. A coverage claim
+    assembled across them, stated with no record of which files it used, is the same
+    mistake with none of the refusal.
+    """
+    from loop.observed_coverage import cohort
+
+    files = cohort([Path(f) for f in COHORT])["files"]
+    assert [f["file"] for f in files] == sorted(Path(f).name for f in COHORT)
+    assert all(f["rows"] > 0 and f["runner_sha"] and f["config_version"] for f in files)
+    # The pair this validation compared shares one runner version, which is the property
+    # that makes pooling them legitimate at all.
+    assert len({sha for f in files for sha in f["runner_sha"]}) == 1
+
+
+def test_a_task_proven_for_one_knob_and_probable_for_another_is_not_evidence():
+    """The mixed-grade case, which intersecting the two grades separately gets wrong.
+
+    If `tool_output` PROVES X unreachable and `compaction` finds X only PROBABLY so, X
+    appears in neither intersection and lands in `evidence` — asserting the candidate
+    can reach a task no edited knob shows any route to. The correct algebra intersects
+    the UNION of the two grades and then subtracts the proven intersection:
+
+        proven_all   = ∩ proven_i
+        excluded_all = ∩ (proven_i ∪ probable_i)
+        probable_all = excluded_all − proven_all
+
+    The earlier multi-knob test cannot see this: it pairs `tool_output` with
+    `system_prompt`, which has no necessary condition at all, so both algebras agree.
+    """
+    import loop.validate as validate_mod
+    from loop.artifacts import Candidate
+
+    with pytest.MonkeyPatch.context() as mp:
+        # X: no tool calls (PROVEN for tool_output) and no compactions (PROBABLE for
+        # compaction, since trigger_fraction could create them). Y is reached by both.
+        mp.setattr(
+            validate_mod,
+            "observed_activity",
+            lambda paths: {
+                "X": {"tool_calls": 0.0, "compactions": 0.0},
+                "Y": {"tool_calls": 4.0, "compactions": 2.0},
+            },
+        )
+        cand = Candidate(
+            id="c",
+            cluster_id="CL",
+            proposer="p",
+            proposer_detail="d",
+            fields={f: {"old": 0, "new": 1} for f in ("tool_output", "compaction")},
+            rationale="r",
+            expected_effect="e",
+            regression_risk="g",
+        )
+        note = validate_mod.coverage_note(cand, {"X": -1.0, "Y": 0.5}, [Path(COHORT[0])])
+
+    assert note["evidence"] == {"Y": 0.5}, "X reached neither knob and must not be evidence"
+    assert note["unreachable_proven"] == {}, "only ONE knob proves X, so the pair cannot"
+    assert note["unreachable_probable"] == {"X": -1.0}
