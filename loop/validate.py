@@ -20,6 +20,8 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
+from loop.acceptance import ACCEPT
+from loop.acceptance import evaluate as rule_evaluate
 from loop.artifacts import Candidate, ValidationRecord
 from loop.config_edit import CONFIG_REL, apply_candidate
 from loop.observed_coverage import activity_from_rows, partition_deltas, select_attempts
@@ -258,6 +260,36 @@ def causal_verdict(d: dict, coverage: dict, baseline: dict) -> dict:
     }
 
 
+# The sections the three-outcome rule may DECIDE. Only `tool_output` has proof-grade
+# exclusions and measured null limits; the six unchanged runs showed two-attempt
+# held-in swings on the unfiltered sections (compaction, retry, file_injection), which
+# the one-attempt allowance would false-reject. Those sections stay on the causal
+# verdict until they have their own supported task sets or fresh null measurements.
+RULE_SECTIONS = frozenset({"tool_output"})
+_FIELD_SECTION = {"tool_output": "tool_output", "max_item_chars": "tool_output"}
+
+
+def rule_disposition(candidate: Candidate, baseline: dict, results: dict, coverage: dict) -> dict:
+    """Apply the three-outcome rule where it is calibrated; say why where it is not.
+
+    The record carries this either way, so "the rule was not applied" is a stated fact
+    with a reason rather than an absence someone reads as an oversight.
+    """
+    sections = {_FIELD_SECTION.get(f) for f in candidate.fields}
+    if sections != RULE_SECTIONS or None in sections:
+        return {
+            "applied": False,
+            "why": (
+                f"edited sections {sorted(s or 'unmapped' for s in sections)} are not "
+                "calibrated for the three-outcome rule; only tool_output has proof-grade "
+                "exclusions and measured null limits"
+            ),
+        }
+    excluded = frozenset(coverage.get("unreachable_proven", ()))
+    decision = rule_evaluate(baseline, results, excluded=excluded)
+    return {"applied": True, **decision.to_json()}
+
+
 def _run_runner(label: str, only: list[str] | None, attempts: int | None) -> None:
     """Run the suite in a fresh interpreter (same venv), cwd at the repo root."""
     cmd = [sys.executable, "-m", "runner.cli", "run", "--label", label]
@@ -340,11 +372,16 @@ def validate_candidate(
             f"activity for it — see `coverage` in the record"
         )
     causal = causal_verdict(d, coverage, baseline)
+    rule = rule_disposition(candidate, baseline, results, coverage)
+    # Where the rule is calibrated it DECIDES, and `evaluate()` cannot return ACCEPT —
+    # a CONFIRM candidate is promising, not accepted, until a fresh paired
+    # confirmation run repeats its improvement. Elsewhere the causal verdict still
+    # decides, and the record says which regime applied and why.
+    accepted = (rule["outcome"] == ACCEPT) if rule["applied"] else causal["accepted"]
     record = ValidationRecord(
         candidate_id=candidate.id,
         label=label,
-        # The CAUSAL verdict. `causal["raw"]` keeps the unadjusted one as evidence.
-        accepted=causal["accepted"],
+        accepted=accepted,
         delta_in=d["delta_in"],
         delta_ho=d["delta_ho"],
         per_task=d["per_task"],
@@ -363,12 +400,27 @@ def validate_candidate(
         gates=gates,
         coverage=coverage,
         causal=causal,
+        rule=rule,
     )
-    log(
-        f"candidate {candidate.id}: causal Δ_in={causal['delta_in']:+.4f} "
-        f"Δ_ho={causal['delta_ho']:+.4f} -> "
-        f"{'ACCEPTED' if causal['accepted'] else 'REJECTED'}"
-    )
+    if rule["applied"]:
+        log(
+            f"candidate {candidate.id}: rule outcome {rule['outcome']} "
+            f"(Δ_in={rule['delta_in']:+.4f} Δ_ho={rule['delta_ho']:+.4f})"
+        )
+        if rule["outcome"] == "CONFIRM":
+            log(
+                "  eligible — needs a fresh paired confirmation on: "
+                + ", ".join(rule["confirm_tasks"])
+            )
+        for reason in rule["reasons"]:
+            log(f"    - {reason}")
+    else:
+        log(f"  rule not applied: {rule['why']}")
+        log(
+            f"candidate {candidate.id}: causal Δ_in={causal['delta_in']:+.4f} "
+            f"Δ_ho={causal['delta_ho']:+.4f} -> "
+            f"{'ACCEPTED' if causal['accepted'] else 'REJECTED'}"
+        )
     if causal["accepted"] != d["accepted"]:
         log(
             f"  raw Δ_in={d['delta_in']:+.4f} Δ_ho={d['delta_ho']:+.4f} would have "

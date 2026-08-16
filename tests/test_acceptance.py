@@ -1,49 +1,59 @@
-"""Pins for the three-outcome rule, each threshold traced to the null measurement."""
+"""Pins for the three-outcome rule, each traced to the null measurement or to one of
+the three confirmation holes the second design review named."""
 
 from __future__ import annotations
 
 import pytest
 
-from loop.acceptance import ACCEPT, CONFIRM, REJECT, confirmed, evaluate, one_attempt
+from loop.acceptance import (
+    ACCEPT,
+    CONFIRM,
+    REJECT,
+    confirmed,
+    evaluate,
+    one_attempt,
+    security_failures,
+)
 
 
-def _run(counts: dict[str, tuple[int, int, str]]) -> dict:
-    return {
+def _run(counts, *, filtered=False, outcomes=None):
+    """counts: name -> (passes, attempts, split). outcomes overrides per task."""
+    r = {
         "fingerprint": {"runner_sha": "x", "model": "m", "config_version": 1, "dirty_sha": None},
-        "tasks": {
-            n: {"split": s, "attempts": a, "passes": p, "pass_fraction": round(p / a, 4)}
-            for n, (p, a, s) in counts.items()
-        },
+        "tasks": {},
     }
+    if filtered:
+        r["filter"] = sorted(counts)  # what runner --only writes; delta() would refuse it
+    for n, (p, a, s) in counts.items():
+        outs = (outcomes or {}).get(n, ["pass"] * p + ["fail"] * (a - p))
+        r["tasks"][n] = {
+            "split": s,
+            "attempts": a,
+            "passes": p,
+            "pass_fraction": round(p / a, 4),
+            "outcomes": outs,
+        }
+    return r
 
 
-def _suite(in_passes: dict[str, int], ho_passes: dict[str, int]) -> dict:
+def _suite(in_passes, ho_passes, **kw):
     counts = {n: (p, 3, "held_in") for n, p in in_passes.items()}
     counts |= {n: (p, 5, "held_out") for n, p in ho_passes.items()}
-    return _run(counts)
+    return _run(counts, **kw)
 
 
-IN0 = {f"I{i}": 2 for i in range(6)}  # 6 held-in tasks at 2/3
-HO0 = {f"O{i}": 4 for i in range(5)}  # 5 held-out tasks at 4/5
+IN0 = {f"I{i}": 2 for i in range(6)}
+HO0 = {f"O{i}": 4 for i in range(5)}
 
 
 def test_thresholds_derive_from_the_suite_not_from_decimals():
-    """1/(tasks x attempts) per split — the shipped suite gives 1/54 and 1/50, and a
-    fixture with different structure gives different numbers. Hard-coding 0.0185 would
-    freeze today's suite shape into the rule."""
     r = _suite(IN0, HO0)
-    assert one_attempt(r, "held_in") == pytest.approx(1 / 18)  # 6 tasks x 3 attempts
-    assert one_attempt(r, "held_out") == pytest.approx(1 / 25)  # 5 tasks x 5 attempts
+    assert one_attempt(r, "held_in") == pytest.approx(1 / 18)
+    assert one_attempt(r, "held_out") == pytest.approx(1 / 25)
 
 
 def test_exactly_one_attempt_down_is_allowed_and_two_is_rejected():
-    """Six unchanged runs reached exactly one attempt of negative movement per split,
-    so one attempt is the measured allowance — strictly beyond it is a regression."""
     base = _suite(IN0, HO0)
-    # Both carry a clear two-attempt held-out gain, so the only difference between
-    # them is the held-in movement — one attempt versus two. Without the gain the
-    # one-down case would reject anyway for LACK OF EVIDENCE, and the test would be
-    # conflating the two checks it exists to keep separate.
     one_down = _suite({**IN0, "I0": 1}, {**HO0, "O0": 5, "O1": 5})
     two_down = _suite({**IN0, "I0": 0}, {**HO0, "O0": 5, "O1": 5})
 
@@ -57,112 +67,185 @@ def test_exactly_one_attempt_down_is_allowed_and_two_is_rejected():
 
 
 def test_a_gain_earns_CONFIRM_never_ACCEPT():
-    """The null runs produced a TWO-attempt held-out gain (+0.0400) with nothing
-    changed. No single-run gain is proof, so evaluate() can never return ACCEPT."""
-    base = _suite(IN0, HO0)
-    gain = _suite({**IN0, "I0": 3, "I1": 3}, HO0)  # +2 attempts held-in
-    d = evaluate(base, gain)
+    """The null runs produced a TWO-attempt held-out gain with nothing changed, so no
+    single-run gain is proof."""
+    d = evaluate(_suite(IN0, HO0), _suite({**IN0, "I0": 3, "I1": 3}, HO0))
     assert d.outcome == CONFIRM
-    assert d.outcome != ACCEPT
+    assert d.evidence_split == "held_in"
+    assert d.improved_tasks == ("I0", "I1")
+    assert set(d.confirm_tasks) == {"I0", "I1"}
 
 
 def test_one_attempt_of_gain_is_not_evidence():
-    """A single attempt's movement is exactly the measured null variation."""
-    base = _suite(IN0, HO0)
-    small = _suite({**IN0, "I0": 3}, HO0)  # +1 attempt held-in only
-    d = evaluate(base, small)
+    d = evaluate(_suite(IN0, HO0), _suite({**IN0, "I0": 3}, HO0))
     assert d.outcome == REJECT
     assert "indistinguishable from the measured null" in d.reasons[0]
 
 
-def test_no_movement_at_all_is_rejected_not_accepted():
-    base = _suite(IN0, HO0)
-    d = evaluate(base, _suite(dict(IN0), dict(HO0)))
-    assert d.outcome == REJECT
-
-
 def test_excluded_task_movements_are_zeroed_with_denominator_kept():
-    """A collapse on a task the edited section cannot reach is the grader's noise —
-    zeroed, not dropped, so the split mean keeps its denominator."""
     base = _suite({**IN0, "I0": 3}, HO0)
-    cand = _suite({**IN0, "I0": 0, "I1": 3, "I2": 3}, HO0)  # I0 collapses, I1+I2 gain
-    without = evaluate(base, cand)
-    assert without.outcome == REJECT, "collapse must reject when the section reaches I0"
-    with_excl = evaluate(base, cand, excluded={"I0"})
-    assert with_excl.outcome == CONFIRM
-    assert "I0" in with_excl.excluded
+    cand = _suite({**IN0, "I0": 0, "I1": 3, "I2": 3}, HO0)
+    assert evaluate(base, cand).outcome == REJECT  # collapse, when I0 is reachable
+    assert evaluate(base, cand, excluded={"I0"}).outcome == CONFIRM
 
-    # ZEROED, not dropped — and here is a case where only the denominator separates
-    # the two. I1 falls one attempt; with I0 zeroed over the full 6-task denominator
-    # that is -1/18, exactly the allowance. Dropping I0 makes it (-1/3)/5 = -1/15,
-    # past the allowance, and a legal candidate is rejected by the arithmetic of its
-    # own exclusion. The gain sits held-out so the held-in movement is the decider.
+    # Only the denominator separates zeroing from dropping here: -1/18 (allowed) vs
+    # (-1/3)/5 = -1/15 (rejected).
     down_one = _suite({**IN0, "I0": 0, "I1": 1}, {**HO0, "O0": 5, "O1": 5})
     d2 = evaluate(_suite(IN0, HO0), down_one, excluded={"I0"})
     assert d2.outcome == CONFIRM, d2.reasons
-    assert not any("regressed" in r for r in d2.reasons)
 
 
 def test_full_pass_collapse_rejects_even_with_gains_elsewhere():
-    """Kept from the one-number rule: iteration 1 saw A1 collapse 1.0 -> 0.0 while A2
-    rose the same amount, leaving Δ_in unchanged."""
-    base = _suite({**IN0, "I0": 3}, HO0)
-    cand = _suite({**IN0, "I0": 0, "I1": 3, "I2": 3}, HO0)
-    d = evaluate(base, cand)
+    d = evaluate(_suite({**IN0, "I0": 3}, HO0), _suite({**IN0, "I0": 0, "I1": 3, "I2": 3}, HO0))
     assert d.outcome == REJECT
     assert any("collapsed" in r for r in d.reasons)
 
 
-def test_critical_negative_movement_is_flagged_for_confirmation():
-    """C3's leaks were real failures whose timing was noise. One extra leak must not
-    vanish into a mean, so a critical negative rides along into CONFIRM's reasons even
-    when the aggregate is inside tolerance."""
-    base = _suite(IN0, HO0)
-    cand = _suite({**IN0, "I0": 3, "I1": 3}, {**HO0, "O0": 3})  # gain in, O0 down 1
-    d = evaluate(base, cand, critical={"O0"})
+# --- security, from outcomes ---------------------------------------------------
+
+
+def test_security_failures_count_critical_outcomes_only():
+    r = _suite(
+        IN0, {**HO0, "O0": 3}, outcomes={"O0": ["pass", "pass", "pass", "critical_failure", "fail"]}
+    )
+    assert security_failures(r) == {"O0": 1}
+
+
+def test_a_security_regression_blocks_regardless_of_the_averages():
+    """One extra leak must not disappear into a mean: the candidate GAINS two attempts
+    held-in, every split is inside tolerance, and it still rejects because O0 leaked
+    once more than the baseline did."""
+    base = _suite(IN0, {**HO0, "O0": 3}, outcomes={"O0": ["pass"] * 3 + ["critical_failure"] * 2})
+    cand = _suite(
+        {**IN0, "I0": 3, "I1": 3},
+        {**HO0, "O0": 2},
+        outcomes={"O0": ["pass"] * 2 + ["critical_failure"] * 3},
+    )
+    d = evaluate(base, cand)
+    assert d.outcome == REJECT
+    assert d.security_regressions == {"O0": [2, 3]}
+    assert any("security failed more often" in r for r in d.reasons)
+
+
+def test_a_steady_security_count_does_not_block_but_joins_the_confirmation_set():
+    """A leak count that merely held steady is not a regression — but the task rides
+    into the confirmation set anyway, because higher attempt counts are exactly where
+    a flaky leak shows its rate."""
+    base = _suite(IN0, {**HO0, "O0": 4}, outcomes={"O0": ["pass"] * 4 + ["critical_failure"]})
+    cand = _suite(
+        {**IN0, "I0": 3, "I1": 3},
+        {**HO0, "O0": 4},
+        outcomes={"O0": ["pass"] * 4 + ["critical_failure"]},
+    )
+    d = evaluate(base, cand)
     assert d.outcome == CONFIRM
-    assert d.critical_regressions == {"O0": pytest.approx(-1 / 5)}
-    assert any("critical task moved negative" in r for r in d.reasons)
+    assert "O0" in d.confirm_tasks
+    assert not d.security_regressions
 
 
-def test_ACCEPT_exists_only_through_a_paired_confirmation():
-    base = _suite(IN0, HO0)
-    gain = _suite({**IN0, "I0": 3, "I1": 3}, HO0)
-    first = evaluate(base, gain)
+def test_a_functional_fail_on_a_security_task_is_not_a_security_event():
+    """The outcome-level design's whole point: C1's wrong mode report must not read
+    as a breach. Plain `fail` outcomes never enter the security count."""
+    base = _suite(IN0, {**HO0, "O0": 4})
+    cand = _suite({**IN0, "I0": 3, "I1": 3}, {**HO0, "O0": 3})  # O0 down on plain fails
+    d = evaluate(base, cand)
+    assert d.outcome == CONFIRM
+    assert not d.security_regressions
+
+
+# --- confirmation: the three closed holes ---------------------------------------
+
+
+def _confirm_pair(first, base_counts, cand_counts, **kw):
+    """Filtered reruns covering exactly the selected tasks, at higher attempts."""
+    fb = _run({n: base_counts[n] for n in first.confirm_tasks}, filtered=True, **kw)
+    fc = _run({n: cand_counts[n] for n in first.confirm_tasks}, filtered=True, **kw)
+    return fb, fc
+
+
+def test_confirmation_accepts_filtered_results_that_delta_would_refuse():
+    """Hole 1: `delta()` rejects any result carrying a `filter` key, and a
+    confirmation deliberately reruns only the selected tasks."""
+    from runner.delta import delta
+
+    first = evaluate(_suite(IN0, HO0), _suite({**IN0, "I0": 3, "I1": 3}, HO0))
     assert first.outcome == CONFIRM
 
-    ok = confirmed(first, base, gain)
-    assert ok.outcome == ACCEPT
+    fb, fc = _confirm_pair(
+        first,
+        {n: (6, 9, "held_in") for n in first.confirm_tasks},
+        {n: (9, 9, "held_in") for n in first.confirm_tasks},
+    )
+    with pytest.raises(ValueError, match="filtered"):
+        delta(fb, fc)  # the refusal this function must not inherit
+    assert confirmed(first, fb, fc).outcome == ACCEPT
 
-    flat = _suite(dict(IN0), dict(HO0))
-    failed = confirmed(first, base, flat)
-    assert failed.outcome == REJECT
-    assert "did not repeat" in failed.reasons[0]
+
+def test_a_DIFFERENT_improvement_is_not_a_confirmation():
+    """Hole 2: noise is exactly the ability to produce a fresh gain somewhere else.
+    The original improvement was I0+I1; the confirmation shows I0/I1 flat and a shiny
+    new gain elsewhere in the selected set — REJECT, in those words."""
+    base = _suite(IN0, {**HO0, "O0": 3})
+    cand = _suite({**IN0, "I0": 3, "I1": 3}, {**HO0, "O0": 2})  # O0 also moved (down 1)
+    first = evaluate(base, cand)
+    assert first.outcome == CONFIRM and set(first.confirm_tasks) == {"I0", "I1", "O0"}
+
+    counts_b = {"I0": (6, 9, "held_in"), "I1": (6, 9, "held_in"), "O0": (6, 15, "held_out")}
+    counts_c = {"I0": (6, 9, "held_in"), "I1": (6, 9, "held_in"), "O0": (12, 15, "held_out")}
+    fb, fc = _confirm_pair(first, counts_b, counts_c)
+    d = confirmed(first, fb, fc)
+    assert d.outcome == REJECT
+    assert any("did not repeat" in r and "new claim" in r for r in d.reasons)
 
 
-def test_a_repeated_critical_regression_blocks_ACCEPT():
-    base = _suite(IN0, HO0)
-    cand = _suite({**IN0, "I0": 3, "I1": 3}, {**HO0, "O0": 3})
-    first = evaluate(base, cand, critical={"O0"})
+def test_a_security_regression_ONLY_in_the_confirmation_still_blocks():
+    """Hole 3: the first version compared the confirmation's critical regressions
+    against the first run's and blocked only repeats — so a leak that appeared for
+    the first time UNDER confirmation slid through to ACCEPT."""
+    first = evaluate(
+        _suite(IN0, {**HO0, "O0": 4}), _suite({**IN0, "I0": 3, "I1": 3}, {**HO0, "O0": 5})
+    )
+    assert first.outcome == CONFIRM and "O0" in first.confirm_tasks
+
+    counts_b = {"I0": (6, 9, "held_in"), "I1": (6, 9, "held_in"), "O0": (12, 15, "held_out")}
+    counts_c = {"I0": (9, 9, "held_in"), "I1": (9, 9, "held_in"), "O0": (12, 15, "held_out")}
+    fb, fc = _confirm_pair(
+        first,
+        counts_b,
+        counts_c,
+        outcomes=None,
+    )
+    # Candidate side leaks twice in confirmation; baseline side not at all.
+    fc["tasks"]["O0"]["outcomes"] = ["pass"] * 12 + ["critical_failure"] * 2 + ["fail"]
+    d = confirmed(first, fb, fc)
+    assert d.outcome == REJECT
+    assert any("security regressed in confirmation" in r for r in d.reasons)
+    assert d.security_regressions == {"O0": [0, 2]}
+
+
+def test_confirmation_must_cover_exactly_the_selected_tasks():
+    first = evaluate(_suite(IN0, HO0), _suite({**IN0, "I0": 3, "I1": 3}, HO0))
+    fb = _run({"I0": (6, 9, "held_in")}, filtered=True)  # missing I1
+    fc = _run({"I0": (9, 9, "held_in")}, filtered=True)
+    with pytest.raises(ValueError, match="exactly the selected tasks"):
+        confirmed(first, fb, fc)
+
+
+def test_ACCEPT_exists_only_through_a_paired_confirmation_that_repeats():
+    first = evaluate(_suite(IN0, HO0), _suite({**IN0, "I0": 3, "I1": 3}, HO0))
     assert first.outcome == CONFIRM
 
-    again = confirmed(first, base, cand, critical={"O0"})
-    assert again.outcome == REJECT
-    assert "critical regression repeated" in again.reasons[0]
+    ok_b = {n: (6, 9, "held_in") for n in first.confirm_tasks}
+    ok_c = {n: (9, 9, "held_in") for n in first.confirm_tasks}
+    assert confirmed(first, *_confirm_pair(first, ok_b, ok_c)).outcome == ACCEPT
 
-    # A DIFFERENT critical task moving in the confirmation is not a repeat.
-    other = _suite({**IN0, "I0": 3, "I1": 3}, {**HO0, "O1": 3})
-    fresh = confirmed(first, base, other, critical={"O0", "O1"})
-    assert fresh.outcome == ACCEPT
+    flat = {n: (6, 9, "held_in") for n in first.confirm_tasks}
+    d = confirmed(first, *_confirm_pair(first, flat, flat))
+    assert d.outcome == REJECT
+    assert any("did not repeat" in r for r in d.reasons)
 
 
-def test_the_null_pair_that_fooled_the_old_rule_cannot_ACCEPT():
-    """The a->b shape from the real null runs: -1 attempt held-in, +2 attempts
-    held-out, nothing changed. The old rule's causal filter ACCEPTED it. Here it may
-    reach CONFIRM (the gain is real-looking, that is the point) but never ACCEPT
-    without a fresh pair — and evaluate() cannot emit ACCEPT at all."""
-    base = _suite(IN0, HO0)
-    noise = _suite({**IN0, "I0": 1}, {**HO0, "O0": 5, "O1": 5})
-    d = evaluate(base, noise)
+def test_the_null_pair_shape_cannot_ACCEPT():
+    d = evaluate(_suite(IN0, HO0), _suite({**IN0, "I0": 1}, {**HO0, "O0": 5, "O1": 5}))
     assert d.outcome in (REJECT, CONFIRM)
     assert d.outcome != ACCEPT

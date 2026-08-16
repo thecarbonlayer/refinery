@@ -171,6 +171,11 @@ class ValidationRecord:
     # it as evidence. `accepted` above is the CAUSAL one: recording the split beside a
     # verdict the noise still decided left iteration 3's failure in place.
     causal: dict = field(default_factory=dict)
+    # The three-outcome rule's disposition — applied and decisive for calibrated
+    # sections (tool_output today), or a stated reason it was not applied. When
+    # applied, `accepted` above follows it, and can only become True through a
+    # confirmation run recorded separately.
+    rule: dict = field(default_factory=dict)
 
     def to_json(self) -> dict:
         return {
@@ -203,6 +208,7 @@ class ValidationRecord:
             "gates": self.gates,
             "coverage": self.coverage,
             "causal": self.causal,
+            "rule": self.rule,
         }
 
 

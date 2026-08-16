@@ -838,79 +838,106 @@ def test_only_proof_grade_exclusions_reach_the_verdict():
     assert list(v["catastrophic_regressions"]) == ["Y"], "veto skips proven only"
 
 
-def test_the_record_takes_the_CAUSAL_verdict_when_the_two_disagree(tmp_path):
-    """The decision itself, end to end, on a case where raw and causal differ.
+def test_the_rule_decides_for_tool_output_and_causal_decides_elsewhere(tmp_path):
+    """The two-regime wiring, end to end, on a case where every verdict differs.
 
-    This is the whole change: the raw verdict was applied correctly to real
-    measurements and still rejected iteration 3 on movements the edited knob could not
-    have caused. Recording the split beside a verdict the noise still decided left that
-    in place, so the causal verdict decides and the raw one is kept as evidence.
-
-    Constructed so the two genuinely disagree — a task with no tool calls collapses,
-    which sinks raw Δ_in, while a held-out task the knob CAN reach improves.
+    Same synthetic data as before: a no-tools task collapses (sinking the raw rule),
+    a reachable held-out task gains. History of this pin, because each stage was a
+    real design decision: the raw verdict decided first; then the causal verdict
+    (this test's earlier form asserted written["accepted"] is True); now the
+    three-outcome rule decides for tool_output — and `evaluate()` cannot ACCEPT, so
+    the same data that causal-accepted records CONFIRM with accepted=False, and only
+    a fresh paired confirmation can flip it. For sections the rule is not calibrated
+    for, the causal verdict still decides and the record says why.
     """
     import json as _json
 
     from loop.artifacts import Candidate, write_validation_record
     from loop.validate import validate_candidate
 
-    def write(stem, fracs, calls):
+    def write_run(stem, passes, calls):
+        # GAIN needs 5 attempts: with a single held-out task at ONE attempt the
+        # one-attempt grain is the whole range and no gain can strictly exceed it —
+        # the rule correctly finds no evidence in a suite with no resolution.
+        tasks = {
+            "NOTOOLS": ("held_in", 1, passes[0]),
+            "REACHED": ("held_in", 1, passes[1]),
+            "GAIN": ("held_out", 5, passes[2]),
+        }
         (tmp_path / f"{stem}.json").write_text(
             _json.dumps(
                 {
                     "fingerprint": {"runner_sha": "deadbeef", "model": "m", "gemma_sha": "c0ffee"},
                     "tasks": {
-                        "NOTOOLS": {"split": "held_in", "attempts": 1, "pass_fraction": fracs[0]},
-                        "REACHED": {"split": "held_in", "attempts": 1, "pass_fraction": fracs[1]},
-                        "GAIN": {"split": "held_out", "attempts": 1, "pass_fraction": fracs[2]},
+                        n: {
+                            "split": s,
+                            "attempts": a,
+                            "passes": pp,
+                            "pass_fraction": round(pp / a, 4),
+                            "outcomes": ["pass"] * pp + ["fail"] * (a - pp),
+                        }
+                        for n, (s, a, pp) in tasks.items()
                     },
                 }
             )
         )
         (tmp_path / f"{stem}.jsonl").write_text(
             "\n".join(
-                _json.dumps({"task": n, "attempt": 0, "metrics": {"tool_calls": calls[n]}})
-                for n in ("NOTOOLS", "REACHED", "GAIN")
+                _json.dumps({"task": n, "attempt": i, "metrics": {"tool_calls": calls[n]}})
+                for n, (s, a, pp) in tasks.items()
+                for i in range(a)
             )
             + "\n"
         )
-        return (tmp_path / f"{stem}.jsonl", tmp_path / f"{stem}.json")
 
     calls = {"NOTOOLS": 0.0, "REACHED": 3.0, "GAIN": 3.0}
-    write("base", (1.0, 1.0, 0.0), calls)
-    write("cand", (0.0, 1.0, 1.0), calls)  # NOTOOLS collapses; GAIN improves
+    write_run("base", (1, 1, 0), calls)
+    write_run("cand", (0, 1, 5), calls)
 
     import loop.validate as validate_mod
 
-    candidate = Candidate(
-        id="x",
-        cluster_id="CL",
-        proposer="p",
-        proposer_detail="d",
-        fields={"tool_output": {"old": 0, "new": 1}},
-        rationale="r",
-        expected_effect="e",
-        regression_risk="g",
-    )
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(validate_mod, "require_clean_tree", lambda *a, **k: None)
-        mp.setattr(validate_mod, "revert_config", lambda *a, **k: None)
-        mp.setattr(validate_mod, "apply_candidate", lambda *a, **k: {"version": 8})
-        record = validate_candidate(
-            candidate,
-            baseline_path=tmp_path / "base.json",
-            label="cand",
-            run_runner=lambda *a, **k: None,
-            run_gates=lambda *a, **k: {"passed": True, "checks": {}},
-            results_dir=tmp_path,
-            carbon_root=tmp_path,
-            log=lambda *_: None,
+    def candidate(fields):
+        return Candidate(
+            id="x",
+            cluster_id="CL",
+            proposer="p",
+            proposer_detail="d",
+            fields={f: {"old": 0, "new": 1} for f in fields},
+            rationale="r",
+            expected_effect="e",
+            regression_risk="g",
         )
 
+    def validate(cand):
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(validate_mod, "require_clean_tree", lambda *a, **k: None)
+            mp.setattr(validate_mod, "revert_config", lambda *a, **k: None)
+            mp.setattr(validate_mod, "apply_candidate", lambda *a, **k: {"version": 8})
+            return validate_candidate(
+                cand,
+                baseline_path=tmp_path / "base.json",
+                label="cand",
+                run_runner=lambda *a, **k: None,
+                run_gates=lambda *a, **k: {"passed": True, "checks": {}},
+                results_dir=tmp_path,
+                carbon_root=tmp_path,
+                log=lambda *_: None,
+            )
+
+    record = validate(candidate(["tool_output"]))
     written = _json.loads(write_validation_record(record, tmp_path / "out.json").read_text())
-    assert written["causal"]["raw"]["accepted"] is False, "raw sinks on the unreachable task"
-    assert written["causal"]["accepted"] is True, "causal zeroes it and the gain carries"
-    assert written["accepted"] is True, "the RECORD must take the causal verdict"
-    assert "NOTOOLS" in written["causal"]["excluded"]
-    # The raw numbers survive as evidence rather than being overwritten.
-    assert written["causal"]["raw"]["delta_in"] < written["causal"]["delta_in"]
+    assert written["rule"]["applied"] is True
+    assert written["rule"]["outcome"] == "CONFIRM", written["rule"]["reasons"]
+    assert written["accepted"] is False, "CONFIRM is promising, never accepted"
+    assert "NOTOOLS" in written["rule"]["excluded"]
+    assert written["rule"]["improved_tasks"] == ["GAIN"]
+    # The causal verdict is still recorded as evidence — it would have accepted.
+    assert written["causal"]["accepted"] is True and written["causal"]["raw"]["accepted"] is False
+
+    record2 = validate(candidate(["compaction"]))
+    written2 = _json.loads(write_validation_record(record2, tmp_path / "out2.json").read_text())
+    assert written2["rule"]["applied"] is False
+    assert "not calibrated" in written2["rule"]["why"]
+    # Uncalibrated section: the causal verdict still decides. compaction has no
+    # proof-grade exclusions, so NOTOOLS's collapse counts and causal REJECTS here.
+    assert written2["accepted"] is written2["causal"]["accepted"]
