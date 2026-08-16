@@ -40,7 +40,6 @@ F2_CODES = ("start", "quartz", "maple", "cobalt", "ember", "delta", "lumen", "or
 
 def _agent(
     *,
-    tools,
     workspace_root: Path | str | None = None,
     approvals: list[dict] | None = None,
 ):
@@ -49,6 +48,12 @@ def _agent(
     truncation door writes has to land in that same tree. F2's ``advance`` is pure
     in-memory state with no tree behind it at all — there is no root to name, so
     the default stands and carbon anchors on ``agents_dir`` as it does today.
+
+    Agent-first, tools-after (the canonical shape, task-7/task-8): built with NO
+    ``session_env``, so it creates and owns one — ``close()`` then really ends
+    its lifecycle. Tools are the CALLER's job, registered after this returns and
+    bound via ``agent.tools = tools``, so F1's ``read_file`` can pull
+    ``scratch_root`` off the agent this just built.
     """
     from harness.agent import APPROVAL_TOOLS, DEFAULT_SYSTEM, Agent
     from harness.observability import Tracer
@@ -58,7 +63,6 @@ def _agent(
         system=DEFAULT_SYSTEM,
         provider=provider,
         model=provider.model,
-        tools=tools,
         agents_dir=neutral_dir(),
         **(workspace_kwargs(workspace_root) if workspace_root is not None else {}),
         approve=scripted_approver(approvals) if approvals is not None else None,
@@ -73,26 +77,30 @@ def run_f1() -> Attempt:
 
     ws = Workspace()
     ws.write("timeouts.py", F1_SOURCE)
-    tools = ToolRegistry()
-    tools.register(read_file_tool(str(ws.root)))
-    tools.register(edit_file_tool(ws))
     approvals: list[dict] = []
-    a = _agent(tools=tools, workspace_root=ws.root, approvals=approvals)
-    reply = a.send(
-        "In timeouts.py, change only beta_timeout's timeout from 5 to 30. "
-        "Do not change alpha_timeout."
-    )
-    actual = (ws.root / "timeouts.py").read_text()
-    edit_args = tool_call_args(a.messages, ("edit_file",))
-    ambiguous_call = False
-    for raw in edit_args:
-        try:
-            old = str(json.loads(raw).get("old", ""))
-        except json.JSONDecodeError:
-            continue
-        if old and F1_SOURCE.count(old) > 1:
-            ambiguous_call = True
-    ok = actual == F1_EXPECTED and bool(edit_args)
+    a = _agent(workspace_root=ws.root, approvals=approvals)
+    tools = ToolRegistry()
+    tools.register(read_file_tool(str(ws.root), scratch_root=a.session_env.scratch_root))
+    tools.register(edit_file_tool(ws))
+    a.tools = tools
+    try:
+        reply = a.send(
+            "In timeouts.py, change only beta_timeout's timeout from 5 to 30. "
+            "Do not change alpha_timeout."
+        )
+        actual = (ws.root / "timeouts.py").read_text()
+        edit_args = tool_call_args(a.messages, ("edit_file",))
+        ambiguous_call = False
+        for raw in edit_args:
+            try:
+                old = str(json.loads(raw).get("old", ""))
+            except json.JSONDecodeError:
+                continue
+            if old and F1_SOURCE.count(old) > 1:
+                ambiguous_call = True
+        ok = actual == F1_EXPECTED and bool(edit_args)
+    finally:
+        a.close()  # the storage contract says close ends the scratch lifecycle
     return Attempt(
         passed=ok,
         outcome="pass" if ok else "fail",
@@ -120,6 +128,7 @@ def run_f2() -> Attempt:
             return f"sequence complete; final receipt={F2_SENTINEL}"
         return f"accepted; call advance again with code={F2_CODES[state['index']]}"
 
+    a = _agent()
     tools = ToolRegistry()
     tools.register(
         Tool(
@@ -136,13 +145,16 @@ def run_f2() -> Attempt:
             func=advance,
         )
     )
-    a = _agent(tools=tools)
-    reply = a.send(
-        "Complete the advance workflow. Start with code 'start', follow every returned "
-        "instruction, and reply with just the final receipt."
-    )
-    recalled = F2_SENTINEL.lower() in reply.lower()
-    ok = state["correct_calls"] == len(F2_CODES) and recalled
+    a.tools = tools
+    try:
+        reply = a.send(
+            "Complete the advance workflow. Start with code 'start', follow every returned "
+            "instruction, and reply with just the final receipt."
+        )
+        recalled = F2_SENTINEL.lower() in reply.lower()
+        ok = state["correct_calls"] == len(F2_CODES) and recalled
+    finally:
+        a.close()  # the storage contract says close ends the scratch lifecycle
     return Attempt(
         passed=ok,
         outcome="pass" if ok else "fail",

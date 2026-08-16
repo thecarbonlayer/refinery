@@ -1,8 +1,10 @@
 import contextlib
 import json
 import pathlib
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from runner.spec import ATTEMPTS
@@ -409,7 +411,15 @@ def test_workspace_bound_tasks_anchor_carbon_at_the_workspace(monkeypatch):
     both sides of that kwarg's arrival instead of passing vacuously until it lands.
     Each task is then asked for the real thing: the root it gives carbon must be the
     tree its own fixture sits in, and ``agents_dir`` must still be the empty one.
+
+    Task 8's canonical shape reads ``agent.session_env.scratch_root`` and calls
+    ``agent.close()`` unconditionally around drive+verify (E4/D3/F1 all now build
+    this way), so the stand-in needs both — a real, empty directory for the former
+    (never dereferenced by these tasks' fake ``send``, but a missing attribute
+    would raise before construction even finishes) and a no-op for the latter.
     """
+    from types import SimpleNamespace
+
     from runner.tasks import cluster_d, cluster_e, cluster_f
 
     seen: list[dict] = []
@@ -419,9 +429,16 @@ def test_workspace_bound_tasks_anchor_carbon_at_the_workspace(monkeypatch):
             seen.append({"agents_dir": agents_dir, "workspace_root": workspace_root})
             self.messages: list[dict] = []
             self.tracer = None
+            scratch = Path(tempfile.mkdtemp(prefix="capturing-agent-scratch-"))
+            self.session_env = SimpleNamespace(scratch_root=scratch)
 
         def send(self, prompt: str) -> str:
             return ""
+
+        def close(self) -> None:
+            # Mirrors the real contract (remove the owned scratch) so this
+            # stand-in leaves nothing behind, same as a real Agent would.
+            shutil.rmtree(self.session_env.scratch_root, ignore_errors=True)
 
     monkeypatch.setattr("harness.agent.Agent", _CapturingAgent)
 
@@ -477,6 +494,69 @@ def test_importing_the_task_registry_binds_no_carbon_config():
         [sys.executable, "-c", code], capture_output=True, text=True, cwd=REPO_ROOT, check=True
     )
     assert out.stdout.strip() == "[]", f"registry import bound carbon: {out.stdout.strip()}"
+
+
+def test_every_task_runner_closes_its_agent():
+    """Every ``run_*`` that constructs an Agent must close it — task-8's sweep.
+
+    An Agent nobody supplies a ``session_env`` to creates and OWNS one at
+    construction (harness/agent.py), which means the private scratch directory
+    exists on disk from that line on, whether or not anything ever reads it.
+    ``close()`` is the only thing that removes it before the 24h scavenge.
+
+    Most `run_*` functions need a live model and so cannot be exercised by this
+    offline suite at all (the stray-count gate can only observe the few that
+    run here: cluster H's fault-injected agents, and the wiring stand-in for
+    D3/E4/F1). Everything else — A2, B1, D1, G1, and the rest — is invisible to
+    every OTHER offline check, so a future `run_*` that forgets `close()`, or a
+    refactor that drops one from an existing function, would go undetected
+    without reading each function's own source. This does that directly: before
+    task-8, this same predicate flagged all 25 task functions across these
+    seven modules (verified against the pre-fix source); it must stay empty.
+
+    AST-based, like ``test_cluster_c_never_grades_truncated_tool_text``: a call
+    to `.close()` ANYWHERE in the function's own body (a bare `agent.close()`
+    or the `a.close()` this codebase actually writes), not a text search over
+    the whole module — a `.close()` that belongs to an unrelated function must
+    not satisfy this one's requirement.
+    """
+    import ast
+    import inspect
+
+    from runner.tasks import (
+        cluster_a,
+        cluster_b,
+        cluster_c,
+        cluster_d,
+        cluster_e,
+        cluster_f,
+        cluster_g,
+        cluster_h,
+    )
+
+    missing = []
+    for module in (
+        cluster_a,
+        cluster_b,
+        cluster_c,
+        cluster_d,
+        cluster_e,
+        cluster_f,
+        cluster_g,
+        cluster_h,
+    ):
+        tree = ast.parse(inspect.getsource(module))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name.startswith("run_"):
+                calls_close = any(
+                    isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Attribute)
+                    and call.func.attr == "close"
+                    for call in ast.walk(node)
+                )
+                if not calls_close:
+                    missing.append(f"{module.__name__}.{node.name}")
+    assert not missing, f"these task runners never call .close() on their agent: {missing}"
 
 
 def test_g1_sentinel_is_not_a_numbered_line():
@@ -881,6 +961,11 @@ def test_build_c_agent_binds_recording_wrapped_tools_and_scratch_root(monkeypatc
         (offload / "spilled.txt").write_text("scratch payload")
         result = a.tools.call("read_file", json.dumps({"path": "scratch://offload/spilled.txt"}))
         assert result == "scratch payload"
+        # `_raw` is the recorder's own sink (recording_tool, runner/helpers.py) —
+        # pin it too, not just the tool's return value: a refactor that fed the
+        # wrapped read_file a DIFFERENT list would leave every leak predicate in
+        # cluster_c reading empty while this test stayed green on `result` alone.
+        assert _raw[-1] == "scratch payload"
     finally:
         a.close()
     assert not env.scratch_root.exists(), "close() must end the scratch lifecycle it owns"

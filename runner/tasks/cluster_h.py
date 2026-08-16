@@ -65,6 +65,8 @@ def run_h1() -> Attempt:
         reply = agent.send("Return the recovery receipt.")
     except Exception as exc:  # fail_fast is a measurable candidate, not suite infra failure
         reply = f"error: {exc}"
+    finally:
+        agent.close()  # the storage contract says close ends the scratch lifecycle
     ok = H1_SENTINEL in reply and state["calls"] == 2
     return Attempt(
         ok,
@@ -133,6 +135,8 @@ def run_h2() -> Attempt:
         reply = agent.send("Continue after recovering the window.")
     except Exception as exc:
         reply = f"error: {exc}"
+    finally:
+        agent.close()  # the storage contract says close ends the scratch lifecycle
     # The mechanism as a DELTA across the two main calls: between the call that
     # overflowed and the retry that succeeded, exactly one compaction happened and it
     # really summarized. `main == 2` is stable because overflow recovery never
@@ -210,6 +214,8 @@ def run_h3() -> Attempt:
         agent.send("This provider will not recover.")
     except RuntimeError:
         raised = True
+    finally:
+        agent.close()  # the storage contract says close ends the scratch lifecycle
     policy = CONFIG.retry
     expected = expected_retry_calls(policy)
     ok = raised and state["calls"] == expected

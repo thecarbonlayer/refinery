@@ -102,9 +102,12 @@ def _last_int(text: str) -> str | None:
 
 def run_d1() -> Attempt:
     a = _calculator_agent()
-    reply = a.send("What is 7391 * 4283? Reply with just the number.")
-    in_reply = _number_in(D1_ANSWER, reply)
-    in_tool = any(_number_in(D1_ANSWER, t) for t in tool_texts(a.messages))
+    try:
+        reply = a.send("What is 7391 * 4283? Reply with just the number.")
+        in_reply = _number_in(D1_ANSWER, reply)
+        in_tool = any(_number_in(D1_ANSWER, t) for t in tool_texts(a.messages))
+    finally:
+        a.close()  # the storage contract says close ends the scratch lifecycle
     return Attempt(
         passed=in_reply and in_tool,
         outcome="pass" if (in_reply and in_tool) else "fail",
@@ -116,11 +119,14 @@ def run_d1() -> Attempt:
 
 def run_d2() -> Attempt:
     a = _calculator_agent()
-    reply = a.send(
-        "Compute 5137 * 219, then divide that result by 3. Reply with just the final number."
-    )
-    in_reply = _number_in(D2_ANSWER, reply)
-    in_tool = any(_number_in(D2_ANSWER, t) for t in tool_texts(a.messages))
+    try:
+        reply = a.send(
+            "Compute 5137 * 219, then divide that result by 3. Reply with just the final number."
+        )
+        in_reply = _number_in(D2_ANSWER, reply)
+        in_tool = any(_number_in(D2_ANSWER, t) for t in tool_texts(a.messages))
+    finally:
+        a.close()  # the storage contract says close ends the scratch lifecycle
     return Attempt(
         passed=in_reply and in_tool,
         outcome="pass" if (in_reply and in_tool) else "fail",
@@ -161,32 +167,38 @@ def run_d3() -> Attempt:
 
     ws = Workspace()
     ws.write("tasks.txt", _d3_body())
-    tools = ToolRegistry()
-    tools.register(read_file_tool(str(ws.root)))
-    tools.register(bash_tool(Sandbox(trusted=True, timeout=60), workdir=str(ws.root)))
     approvals: list[dict] = []
     provider = make_provider()
+    # Agent-first, tools-after (the canonical shape, task-7/task-8): built with NO
+    # session_env, so it creates and owns one — close() then really ends its
+    # lifecycle — and read_file resolves scratch:// against that same scratch_root.
     a = Agent(
         tracer=Tracer(model=provider.model),
         system=DEFAULT_SYSTEM,
         provider=provider,
         model=provider.model,
-        tools=tools,
         agents_dir=neutral_dir(),
-        # Both tools above are bound to the workspace, so anything carbon's
+        # Both tools below are bound to the workspace, so anything carbon's
         # truncation door writes belongs there too — not in the neutral
         # `agents_dir`, where a `read_file` rooted at the workspace cannot follow.
         **workspace_kwargs(ws.root),
         approve=scripted_approver(approvals),
         approval_required=APPROVAL_TOOLS,
     )
-    reply = a.send(
-        "How many times does the substring TODO appear in tasks.txt? "
-        "Count exactly and reply with just the number."
-    )
-    # Anchor to the model's stated answer: the LAST integer in the reply must
-    # be the count (a mere `\b23\b` scan would pass on quoted file content).
-    ok = _last_int(reply) == str(D3_COUNT)
+    tools = ToolRegistry()
+    tools.register(read_file_tool(str(ws.root), scratch_root=a.session_env.scratch_root))
+    tools.register(bash_tool(Sandbox(trusted=True, timeout=60), workdir=str(ws.root)))
+    a.tools = tools
+    try:
+        reply = a.send(
+            "How many times does the substring TODO appear in tasks.txt? "
+            "Count exactly and reply with just the number."
+        )
+        # Anchor to the model's stated answer: the LAST integer in the reply must
+        # be the count (a mere `\b23\b` scan would pass on quoted file content).
+        ok = _last_int(reply) == str(D3_COUNT)
+    finally:
+        a.close()  # the storage contract says close ends the scratch lifecycle
     return Attempt(
         passed=ok,
         outcome="pass" if ok else "fail",

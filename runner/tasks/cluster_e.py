@@ -77,7 +77,7 @@ E4_SCRIPT = "run_settlement.py"
 E4_STAMP = ".settlement-consumed"
 
 
-def _plain_agent(*, tools, workspace_root: Path | str, approvals: list[dict] | None = None):
+def _plain_agent(*, workspace_root: Path | str, approvals: list[dict] | None = None):
     """Every E task's agent. ``workspace_root`` is required, not defaulted.
 
     E4's whole subject is a path the model has to be able to open, and the two
@@ -87,6 +87,13 @@ def _plain_agent(*, tools, workspace_root: Path | str, approvals: list[dict] | N
     default here would let a later task inherit the mismatch silently, which is
     the failure mode ``workspace_kwargs`` exists to end — so each caller names the
     workspace it wired its tools to.
+
+    Agent-first, tools-after (the canonical shape, task-8/task-7): built with NO
+    ``session_env``, so ``__init__`` creates one and owns it — ``close()`` then
+    really ends its lifecycle. Tools are the CALLER's job, registered after this
+    returns and bound via ``agent.tools = tools``, so a ``read_file`` needing
+    ``scratch_root`` can pull it from the agent this just built (``E4`` is the
+    task that needs it; the others simply don't reach for it).
     """
     from harness.agent import APPROVAL_TOOLS, DEFAULT_SYSTEM, Agent
     from harness.observability import Tracer
@@ -96,7 +103,6 @@ def _plain_agent(*, tools, workspace_root: Path | str, approvals: list[dict] | N
         system=DEFAULT_SYSTEM,
         provider=provider,
         model=provider.model,
-        tools=tools,
         agents_dir=neutral_dir(),
         **workspace_kwargs(workspace_root),
         approve=scripted_approver(approvals) if approvals is not None else None,
@@ -141,14 +147,18 @@ def run_e1() -> Attempt:
     body = _large_reference()
     ws = Workspace()
     ws.write("release-records.txt", body)
+    a = _plain_agent(workspace_root=ws.root)
     tools = ToolRegistry()
-    tools.register(read_file_tool(str(ws.root)))
+    tools.register(read_file_tool(str(ws.root), scratch_root=a.session_env.scratch_root))
     tools.register(search_text_tool(str(ws.root)))
-    a = _plain_agent(tools=tools, workspace_root=ws.root)
-    reply = a.send(
-        "Find the release authorization code in release-records.txt. "
-        "Reply with just the exact code."
-    )
+    a.tools = tools
+    try:
+        reply = a.send(
+            "Find the release authorization code in release-records.txt. "
+            "Reply with just the exact code."
+        )
+    finally:
+        a.close()  # the storage contract says close ends the scratch lifecycle
     called = any(m.get("role") == "tool" for m in a.messages)
     recalled = E1_SENTINEL.lower() in reply.lower()
     delivered = sum(len(t) for t in tool_texts(a.messages))
@@ -275,14 +285,18 @@ def run_e2() -> Attempt:
 
     ws = Workspace()
     ws.write("run_tests.py", e2_script())
+    approvals: list[dict] = []
+    a = _plain_agent(workspace_root=ws.root, approvals=approvals)
     tools = ToolRegistry()
     tools.register(bash_tool(Sandbox(trusted=True, timeout=60), workdir=str(ws.root)))
-    approvals: list[dict] = []
-    a = _plain_agent(tools=tools, workspace_root=ws.root, approvals=approvals)
-    reply = a.send(
-        "Run `python3 run_tests.py` and report the exact root-cause-tag from the failed test. "
-        "Reply with just the tag."
-    )
+    a.tools = tools
+    try:
+        reply = a.send(
+            "Run `python3 run_tests.py` and report the exact root-cause-tag from the failed test. "
+            "Reply with just the tag."
+        )
+    finally:
+        a.close()  # the storage contract says close ends the scratch lifecycle
     runs = bash_runs(a.messages, _ran_script_plainly)
     called = bool(runs)
     # A `... | tail` call may let a capable model recover despite the harness, so
@@ -340,14 +354,18 @@ def run_e3() -> Attempt:
 
     ws = Workspace()
     ws.write("run_audit.py", e3_script())
+    approvals = [{"tool": "bash", "decision": "approve"}]
+    a = _plain_agent(workspace_root=ws.root, approvals=approvals)
     tools = ToolRegistry()
     tools.register(bash_tool(Sandbox(trusted=True, timeout=60), workdir=str(ws.root)))
-    approvals = [{"tool": "bash", "decision": "approve"}]
-    a = _plain_agent(tools=tools, workspace_root=ws.root, approvals=approvals)
-    reply = a.send(
-        "Run `python3 run_audit.py` and report the reconciliation tag it prints. "
-        "Reply with just the exact tag."
-    )
+    a.tools = tools
+    try:
+        reply = a.send(
+            "Run `python3 run_audit.py` and report the reconciliation tag it prints. "
+            "Reply with just the exact tag."
+        )
+    finally:
+        a.close()  # the storage contract says close ends the scratch lifecycle
     runs = bash_runs(a.messages, _ran_audit_plainly)
     ran = bool(runs)
     # The FIRST plain run is the one under test: a later, narrowed re-run would be the
@@ -429,20 +447,23 @@ def _e4_regenerates_or_derives(call_text: str) -> bool:
     return bool(_E4_REPLAY_RE.search(call_text)) or any(m in call_text for m in _E4_DERIVE_MARKS)
 
 
-def _e4_recovered_from_disk(messages: list[dict], root: Path) -> bool:
+def _e4_recovered_from_disk(messages: list[dict], scratch_root: Path) -> bool:
     """Did the tag reach the model by READING an on-disk artifact it can name?
 
     The offload contract this task measures is outcome-shaped on purpose: the
-    complete raw result lands in a file under the agent's working directory, at a
-    relative path the marker makes discoverable. The marker's wording, the
-    directory, and the filename are all carbon's to choose and to change, so
+    complete raw result lands in a file in the session's private scratch
+    (harness/session_env.py), at a ``scratch://`` ref the marker makes
+    discoverable — never a workspace path. The marker's wording, the offload
+    directory name, and the filename are all carbon's to choose and to change, so
     nothing here parses a marker or pins a path. Attribution is positive instead:
-    some file under the workspace contains the sentinel, and some tool call both
-    names a component of that file's path and came back with the sentinel in its
+    some file under scratch contains the sentinel, and some tool call both names
+    a component of that file's path and came back with the sentinel in its
     result. A `grep`/`sed` names the file or globs its directory; `read_file`
-    names it in its args; `find | xargs` names neither and is NOT credited — the
-    conservative direction, since a missed legitimate read under-reports the
-    strategy and never over-reports it.
+    names it in its args (a ``scratch://offload/<name>`` ref, whose parts —
+    ``offload``, ``<name>`` — still match a path component the same way a
+    workspace-relative path would); `find | xargs` names neither and is NOT
+    credited — the conservative direction, since a missed legitimate read
+    under-reports the strategy and never over-reports it.
 
     The taint rule closes the fabrication route: a file whose path is named by any
     replay- or derivation-shaped command (a regenerated ``> dump.txt``, a minted
@@ -450,7 +471,7 @@ def _e4_recovered_from_disk(messages: list[dict], root: Path) -> bool:
     then reading it back does not count as recovering it."""
     calls = tool_runs(messages, ("bash", "read_file"))
     marker_texts = [args for _name, args, _result in calls if _e4_regenerates_or_derives(args)]
-    for path in sorted(root.rglob("*")):
+    for path in sorted(scratch_root.rglob("*")):
         if not path.is_file():
             continue
         try:
@@ -459,7 +480,7 @@ def _e4_recovered_from_disk(messages: list[dict], root: Path) -> bool:
             continue
         if E4_SENTINEL not in text:
             continue
-        parts = set(path.relative_to(root).parts)
+        parts = set(path.relative_to(scratch_root).parts)
         if any(part in marker for marker in marker_texts for part in parts):
             continue  # named by a command that makes the tag: fabricated, not offloaded
         for _name, args, result in calls:
@@ -501,27 +522,35 @@ def run_e4() -> Attempt:
 
     ws = Workspace()
     ws.write(E4_SCRIPT, e4_script())
+    approvals: list[dict] = []
+    # The workspace is named explicitly so the script lands in the tree `bash`
+    # above runs in; the recovery artifact itself lands in the agent's OWN
+    # scratch (below), never the workspace — the door spills there, not here.
+    a = _plain_agent(workspace_root=ws.root, approvals=approvals)
     tools = ToolRegistry()
     tools.register(bash_tool(Sandbox(trusted=True, timeout=60), workdir=str(ws.root)))
     # The harness's own paging belt rides along: the offload convention hands back
-    # a relative path meant for ranged reads, and withholding the tool that reads
-    # ranges would manufacture the failure this task exists to measure.
-    tools.register(read_file_tool(str(ws.root)))
-    approvals: list[dict] = []
-    # The workspace is named explicitly so an offloaded artifact lands in the tree
-    # `read_file` above is bound to: this task's only route to the tag is a file
-    # the door left behind, and a file the model cannot open is no route at all.
-    a = _plain_agent(tools=tools, workspace_root=ws.root, approvals=approvals)
-    reply = a.send(
-        f"Run `python3 {E4_SCRIPT}` and report the settlement tag from the anomaly "
-        "line. The stream is generated once — a re-run will not replay it. "
-        "Reply with just the exact tag."
-    )
-    plain = bash_runs(a.messages, _ran_settlement_plainly)
-    ran = bool(plain)
-    withheld = ran and E4_SENTINEL not in plain[0][1]
-    recovered = _e4_recovered_from_disk(a.messages, ws.root)
-    recalled = E4_SENTINEL.lower() in reply.lower()
+    # a scratch:// ref meant for ranged reads, and withholding the tool that reads
+    # ranges would manufacture the failure this task exists to measure. scratch_root
+    # is THIS agent's own session_env — it must own it (Agent-first, tools-after
+    # above) so `read_file` resolves the same scratch the door spills into.
+    tools.register(read_file_tool(str(ws.root), scratch_root=a.session_env.scratch_root))
+    a.tools = tools
+    try:
+        reply = a.send(
+            f"Run `python3 {E4_SCRIPT}` and report the settlement tag from the anomaly "
+            "line. The stream is generated once — a re-run will not replay it. "
+            "Reply with just the exact tag."
+        )
+        plain = bash_runs(a.messages, _ran_settlement_plainly)
+        ran = bool(plain)
+        withheld = ran and E4_SENTINEL not in plain[0][1]
+        # Must run BEFORE close(): the recovery artifact lives in scratch, and
+        # close() (in the finally below) removes it — read while it still exists.
+        recovered = _e4_recovered_from_disk(a.messages, a.session_env.scratch_root)
+        recalled = E4_SENTINEL.lower() in reply.lower()
+    finally:
+        a.close()  # the storage contract says close ends the scratch lifecycle
     ok = ran and withheld and recovered and recalled
     return Attempt(
         passed=ok,

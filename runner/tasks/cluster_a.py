@@ -76,27 +76,32 @@ def _filler(i: int, sentences: int = 12) -> str:
 
 def run_a1() -> Attempt:
     a = _plain_agent()
-    a.send("Quick sync before the deploy review. Please acknowledge briefly.")  # turn 1: neutral
-    a.send(  # turn 2: the fact — first message compaction will summarize
-        f"Note for later: the deploy key rotates every {A1_SENTINEL}. Acknowledge briefly."
-    )
-    for i in range(3, 3 + A1_MAX_FILLER_TURNS):
-        a.send(_filler(i))
-        if compacted(a.messages):
-            break
-    if not compacted(a.messages):  # setup assertion: compaction must actually fire
-        return Attempt(
-            False,
-            "error",
-            f"compaction never fired after {A1_MAX_FILLER_TURNS} filler turns "
-            f"(last_tokens={a._last_tokens})",
-            turns=len(a.messages),
-            metrics=agent_metrics(a),
+    try:
+        a.send(
+            "Quick sync before the deploy review. Please acknowledge briefly."
+        )  # turn 1: neutral
+        a.send(  # turn 2: the fact — first message compaction will summarize
+            f"Note for later: the deploy key rotates every {A1_SENTINEL}. Acknowledge briefly."
         )
-    reply = a.send("What is the deploy key rotation schedule? Reply with the exact key phrase.")
-    is_compacted = compacted(a.messages)
-    recalled = A1_SENTINEL.lower() in reply.lower()
-    ok = recalled and is_compacted
+        for i in range(3, 3 + A1_MAX_FILLER_TURNS):
+            a.send(_filler(i))
+            if compacted(a.messages):
+                break
+        if not compacted(a.messages):  # setup assertion: compaction must actually fire
+            return Attempt(
+                False,
+                "error",
+                f"compaction never fired after {A1_MAX_FILLER_TURNS} filler turns "
+                f"(last_tokens={a._last_tokens})",
+                turns=len(a.messages),
+                metrics=agent_metrics(a),
+            )
+        reply = a.send("What is the deploy key rotation schedule? Reply with the exact key phrase.")
+        is_compacted = compacted(a.messages)
+        recalled = A1_SENTINEL.lower() in reply.lower()
+        ok = recalled and is_compacted
+    finally:
+        a.close()  # the storage contract says close ends the scratch lifecycle
     return Attempt(
         passed=ok,
         outcome="pass" if ok else "fail",
@@ -131,12 +136,15 @@ def run_a2() -> Attempt:
         )
     )
     a = _plain_agent(tools=tools)
-    reply = a.send(
-        "Call the fetch_log tool and tell me what the FINAL line says the rollout "
-        "password is. Reply with just the password."
-    )
-    ok = A2_SENTINEL.lower() in reply.lower()
-    called = any(m.get("role") == "tool" for m in a.messages)
+    try:
+        reply = a.send(
+            "Call the fetch_log tool and tell me what the FINAL line says the rollout "
+            "password is. Reply with just the password."
+        )
+        ok = A2_SENTINEL.lower() in reply.lower()
+        called = any(m.get("role") == "tool" for m in a.messages)
+    finally:
+        a.close()  # the storage contract says close ends the scratch lifecycle
     return Attempt(
         passed=ok,
         outcome="pass" if ok else "fail",
@@ -148,26 +156,29 @@ def run_a2() -> Attempt:
 
 def run_a3() -> Attempt:
     a = _plain_agent()
-    a.send(
-        "Let's plan the API rollout. The API rollout access value is "
-        f"{A3_VALUES['A']}. Acknowledge briefly."
-    )
-    a.send(_filler(1, sentences=8))
-    a.send(
-        "Switching topics to the database migration. The database migration code is "
-        f"{A3_VALUES['B']}. Acknowledge briefly."
-    )
-    a.send(_filler(2, sentences=8))
-    a.send(
-        "New topic: the frontend redesign. The frontend redesign ticket key is "
-        f"{A3_VALUES['C']}. Acknowledge briefly."
-    )
-    a.send(_filler(3, sentences=8))
-    reply = a.send("What is the database migration code? Reply with just the code.")
-    low = reply.lower()
-    has_b = A3_VALUES["B"].lower() in low
-    has_other = A3_VALUES["A"].lower() in low or A3_VALUES["C"].lower() in low
-    ok = has_b and not has_other
+    try:
+        a.send(
+            "Let's plan the API rollout. The API rollout access value is "
+            f"{A3_VALUES['A']}. Acknowledge briefly."
+        )
+        a.send(_filler(1, sentences=8))
+        a.send(
+            "Switching topics to the database migration. The database migration code is "
+            f"{A3_VALUES['B']}. Acknowledge briefly."
+        )
+        a.send(_filler(2, sentences=8))
+        a.send(
+            "New topic: the frontend redesign. The frontend redesign ticket key is "
+            f"{A3_VALUES['C']}. Acknowledge briefly."
+        )
+        a.send(_filler(3, sentences=8))
+        reply = a.send("What is the database migration code? Reply with just the code.")
+        low = reply.lower()
+        has_b = A3_VALUES["B"].lower() in low
+        has_other = A3_VALUES["A"].lower() in low or A3_VALUES["C"].lower() in low
+        ok = has_b and not has_other
+    finally:
+        a.close()  # the storage contract says close ends the scratch lifecycle
     return Attempt(
         passed=ok,
         outcome="pass" if ok else "fail",
@@ -187,11 +198,14 @@ def run_a4() -> Attempt:
     notes = d / "notes.txt"
     notes.write_text(body)
     a = _plain_agent()
-    reply = a.send(
-        f"@{notes} What does the last section say the rollout password is? "
-        "Reply with just the password."
-    )
-    ok = A4_SENTINEL.lower() in reply.lower()
+    try:
+        reply = a.send(
+            f"@{notes} What does the last section say the rollout password is? "
+            "Reply with just the password."
+        )
+        ok = A4_SENTINEL.lower() in reply.lower()
+    finally:
+        a.close()  # the storage contract says close ends the scratch lifecycle
     return Attempt(
         passed=ok,
         outcome="pass" if ok else "fail",
@@ -242,10 +256,14 @@ def run_a5() -> Attempt:
     notes = d / "incident.txt"
     notes.write_text(body)
     a = _plain_agent()
-    reply = a.send(
-        f"@{notes} What rollback token does the incident summary give? Reply with just the token."
-    )
-    ok = A5_SENTINEL.lower() in reply.lower()
+    try:
+        reply = a.send(
+            f"@{notes} What rollback token does the incident summary give? "
+            "Reply with just the token."
+        )
+        ok = A5_SENTINEL.lower() in reply.lower()
+    finally:
+        a.close()  # the storage contract says close ends the scratch lifecycle
     return Attempt(
         passed=ok,
         outcome="pass" if ok else "fail",
