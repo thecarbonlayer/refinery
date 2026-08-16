@@ -1,4 +1,6 @@
+import ast
 import contextlib
+import hashlib
 import json
 import pathlib
 import shutil
@@ -397,6 +399,54 @@ def test_e4_recovery_credits_only_reads_of_an_offloaded_artifact(tmp_path):
     )
 
 
+def test_e4_recovery_credits_the_real_offload_ref_shape(tmp_path):
+    """Same predicate, PRODUCTION shape.
+
+    The fixtures above are readable stand-ins for the attribution LOGIC (glob,
+    taint, replay) and are deliberately picked apart with human-legible names —
+    but ``offload_to_file`` never writes ``outbox/result-0001.txt``. It writes
+    exactly ONE shape: ``<scratch_root>/offload/<sha256(payload)[:16]>.txt``
+    (harness/limits.py's ``_spill``), named in the transcript only via
+    ``spill_ref()``'s ``scratch://offload/<name>`` ref (harness/limits.py:55) —
+    never a bash-callable relative path, because E4's own ``bash`` tool is bound
+    to the WORKSPACE (``workdir=str(ws.root)``) and has no filesystem route to
+    scratch at all. So in production the only credit-eligible calls are
+    ``read_file`` ones naming that ref, whole or ranged.
+
+    Built with carbon's own ``spill_ref()``, not a retyped string, so a change to
+    the ref's scheme or the offload dirname surfaces here rather than only in a
+    fixture that never uses either.
+    """
+    from harness.limits import spill_ref
+
+    from runner.tasks.cluster_e import E4_SENTINEL, _e4_recovered_from_disk
+
+    complete = "ledger row: settled\n" * 40 + f"SETTLEMENT ANOMALY: settlement-tag={E4_SENTINEL}\n"
+    payload = complete.encode("utf-8")
+    # The real filename shape _spill writes (harness/limits.py): a content hash,
+    # never a caller-chosen name.
+    filename = f"{hashlib.sha256(payload).hexdigest()[:16]}.txt"
+    offload = tmp_path / "offload"
+    offload.mkdir()
+    (offload / filename).write_text(complete)
+    ref = spill_ref(filename)  # "scratch://offload/<hash>.txt" — carbon's own builder
+
+    plain = _bash_msgs("python3 run_settlement.py", "[exit 0 via trusted]\nledger row …")
+
+    # (a) a bare (whole-file) read_file call naming the real ref, result carries
+    # the sentinel.
+    whole = _tool_msgs("read_file", json.dumps({"path": ref}), complete)
+    assert _e4_recovered_from_disk(plain + whole, tmp_path)
+
+    # (b) the PAGED route the footer actually instructs (_route() in
+    # harness/limits.py: "read_file(path=ref, start_line=1, end_line=<n>)") — a
+    # ranged call naming the same ref must be credited too.
+    paged = _tool_msgs(
+        "read_file", json.dumps({"path": ref, "start_line": 1, "end_line": 41}), complete
+    )
+    assert _e4_recovered_from_disk(plain + paged, tmp_path)
+
+
 def test_workspace_bound_tasks_anchor_carbon_at_the_workspace(monkeypatch):
     """A task's tools are rooted at its workspace; ``agents_dir`` deliberately is not.
 
@@ -496,8 +546,106 @@ def test_importing_the_task_registry_binds_no_carbon_config():
     assert out.stdout.strip() == "[]", f"registry import bound carbon: {out.stdout.strip()}"
 
 
-def test_every_task_runner_closes_its_agent():
-    """Every ``run_*`` that constructs an Agent must close it — task-8's sweep.
+# --- structural AST helpers for the close()-lifecycle guards below ---------------
+#
+# The constructor names task-8's sweep actually uses, across all eight cluster
+# modules — a closed, enumerated set in this file's own established style
+# (compare AGENT_METRIC_ATTRS in test_helpers.py, _E4_DERIVE_MARKS in
+# cluster_e.py): every one is called by BARE name (never `module.Agent(...)` or
+# an attribute), verified by reading each `run_*` before writing this. A new
+# builder this set doesn't know about makes `_agent_binding_names` return an
+# empty list for that function, which the general guard below treats as a
+# FAILURE (not a silent pass) for exactly that reason.
+_AGENT_CONSTRUCTORS = frozenset(
+    {
+        "Agent",
+        "_plain_agent",
+        "_calculator_agent",
+        "_build_b_agent",
+        "_build_c_agent",
+        "_agent",
+        "_fault_agent",
+    }
+)
+
+
+def _constructor_call_name(node) -> str | None:
+    """The bare callee name of a Call node, or None for anything else."""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        return node.func.id
+    return None
+
+
+def _agent_binding_names(func: ast.FunctionDef) -> list[str]:
+    """Every name ``func`` binds an Agent-constructor call's result to.
+
+    Handles both shapes this codebase uses: a plain ``a = _plain_agent(...)``
+    and a tuple-unpack ``a, ws, approvals = _build_b_agent(...)`` — the agent is
+    always the FIRST element of every tuple-returning builder here
+    (``_build_b_agent``, ``_build_c_agent``), the same convention
+    ``test_build_c_agent_binds_recording_wrapped_tools_and_scratch_root`` checks
+    for cluster_c and simply relied on here for the others.
+    """
+    names: list[str] = []
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Assign):
+            continue
+        if _constructor_call_name(node.value) not in _AGENT_CONSTRUCTORS:
+            continue
+        target = node.targets[0]
+        if isinstance(target, ast.Name):
+            names.append(target.id)
+        elif isinstance(target, ast.Tuple) and target.elts and isinstance(target.elts[0], ast.Name):
+            names.append(target.elts[0].id)
+    return names
+
+
+def _try_nodes(func: ast.FunctionDef) -> list[ast.Try]:
+    return [n for n in ast.walk(func) if isinstance(n, ast.Try)]
+
+
+def _calls_close_on(stmts: list[ast.stmt], name: str) -> bool:
+    """Does any statement in ``stmts`` (searched at any depth) call
+    ``<name>.close()`` — an attribute access on THIS specific name, never any
+    ``.close()`` in scope. A ``fh.close()`` on an unrelated object must not
+    satisfy this — the gap a reviewer found in an earlier, looser version of
+    this predicate that matched on the bare method name alone."""
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "close"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == name
+        for stmt in stmts
+        for node in ast.walk(stmt)
+    )
+
+
+def _closes_in_a_finally(func: ast.FunctionDef, name: str) -> bool:
+    """True iff some ``try/finally`` in ``func`` closes ``name`` in its
+    ``finally:`` clause specifically — not merely somewhere in the function,
+    and not in the ``try:`` body either. A close() moved into the try body
+    (finally left empty or dropped) would satisfy a body-wide search but breaks
+    both the exception-safety `finally` exists for and, for run_e4
+    specifically, the verify-before-close ordering pinned separately below."""
+    return any(_calls_close_on(t.finalbody, name) for t in _try_nodes(func))
+
+
+_TASK_CLUSTER_MODULES = (
+    "cluster_a",
+    "cluster_b",
+    "cluster_c",
+    "cluster_d",
+    "cluster_e",
+    "cluster_f",
+    "cluster_g",
+    "cluster_h",
+)
+
+
+def test_every_task_runner_closes_its_agent_in_a_finally():
+    """Every ``run_*`` that constructs an Agent must close THAT agent, inside a
+    ``finally`` — task-8's sweep, hardened after review.
 
     An Agent nobody supplies a ``session_env`` to creates and OWNS one at
     construction (harness/agent.py), which means the private scratch directory
@@ -511,52 +659,94 @@ def test_every_task_runner_closes_its_agent():
     every OTHER offline check, so a future `run_*` that forgets `close()`, or a
     refactor that drops one from an existing function, would go undetected
     without reading each function's own source. This does that directly: before
-    task-8, this same predicate flagged all 25 task functions across these
-    seven modules (verified against the pre-fix source); it must stay empty.
+    task-8, this same predicate (in its original, looser form) flagged all 25
+    task functions across these eight modules (verified against the pre-fix
+    source); it must stay empty.
 
-    AST-based, like ``test_cluster_c_never_grades_truncated_tool_text``: a call
-    to `.close()` ANYWHERE in the function's own body (a bare `agent.close()`
-    or the `a.close()` this codebase actually writes), not a text search over
-    the whole module — a `.close()` that belongs to an unrelated function must
-    not satisfy this one's requirement.
+    Hardened over the original version, which matched `.close()` ANYWHERE in
+    the function body regardless of receiver or nesting — passable by a
+    `fh.close()` on an unrelated object, or a `close()` sitting outside any
+    `finally` at all. Now: the call must be an attribute of the SAME name the
+    function bound its Agent-constructor result to (``_agent_binding_names``),
+    and it must sit inside a ``finally:`` clause (``_closes_in_a_finally``), not
+    just anywhere in the function.
     """
-    import ast
     import inspect
 
-    from runner.tasks import (
-        cluster_a,
-        cluster_b,
-        cluster_c,
-        cluster_d,
-        cluster_e,
-        cluster_f,
-        cluster_g,
-        cluster_h,
-    )
+    import runner.tasks as _tasks_pkg
 
     missing = []
-    for module in (
-        cluster_a,
-        cluster_b,
-        cluster_c,
-        cluster_d,
-        cluster_e,
-        cluster_f,
-        cluster_g,
-        cluster_h,
-    ):
+    for modname in _TASK_CLUSTER_MODULES:
+        module = getattr(_tasks_pkg, modname)
         tree = ast.parse(inspect.getsource(module))
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name.startswith("run_"):
-                calls_close = any(
-                    isinstance(call, ast.Call)
-                    and isinstance(call.func, ast.Attribute)
-                    and call.func.attr == "close"
-                    for call in ast.walk(node)
-                )
-                if not calls_close:
-                    missing.append(f"{module.__name__}.{node.name}")
-    assert not missing, f"these task runners never call .close() on their agent: {missing}"
+            if not (isinstance(node, ast.FunctionDef) and node.name.startswith("run_")):
+                continue
+            names = _agent_binding_names(node)
+            if not names:
+                missing.append(f"{modname}.{node.name}: no recognized Agent-constructor call")
+                continue
+            for name in names:
+                if not _closes_in_a_finally(node, name):
+                    missing.append(f"{modname}.{node.name}: {name!r} never closed in a finally")
+    assert not missing, f"agent-lifecycle violations: {missing}"
+
+
+def test_e4_verifies_before_close():
+    """The one ordering bug that can go PERMANENTLY, silently wrong.
+
+    ``_e4_recovered_from_disk`` reads files under scratch; ``a.close()`` removes
+    them (``SessionEnvironment.cleanup()`` -> ``shutil.rmtree``). If a refactor
+    ever moves ``recovered = _e4_recovered_from_disk(...)`` to run AFTER
+    ``a.close()`` — even while leaving `close()` validly inside SOME
+    `try/finally`'s `finally:` — the scan finds an empty directory and returns
+    False. Not an exception: a wrong answer, forever, with nothing pointing at
+    why. `test_every_task_runner_closes_its_agent_in_a_finally` above cannot see
+    this by itself — it is satisfied the moment `a.close()` sits in ANY
+    `try/finally`'s `finally` clause anywhere in `run_e4`, including one that no
+    longer wraps the `recovered =` line at all (confirmed: a mutation moving
+    `recovered =` to just after an otherwise-untouched `try/finally` passes that
+    guard and must be caught here instead).
+
+    So this pins the STRONGER, matching-``Try`` requirement: the SAME
+    ``try/finally`` whose ``try:`` body contains the ``_e4_recovered_from_disk``
+    call must be the one whose ``finally:`` closes the agent.
+    """
+    import inspect
+
+    from runner.tasks import cluster_e
+
+    tree = ast.parse(inspect.getsource(cluster_e))
+    run_e4 = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "run_e4"
+    )
+    names = _agent_binding_names(run_e4)
+    assert names, (
+        "run_e4's Agent-construction assignment was not recognized by _agent_binding_names"
+    )
+    (agent_name,) = names
+
+    def _calls_recovered(stmts: list[ast.stmt]) -> bool:
+        return any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_e4_recovered_from_disk"
+            for stmt in stmts
+            for node in ast.walk(stmt)
+        )
+
+    matching = [
+        t
+        for t in _try_nodes(run_e4)
+        if _calls_recovered(t.body) and _calls_close_on(t.finalbody, agent_name)
+    ]
+    assert matching, (
+        "no try/finally in run_e4 has _e4_recovered_from_disk(...) in its try body AND "
+        f"{agent_name}.close() in the MATCHING finally — the verify-before-close ordering "
+        "is not structurally guaranteed"
+    )
 
 
 def test_g1_sentinel_is_not_a_numbered_line():

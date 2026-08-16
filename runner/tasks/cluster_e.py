@@ -149,6 +149,15 @@ def run_e1() -> Attempt:
     ws.write("release-records.txt", body)
     a = _plain_agent(workspace_root=ws.root)
     tools = ToolRegistry()
+    # Capability grant, not just wiring: scratch_root= lets this read_file resolve a
+    # scratch:// ref. The fixture is well over tool_output's budget (100k+ chars), so
+    # under a candidate config that sets tool_output to offload_to_file (a real point
+    # in this suite's search space — see E4), a naive whole-file read here spills to
+    # scratch and hands back a footer naming it, and the model can now follow that ref
+    # straight back — a route to a bigger `delivered_share` (worse economy) that did
+    # not exist before this task threaded scratch_root through every read_file. Named
+    # here because `delivered_share` is exactly the metric it could move; inert under
+    # the shipped head_tail default, which never spills.
     tools.register(read_file_tool(str(ws.root), scratch_root=a.session_env.scratch_root))
     tools.register(search_text_tool(str(ws.root)))
     a.tools = tools
@@ -465,6 +474,17 @@ def _e4_recovered_from_disk(messages: list[dict], scratch_root: Path) -> bool:
     credited — the conservative direction, since a missed legitimate read
     under-reports the strategy and never over-reports it.
 
+    Qualifier on "never over-reports": attribution is DIRECTORY-level, not
+    full-path — any call whose args merely contain ``offload`` (or the target
+    file's own name) credits, once the file's content and the call's result both
+    carry the sentinel; it does not require the call to spell the file's full
+    relative path. Looser than it sounds, but safe here: scratch is
+    harness-write-only in this task's tool wiring (E4 registers `bash` bound to
+    the WORKSPACE, never scratch, and `read_file`, which cannot write) — nothing
+    the model does can plant a second, decoy file under scratch for a generic
+    ``offload`` mention to be confused with, so the directory-level match still
+    only ever resolves to the one file the door actually spilled.
+
     The taint rule closes the fabrication route: a file whose path is named by any
     replay- or derivation-shaped command (a regenerated ``> dump.txt``, a minted
     ``> tag.txt``) is disqualified as an attribution target, so making the tag and
@@ -524,7 +544,7 @@ def run_e4() -> Attempt:
     ws.write(E4_SCRIPT, e4_script())
     approvals: list[dict] = []
     # The workspace is named explicitly so the script lands in the tree `bash`
-    # above runs in; the recovery artifact itself lands in the agent's OWN
+    # below runs in; the recovery artifact itself lands in the agent's OWN
     # scratch (below), never the workspace — the door spills there, not here.
     a = _plain_agent(workspace_root=ws.root, approvals=approvals)
     tools = ToolRegistry()
