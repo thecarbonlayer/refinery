@@ -1077,7 +1077,7 @@ def test_a5_guards_the_head_window_that_a4_cannot_see():
     """
     from dataclasses import replace
 
-    from harness.harness_config import CONFIG
+    from harness.harness_config import CONFIG, TruncationPolicy
     from harness.limits import truncate
 
     from runner.tasks.cluster_a import A5_SENTINEL, AUTHORED_CLAMP, a5_body
@@ -1089,12 +1089,20 @@ def test_a5_guards_the_head_window_that_a4_cannot_see():
     body = a5_body()
     assert len(body) > AUTHORED_CLAMP, "the fixture must exceed the clamp or nothing truncates"
 
-    live = CONFIG.file_injection
-    assert A5_SENTINEL in truncate(body, live), "A5 must PASS at the shipped policy"
-    assert A5_SENTINEL in truncate(body, replace(live, strategy="keep_head")), (
+    # The policies are NAMED, not read off the live config. The subject is A5's
+    # DISCRIMINATION — that it survives a head-preserving cut and dies at a tail-heavy
+    # one — and reading `CONFIG.file_injection` for the survival half made this test go
+    # red at a legal `tail_fraction` of 0.999: the exact defect the rest of this session
+    # removed, reintroduced in the commit that closed the unguarded-knob item, and
+    # caught by the surface sweep. Whether A5's `pass` prior holds at whatever ships is
+    # a MEASUREMENT, settled by running the task, not by an offline assertion.
+    balanced = TruncationPolicy("head_tail", CONFIG.file_injection.budget, 0.5)
+
+    assert A5_SENTINEL in truncate(body, balanced), "a balanced cut must keep a head needle"
+    assert A5_SENTINEL in truncate(body, replace(balanced, strategy="keep_head")), (
         "a head-only policy keeps a head needle; A5 must not duplicate A4's discrimination"
     )
     # The regression it exists to catch: the top of the legal open interval.
-    assert A5_SENTINEL not in truncate(
-        body, replace(live, strategy="head_tail", tail_fraction=0.999)
-    ), "A5 cannot guard `tail_fraction` if a near-1 value still leaves its needle in the head"
+    assert A5_SENTINEL not in truncate(body, replace(balanced, tail_fraction=0.999)), (
+        "A5 cannot guard `tail_fraction` if a near-1 value still leaves its needle in the head"
+    )
