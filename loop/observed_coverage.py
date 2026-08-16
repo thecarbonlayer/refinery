@@ -148,12 +148,20 @@ def select_attempts(jsonl: Path, result_json: Path) -> tuple[list[dict], dict]:
         json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     return rows, {
-        # Under the repo root this is a stable relative path. Outside it — `--baseline`
-        # takes an arbitrary path — the absolute one is recorded, rather than a relative
-        # string that would read as a repo file and point at the wrong one.
-        "file": str(jsonl.resolve().relative_to(REPO_ROOT))
-        if jsonl.resolve().is_relative_to(REPO_ROOT)
-        else str(jsonl.resolve()),
+        # Repo-relative under the root, and NAME ONLY outside it. Two failure modes,
+        # one on each side. A path computed relative to the file's grandparent turned an
+        # external `/archive/results/base.jsonl` into `results/base.jsonl`, which reads
+        # as a repo file and points at the wrong one. Recording the absolute path
+        # instead fixed that and broke a harder rule: this record is written under
+        # `iterations/` in a PUBLIC repo, and AGENTS.md forbids absolute paths there —
+        # they carry a real machine's home directory. The name plus `external: True`
+        # says what it is without claiming a location, and `selected_sha256` is the
+        # identity that actually matters.
+        **(
+            {"file": str(jsonl.resolve().relative_to(REPO_ROOT))}
+            if jsonl.resolve().is_relative_to(REPO_ROOT)
+            else {"file": jsonl.name, "external": True}
+        ),
         "rows_selected": len(rows),
         "rows_in_file": len(raw),
         "selected_sha256": digest,

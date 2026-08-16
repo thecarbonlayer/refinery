@@ -598,6 +598,17 @@ def test_a_duplicated_attempt_takes_the_LAST_row_as_the_runner_does(tmp_path):
     assert activity_from_rows(rows)["T"]["tool_calls"] == 7.0, "the LAST row is the run"
     assert unreachable("tool_output", activity_from_rows(rows)) == set()
 
+    # PARITY, not a restatement of the same constant. Asserting `== 7.0` alone pins this
+    # module's behaviour to a literal, so changing the RUNNER to first-wins would leave
+    # it green while the two selectors silently disagreed about which row the summary
+    # describes. Compare the two selectors over the same file instead.
+    from runner.run import load_done
+
+    assert load_done(jsonl, log=lambda *_: None)[("T", 0)] == rows[0], (
+        "select_attempts and load_done must pick the same record, or coverage explains "
+        "a different attempt than the one delta summarized"
+    )
+
 
 def test_a_summarized_attempt_missing_from_the_log_is_refused(tmp_path):
     """The other direction: a summary that claims attempts the log does not carry.
@@ -627,26 +638,33 @@ def test_both_arms_are_required_and_both_are_read(tmp_path):
     from loop.artifacts import Candidate
     from loop.validate import coverage_note
 
-    def write(stem, tool_calls):
+    def write(stem, tool_calls, cfg):
         (tmp_path / f"{stem}.json").write_text(
             _json.dumps({"tasks": {"T": {"split": "held_in", "attempts": 1}}})
         )
-        (tmp_path / f"{stem}.jsonl").write_text(
-            _json.dumps(
+
+        def row(attempt, calls):
+            return _json.dumps(
                 {
                     "task": "T",
-                    "attempt": 0,
+                    "attempt": attempt,
                     "runner_sha": "abc123",
-                    "config_version": 7,
-                    "model": "m",
-                    "metrics": {"tool_calls": tool_calls},
+                    "config_version": cfg,
+                    "model": f"model-{cfg}",
+                    "metrics": {"tool_calls": calls},
                 }
             )
-            + "\n"
-        )
+
+        # An ORPHAN at attempt 1, left by an earlier longer run and excluded by the
+        # summary's `attempts: 1`. Without it raw and selected rows are identical, and a
+        # hash taken over the raw file is indistinguishable from one over the selected
+        # rows — the fixture, not the code, would be deciding the test.
+        (tmp_path / f"{stem}.jsonl").write_text(row(0, tool_calls) + "\n" + row(1, 99.0) + "\n")
         return (tmp_path / f"{stem}.jsonl", tmp_path / f"{stem}.json")
 
-    base, cand = write("base", 1.0), write("cand", 0.0)  # baseline ACTIVE, candidate not
+    # Asymmetric on BOTH axes. Symmetric fixtures let a mutant hard-code the provenance
+    # values and stay green, because every arm reports the same thing.
+    base, cand = write("base", 1.0, cfg=7), write("cand", 0.0, cfg=8)
     candidate = Candidate(
         id="x",
         cluster_id="CL",
@@ -667,13 +685,62 @@ def test_both_arms_are_required_and_both_are_read(tmp_path):
         "base.jsonl",
         "cand.jsonl",
     }
-    # Provenance must carry real values, not placeholders.
-    for f in both["cohort"]["files"]:
-        assert len(f["selected_sha256"]) == 64
-        assert f["runner_sha"] == ["abc123"] and f["config_version"] == [7] and f["model"] == ["m"]
-    assert len({f["selected_sha256"] for f in both["cohort"]["files"]}) == 2
+    # Provenance derived from each arm, not restated as a literal, and the hash
+    # recomputed over the SELECTED rows — hashing the raw file including ignored
+    # orphans produces a 64-char value that differs between arms and would pass a
+    # length-and-difference check while binding the wrong content.
+    import hashlib
+
+    by_name = {f["file"].split("/")[-1]: f for f in both["cohort"]["files"]}
+    for (jsonl, result_json), cfg in ((base, 7), (cand, 8)):
+        selected, _ = select_attempts(jsonl, result_json)
+        expected = hashlib.sha256(
+            _json.dumps(selected, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        got = by_name[jsonl.name]
+        assert got["selected_sha256"] == expected, "hash must bind the SELECTED rows"
+        assert got["config_version"] == [cfg] and got["model"] == [f"model-{cfg}"]
+        assert got["runner_sha"] == ["abc123"]
 
     (tmp_path / "base.jsonl").unlink()
     missing = coverage_note(candidate, {"T": -1.0}, [base, cand])
     assert "cohort incomplete" in missing["error"]
     assert "unreachable_proven" not in missing, "a partial cohort must yield no claim"
+
+
+def test_the_recorded_path_never_carries_an_absolute_location(tmp_path, monkeypatch):
+    """Two failure modes, one on each side, and both were shipped.
+
+    A path computed relative to the file's GRANDPARENT turned an external
+    `/archive/results/base.jsonl` into `results/base.jsonl` — reads as a repo file,
+    points at the wrong one. Recording the absolute path instead fixed that and broke a
+    harder rule: this record is written under `iterations/` in a public repo, and
+    AGENTS.md forbids absolute paths there because they carry a real machine's home
+    directory. The source-file grep that enforces that rule cannot see a value produced
+    at runtime, so only a test can.
+    """
+    import json as _json
+
+    import loop.observed_coverage as oc
+
+    def build(root, stem):
+        root.mkdir(parents=True, exist_ok=True)
+        (root / f"{stem}.json").write_text(_json.dumps({"tasks": {"T": {"attempts": 1}}}))
+        (root / f"{stem}.jsonl").write_text(
+            _json.dumps({"task": "T", "attempt": 0, "metrics": {}}) + "\n"
+        )
+        return root / f"{stem}.jsonl", root / f"{stem}.json"
+
+    inside = build(tmp_path / "repo" / "results", "in")
+    outside = build(tmp_path / "elsewhere", "out")
+    monkeypatch.setattr(oc, "REPO_ROOT", (tmp_path / "repo").resolve())
+
+    _, in_note = oc.select_attempts(*inside)
+    assert in_note["file"] == "results/in.jsonl", "under the root, a stable relative path"
+    assert "external" not in in_note
+
+    _, out_note = oc.select_attempts(*outside)
+    assert out_note == {**out_note, "file": "out.jsonl", "external": True}
+    blob = _json.dumps(out_note)
+    assert str(tmp_path) not in blob and "/Users/" not in blob and "/home/" not in blob
+    assert not out_note["file"].startswith("results/"), "must not claim to be a repo file"
