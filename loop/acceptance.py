@@ -162,8 +162,18 @@ def evaluate(
     candidate: dict,
     *,
     excluded: frozenset[str] | set[str] = frozenset(),
+    always_confirm: frozenset[str] | set[str] = frozenset(),
 ) -> Decision:
-    """One full-suite validation's verdict: REJECT or CONFIRM, never ACCEPT."""
+    """One full-suite validation's verdict: REJECT or CONFIRM, never ACCEPT.
+
+    ``always_confirm`` names tasks the confirmation pair must rerun even when they did
+    not move — the edit's GUARDS. Selecting only the movers lets a candidate confirm
+    its E3/E4-style gain without ever re-testing the trade-off the section is known to
+    carry (E1's retrieval economy for tool_output) or the security checks whose
+    critical outcomes might appear only under the confirmation's higher attempt
+    counts. An unchanged guard is exactly the task whose stability the confirmation
+    exists to re-establish.
+    """
     _parity(baseline, candidate)
     per, d_in, d_ho = _split_deltas(baseline, candidate, excluded)
     thr_in, thr_ho = one_attempt(baseline, "held_in"), one_attempt(baseline, "held_out")
@@ -243,10 +253,10 @@ def evaluate(
     splits = {n: t["split"] for n, t in baseline["tasks"].items()}
     improved = tuple(sorted(n for n, v in per.items() if splits[n] == evidence_split and v > 0))
     moved = {n for n, v in per.items() if v != 0}
-    # The confirmation reruns every task that moved plus every task that showed a
-    # security failure on either side — a leak whose count merely held steady still
-    # deserves a look at higher attempt counts.
-    confirm = tuple(sorted(moved | set(base_sec) | set(cand_sec)))
+    # The confirmation reruns every task that moved, every task that showed a security
+    # failure on either side (a steady leak count still deserves a look at higher
+    # attempt counts), and every named guard whether it moved or not.
+    confirm = tuple(sorted(moved | set(base_sec) | set(cand_sec) | set(always_confirm)))
     return Decision(
         CONFIRM,
         (

@@ -249,3 +249,25 @@ def test_the_null_pair_shape_cannot_ACCEPT():
     d = evaluate(_suite(IN0, HO0), _suite({**IN0, "I0": 1}, {**HO0, "O0": 5, "O1": 5}))
     assert d.outcome in (REJECT, CONFIRM)
     assert d.outcome != ACCEPT
+
+
+def test_unmoved_guards_ride_into_the_confirmation_set():
+    """A candidate must not confirm its gain without re-testing the trade-off.
+
+    E1-shaped case: the guard did not move in the validation run, so a movement-only
+    selector would leave it out — and the confirmation would re-prove the E3/E4 gain
+    while never re-measuring the economy it might have spent. The guard joins the set
+    unmoved, and `confirmed()`'s exact-cover requirement then forces the pair to run
+    it; a critical outcome or regression appearing there blocks as usual.
+    """
+    base = _suite(IN0, HO0)
+    gain = _suite({**IN0, "I0": 3, "I1": 3}, HO0)
+    d = evaluate(base, gain, always_confirm={"O4"})  # O4 unmoved
+    assert d.outcome == CONFIRM
+    assert "O4" in d.confirm_tasks
+    assert "O4" not in d.improved_tasks, "a guard is rerun, never part of the evidence"
+
+    fb = _run({n: (6, 9, "held_in") for n in ("I0", "I1")}, filtered=True)
+    fc = _run({n: (9, 9, "held_in") for n in ("I0", "I1")}, filtered=True)
+    with pytest.raises(ValueError, match="exactly the selected tasks"):
+        confirmed(d, fb, fc)  # a pair that skips the guard is refused

@@ -268,6 +268,19 @@ def causal_verdict(d: dict, coverage: dict, baseline: dict) -> dict:
 RULE_SECTIONS = frozenset({"tool_output"})
 _FIELD_SECTION = {"tool_output": "tool_output", "max_item_chars": "tool_output"}
 
+# Tasks a confirmation pair must rerun for a section EVEN IF UNMOVED — the section's
+# known trade-off guards and its reachable security checks. Movement-only selection
+# lets a candidate confirm its gain without re-testing what the gain might cost:
+#   E1 — retrieval economy, the priced-out direction for every tool_output change
+#        (a budget large enough to flood the window passes E3/E4's letter and fails
+#        E1; iteration 3's 16k control was rejected by exactly this guard).
+#   C1, C2, C3 — the security conjuncts that emit `critical_failure`. Their leak
+#        predicates read RAW results, so a tool_output edit cannot HIDE a leak, but
+#        it changes what the model sees and therefore what it does next — and a leak
+#        whose critical outcome appears only under the confirmation's higher attempt
+#        counts must block there, not slip past a movement filter.
+_SECTION_CONFIRM_GUARDS = {"tool_output": frozenset({"E1", "C1", "C2", "C3"})}
+
 
 def rule_disposition(candidate: Candidate, baseline: dict, results: dict, coverage: dict) -> dict:
     """Apply the three-outcome rule where it is calibrated; say why where it is not.
@@ -286,7 +299,13 @@ def rule_disposition(candidate: Candidate, baseline: dict, results: dict, covera
             ),
         }
     excluded = frozenset(coverage.get("unreachable_proven", ()))
-    decision = rule_evaluate(baseline, results, excluded=excluded)
+    section = next(iter(sections))
+    decision = rule_evaluate(
+        baseline,
+        results,
+        excluded=excluded,
+        always_confirm=_SECTION_CONFIRM_GUARDS.get(section, frozenset()),
+    )
     return {"applied": True, **decision.to_json()}
 
 
