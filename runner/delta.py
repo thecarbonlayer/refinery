@@ -9,10 +9,41 @@ majority vote.
 
 from __future__ import annotations
 
+from fractions import Fraction
+
+
+def _exact(task: dict) -> Fraction:
+    """A task's pass rate as an EXACT fraction of its integer counts.
+
+    Never `pass_fraction`. That field is written rounded to 4 places for display
+    (`suite.py`), and summing rounded values loses information the counts still have:
+    2/3 stores as 0.6667 while two thirds sum to 0.3333 + 0.3333 = 0.6666. Two runs
+    with IDENTICAL integer counts then reported Δ_in = -5.56e-06 — a false regression
+    signal manufactured by the storage format, which the acceptance rule read as a real
+    one because it tests `>= 0`. Measured on six unchanged runs: it fired on 2 of 15
+    pairs, and correcting it flips both from REJECT to ACCEPT.
+
+    Falls back to the stored fraction only for results written before counts were
+    recorded, so an old baseline still compares rather than crashing.
+    """
+    if "passes" in task and task.get("attempts"):
+        return Fraction(int(task["passes"]), int(task["attempts"]))
+    return Fraction(task["pass_fraction"]).limit_denominator(10_000)
+
 
 def split_rate(results: dict, split: str) -> float:
-    fracs = [t["pass_fraction"] for t in results["tasks"].values() if t["split"] == split]
-    return sum(fracs) / len(fracs) if fracs else 0.0
+    """Mean of per-task pass rates, each task weighing equally.
+
+    Computed exactly and converted to float ONCE, at the boundary. Every intermediate
+    stays a `Fraction`, so a set of movements that cancels lands on exactly 0.0 rather
+    than on a tiny negative the rule would reject.
+    """
+    return float(exact_split_rate(results, split))
+
+
+def exact_split_rate(results: dict, split: str) -> Fraction:
+    fracs = [_exact(t) for t in results["tasks"].values() if t["split"] == split]
+    return sum(fracs) / len(fracs) if fracs else Fraction(0)
 
 
 def acceptance(delta_in: float, delta_ho: float) -> dict:
@@ -77,10 +108,12 @@ def delta(baseline: dict, candidate: dict) -> dict:
             "verifier version mismatch — results were produced by different "
             "runner versions; re-measure"
         )
-    d_in = split_rate(candidate, "held_in") - split_rate(baseline, "held_in")
-    d_ho = split_rate(candidate, "held_out") - split_rate(baseline, "held_out")
+    # Exact throughout, floated once at the end. Subtracting two rounded means is what
+    # produced a -5.56e-06 "regression" between runs with identical integer counts.
+    d_in = float(exact_split_rate(candidate, "held_in") - exact_split_rate(baseline, "held_in"))
+    d_ho = float(exact_split_rate(candidate, "held_out") - exact_split_rate(baseline, "held_out"))
     per_task = {
-        name: candidate["tasks"][name]["pass_fraction"] - baseline["tasks"][name]["pass_fraction"]
+        name: float(_exact(candidate["tasks"][name]) - _exact(baseline["tasks"][name]))
         for name in sorted(base_names)
     }
     regressions = {name: change for name, change in per_task.items() if change < 0}
@@ -94,8 +127,7 @@ def delta(baseline: dict, candidate: dict) -> dict:
     catastrophic_regressions = {
         name: change
         for name, change in per_task.items()
-        if baseline["tasks"][name]["pass_fraction"] == 1.0
-        and candidate["tasks"][name]["pass_fraction"] == 0.0
+        if _exact(baseline["tasks"][name]) == 1 and _exact(candidate["tasks"][name]) == 0
     }
     aggregate = acceptance(d_in, d_ho)
     base_summary = baseline.get("summary", {})

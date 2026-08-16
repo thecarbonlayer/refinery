@@ -293,3 +293,67 @@ def test_delta_refuses_filtered_results():
         delta(filtered, BASE)
     with pytest.raises(ValueError, match="filtered"):
         delta(BASE, filtered)
+
+
+def _run(counts: dict[str, tuple[int, int, str]]) -> dict:
+    """A results dict from integer counts, with `pass_fraction` stored ROUNDED exactly
+    as `suite.py` writes it — the rounding is the thing under test."""
+    return {
+        "fingerprint": {"runner_sha": "x", "model": "m", "config_version": 1, "dirty_sha": None},
+        "tasks": {
+            n: {
+                "split": s,
+                "attempts": a,
+                "passes": p,
+                "pass_fraction": round(p / a, 4),
+            }
+            for n, (p, a, s) in counts.items()
+        },
+    }
+
+
+def test_movements_that_cancel_give_exactly_zero_not_a_tiny_negative():
+    """One task up an attempt, another down an attempt: the split change is exactly 0.
+
+    It was not. `pass_fraction` is stored rounded to 4 places and `split_rate` summed
+    those, so 2/3 became 0.6667 while two thirds summed to 0.3333 + 0.3333 = 0.6666.
+    Two runs with IDENTICAL integer counts reported Δ_in = -5.56e-06, and the rule
+    tests `>= 0`, so a storage-format artefact was read as a real regression. Measured
+    across six unchanged runs it fired on 2 of 15 pairs.
+    """
+    from runner.delta import delta
+
+    before = _run({"T1": (2, 3, "held_in"), "T2": (1, 3, "held_in"), "H": (5, 5, "held_out")})
+    after = _run({"T1": (1, 3, "held_in"), "T2": (2, 3, "held_in"), "H": (5, 5, "held_out")})
+
+    d = delta(before, after)
+    assert d["delta_in"] == 0.0, f"cancelling movements must be exactly 0, got {d['delta_in']!r}"
+    # Not merely close: the sign bit matters, because the rule tests `>= 0`.
+    assert not (d["delta_in"] < 0)
+    assert d["delta_ho"] == 0.0
+
+
+def test_identical_integer_counts_give_a_zero_delta_whatever_the_rounding():
+    """Same counts on both sides must mean no movement, for every third-shaped rate.
+
+    Thirds are where 4-place rounding loses the most, and 3 attempts is the held-in
+    default, so this is the shipped case rather than a corner.
+    """
+    from runner.delta import delta
+
+    counts = {f"T{i}": (i % 4, 3, "held_in") for i in range(1, 9)}
+    counts["H"] = (3, 5, "held_out")
+    d = delta(_run(counts), _run(dict(counts)))
+    assert d["delta_in"] == 0.0 and d["delta_ho"] == 0.0
+    assert all(v == 0.0 for v in d["per_task"].values())
+
+
+def test_a_real_one_attempt_movement_still_registers():
+    """The fix must not flatten genuine movement into zero as well."""
+    from runner.delta import delta
+
+    before = _run({"T": (2, 3, "held_in"), "H": (4, 5, "held_out")})
+    after = _run({"T": (3, 3, "held_in"), "H": (5, 5, "held_out")})
+    d = delta(before, after)
+    assert abs(d["delta_in"] - 1 / 3) < 1e-12
+    assert abs(d["delta_ho"] - 1 / 5) < 1e-12
