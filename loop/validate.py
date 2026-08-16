@@ -22,7 +22,7 @@ from pathlib import Path
 
 from loop.artifacts import Candidate, ValidationRecord
 from loop.config_edit import CONFIG_REL, apply_candidate
-from loop.observed_coverage import cohort, observed_activity, partition_deltas
+from loop.observed_coverage import activity_from_rows, partition_deltas, select_attempts
 from loop.surface_sweep import sweep as run_sweep
 from runner.carbon_env import CARBON_ROOT, _git
 from runner.delta import delta
@@ -115,7 +115,9 @@ def run_harness_gates(carbon_root: Path = CARBON_ROOT, editor_root: Path = EDITO
 
 
 def coverage_note(
-    candidate: Candidate, per_task: dict[str, float], cohort_paths: list[Path] | None = None
+    candidate: Candidate,
+    per_task: dict[str, float],
+    cohort_paths: list[tuple[Path, Path]] | None = None,
 ) -> dict:
     """Split this candidate's per-task movements by whether the edited knobs reach them.
 
@@ -137,13 +139,22 @@ def coverage_note(
     # `delta` refuses to compare results across runner versions, and a coverage claim
     # assembled across them is the same mistake with none of the refusal. It also let a
     # months-old candidate permanently seed activity for later validations.
-    paths = [p for p in (cohort_paths or []) if p.exists()]
-    if not paths:
+    pairs = [(j, r) for j, r in (cohort_paths or []) if j.exists() and r.exists()]
+    if not pairs:
         return {"knobs": knobs, "error": "no cohort supplied; coverage not derived"}
+    rows: list[dict] = []
+    provenance: list[dict] = []
     try:
-        activity = observed_activity(paths)
-    except (OSError, json.JSONDecodeError) as exc:
-        return {"knobs": knobs, "error": f"cohort unreadable: {exc}"}
+        # Bound to the attempts each result JSON SUMMARIZES, not to whatever the log
+        # holds. `delta` compares the summaries; a coverage claim derived from rows it
+        # never saw describes a different cohort under the same filename.
+        for jsonl, result_json in pairs:
+            selected, note = select_attempts(jsonl, result_json)
+            rows += selected
+            provenance.append(note)
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        return {"knobs": knobs, "error": f"cohort unusable: {exc}"}
+    activity = activity_from_rows(rows)
     # Unreachable by EVERY edited knob. A candidate editing two knobs reaches a task if
     # EITHER does, so the sets intersect. The accumulator starts at None rather than {}
     # because an empty first set is meaningful — it means that knob reaches everything,
@@ -172,7 +183,7 @@ def coverage_note(
         "evidence": evidence,
         "unreachable_proven": proven,
         "unreachable_probable": probable,
-        "cohort": cohort(paths),
+        "cohort": {"files": provenance},
         "note": (
             "`unreachable_proven` movements are on tasks NO value of the edited knob(s) "
             "can affect. `unreachable_probable` is weaker: the knob showed no activity "
@@ -244,9 +255,14 @@ def validate_candidate(
     # edited `tool_output`. This does not change the verdict — the acceptance rule is
     # what it is, and quietly reweighting it here would be a second, hidden rule — it
     # records what the verdict was made of, next to the verdict.
-    baseline_jsonl = Path(baseline_path).with_suffix(".jsonl")
+    baseline_json = Path(baseline_path)
     coverage = coverage_note(
-        candidate, d["per_task"], [baseline_jsonl, results_dir / f"{label}.jsonl"]
+        candidate,
+        d["per_task"],
+        [
+            (baseline_json.with_suffix(".jsonl"), baseline_json),
+            (results_dir / f"{label}.jsonl", results_dir / f"{label}.json"),
+        ],
     )
     # Count MOVEMENTS, not tasks. `per_task` carries every task including the unmoved
     # ones, so reporting its length overstated how many actually moved.

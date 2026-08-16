@@ -15,9 +15,11 @@ import pytest
 from loop.knob_coverage import DELIBERATE_NON_OBSERVERS, KNOB_COVERAGE
 from loop.observed_coverage import (
     REQUIRES,
+    activity_from_rows,
     contradicted_observers,
     observed_activity,
     partition_deltas,
+    select_attempts,
     unlisted_with_activity,
     unreachable,
 )
@@ -27,6 +29,9 @@ from loop.observed_coverage import (
 # now-strict "fully recorded" rule that mixture leaves almost everything unknown. A
 # coverage claim is only meaningful about a cohort, so the fixture names one.
 COHORT = ["results/baseline-r5-v7.jsonl", "results/cand-tool-output-offload.jsonl"]
+# `coverage_note` takes (attempt log, result JSON) pairs, because the log may hold rows
+# the summary excludes and only the summarized attempts are the cohort `delta` compared.
+COHORT_PAIRS = [(Path(f), Path(f).with_suffix(".json")) for f in COHORT]
 
 
 @pytest.fixture(scope="module")
@@ -134,39 +139,32 @@ def test_a_false_observer_row_is_caught(activity):
         assert contradicted_observers(activity)["tool_output"]["proven"] == ["A1"]
 
 
-def test_the_review_queue_honours_the_argued_exclusions(activity):
-    """A queue that re-raises settled decisions every run is one nobody reads, and the
-    single genuinely unreviewed entry hides among them. C1/C2 are the clearest case:
-    they read the RAW tool result on purpose, so no truncation value can touch them."""
+def test_the_review_queue_is_not_silenced_by_a_claim_known_to_be_false(activity):
+    """A suppression entry is executable, so a wrong one silences its own warning.
+
+    `unlisted_with_activity()` drops every task named in `DELIBERATE_NON_OBSERVERS`.
+    A2, C1, C2 and C3 were all in there on `tool_output` and all four rationales were
+    shown false or half-argued: A2 states a prior the registry contradicts and reasons
+    only about budget on a knob that also carries strategy; C1/C2 protect their leak
+    predicate but not the functional reply carbon sends the truncated result to; C3
+    scans files but the model reads tool results before deciding what to write. They
+    are removed, so the queue raises them again.
+
+    Removing them does NOT promote them into `KNOB_COVERAGE`. That distinction is the
+    whole point: suppressing an unresolved warning is a defect, promoting a task to
+    observer is a decision about what the loop may tune.
+    """
+    assert DELIBERATE_NON_OBSERVERS.get("tool_output", {}) == {}
     queue = unlisted_with_activity(activity)
-    for task in ("A2", "C1", "C2", "G5"):
-        assert task in DELIBERATE_NON_OBSERVERS["tool_output"]
-        assert task not in queue.get("tool_output", [])
+    assert {"A2", "C1", "C2", "C3"} <= set(queue["tool_output"])
 
-    # G5 is the entry this queue was built to find: added as "the observer that made
-    # compaction-v4 measurable" and never entered the compaction rows. It was queued,
-    # it was argued, and it is now IN those rows — so it must have left the queue.
-    # Asserting it is still there would pin the bug rather than the mechanism.
-    assert "G5" in KNOB_COVERAGE["compaction"]["observers"]
-    assert "G5" not in queue.get("compaction", [])
-    # GUARD, not miner, on both compaction rows. Carbon's checkpoint lifts file paths out
-    # of `tool_calls` deterministically and reattaches them independently of the summary
-    # prose — the same fact that makes G5 a good STRATEGY observer means better wording
-    # cannot mine it. It is also 3/3 in the v7 baseline, so there is nothing to turn
-    # green. It was first added as a miner; that was wrong on both counts.
-    for row in ("compaction", "compaction_prompt"):
-        assert "G5" in KNOB_COVERAGE[row]["guards"]
-        assert "G5" not in KNOB_COVERAGE[row]["miners"]
-
-    # The mechanism must still be able to fire, or emptying the queue would look
-    # identical to breaking it.
-    stripped = {
-        role: tuple(t for t in tasks if t != "G4")
-        for role, tasks in KNOB_COVERAGE["compaction"].items()
-    }
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setitem(KNOB_COVERAGE, "compaction", stripped)
-        assert "G4" in unlisted_with_activity(activity)["compaction"]
+    # The remaining entries are argued from a mechanism carbon's code makes true, and
+    # must still suppress — a queue that raises settled decisions every run is one
+    # nobody reads.
+    for knob, tasks in DELIBERATE_NON_OBSERVERS.items():
+        for task in tasks:
+            assert task not in queue.get(knob, []), f"{knob}/{task} argued but still queued"
+    assert "H2" in DELIBERATE_NON_OBSERVERS["compaction"]
 
 
 def test_every_argued_exclusion_names_a_knob_that_exists_and_gives_a_reason():
@@ -202,9 +200,7 @@ def test_a_candidate_editing_two_knobs_is_unreachable_only_where_BOTH_are(activi
             regression_risk="g",
         )
 
-    from pathlib import Path
-
-    paths = [Path(f) for f in COHORT]
+    paths = COHORT_PAIRS
     per_task = {"A1": -1.0, "B2": -0.5}
     # `tool_output` alone cannot reach A1 (no tool registry at all).
     note = coverage_note(candidate("tool_output"), per_task, paths)
@@ -431,8 +427,8 @@ def test_a_task_proven_for_one_knob_and_probable_for_another_is_not_evidence():
         # compaction, since trigger_fraction could create them). Y is reached by both.
         mp.setattr(
             validate_mod,
-            "observed_activity",
-            lambda paths: {
+            "activity_from_rows",
+            lambda rows: {
                 "X": {"tool_calls": 0.0, "compactions": 0.0},
                 "Y": {"tool_calls": 4.0, "compactions": 2.0},
             },
@@ -447,8 +443,166 @@ def test_a_task_proven_for_one_knob_and_probable_for_another_is_not_evidence():
             expected_effect="e",
             regression_risk="g",
         )
-        note = validate_mod.coverage_note(cand, {"X": -1.0, "Y": 0.5}, [Path(COHORT[0])])
+        note = validate_mod.coverage_note(cand, {"X": -1.0, "Y": 0.5}, COHORT_PAIRS)
 
     assert note["evidence"] == {"Y": 0.5}, "X reached neither knob and must not be evidence"
     assert note["unreachable_proven"] == {}, "only ONE knob proves X, so the pair cannot"
     assert note["unreachable_probable"] == {"X": -1.0}
+
+
+def test_validate_candidate_writes_a_record_carrying_the_cohort_and_the_exclusion(tmp_path):
+    """End to end: validate → record → disk → read back.
+
+    Every earlier test stopped short of one seam or another, and each gap was real. The
+    serializer dropped two fields for as long as they existed. The "written artifact"
+    test round-tripped in memory. Dropping the candidate log from the cohort wiring, or
+    setting `coverage={}` on the record, both survived the suite. This asserts the whole
+    path: that the cohort names BOTH logs, that the exclusion computed from them lands in
+    the record, and that it reaches the file.
+    """
+    import json as _json
+
+    from loop.artifacts import Candidate, write_validation_record
+    from loop.validate import validate_candidate
+
+    tasks = {"A1": {"split": "held_in"}, "E2": {"split": "held_out"}}
+
+    def write_run(stem: str, tool_calls: dict[str, float]) -> None:
+        summary = {
+            "fingerprint": {"runner_sha": "deadbeef", "model": "m"},
+            "tasks": {
+                name: {**meta, "attempts": 1, "passes": 1, "pass_fraction": 1.0}
+                for name, meta in tasks.items()
+            },
+        }
+        (tmp_path / f"{stem}.json").write_text(_json.dumps(summary))
+        (tmp_path / f"{stem}.jsonl").write_text(
+            "\n".join(
+                _json.dumps(
+                    {
+                        "task": name,
+                        "attempt": 0,
+                        "runner_sha": "deadbeef",
+                        "config_version": 7,
+                        "model": "m",
+                        "metrics": {"tool_calls": tool_calls[name]},
+                    }
+                )
+                for name in tasks
+            )
+            + "\n"
+        )
+
+    write_run("base", {"A1": 0.0, "E2": 2.0})
+    write_run("cand", {"A1": 0.0, "E2": 2.0})
+
+    candidate = Candidate(
+        id="x",
+        cluster_id="CL",
+        proposer="p",
+        proposer_detail="d",
+        fields={"tool_output": {"old": 0, "new": 1}},
+        rationale="r",
+        expected_effect="e",
+        regression_risk="g",
+    )
+    # The carbon-side steps have no injection seam and need a real git tree; they are
+    # not what this test is about, so they are stubbed at the module boundary.
+    import loop.validate as validate_mod
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(validate_mod, "require_clean_tree", lambda *a, **k: None)
+        mp.setattr(validate_mod, "revert_config", lambda *a, **k: None)
+        mp.setattr(validate_mod, "apply_candidate", lambda *a, **k: {"version": 8})
+        record = validate_candidate(
+            candidate,
+            baseline_path=tmp_path / "base.json",
+            label="cand",
+            run_runner=lambda *a, **k: None,
+            run_gates=lambda *a, **k: {"passed": True, "checks": {}},
+            results_dir=tmp_path,
+            carbon_root=tmp_path,
+            log=lambda *_: None,
+        )
+
+    written = _json.loads(write_validation_record(record, tmp_path / "out.json").read_text())
+    files = {f["file"].split("/")[-1] for f in written["coverage"]["cohort"]["files"]}
+    assert files == {"base.jsonl", "cand.jsonl"}, "both logs must be named, not just one"
+    # A1 makes no tool calls in either arm, so `tool_output` provably cannot reach it.
+    assert "A1" in written["coverage"]["unreachable_proven"]
+    assert "E2" in written["coverage"]["evidence"]
+    assert all(f["rows_selected"] == 2 for f in written["coverage"]["cohort"]["files"])
+
+
+def _run_files(tmp_path, stem, attempts, rows):
+    import json as _json
+
+    (tmp_path / f"{stem}.json").write_text(
+        _json.dumps({"tasks": {"T": {"split": "held_in", "attempts": attempts}}})
+    )
+    (tmp_path / f"{stem}.jsonl").write_text("\n".join(_json.dumps(r) for r in rows) + "\n")
+    return tmp_path / f"{stem}.jsonl", tmp_path / f"{stem}.json"
+
+
+def test_an_orphaned_attempt_the_summary_excludes_is_not_read(tmp_path):
+    """The log is not the cohort. The runner deliberately leaves higher-numbered
+    attempts in place and ignores them when a later run uses a smaller `--attempts`
+    (`runner/run.py` logs "prior record(s) with attempt index >= n ignored"). `delta`
+    compares the SUMMARIES, so a row it never saw must not decide a coverage claim.
+
+    Both failure directions matter. An orphan with activity makes an inactive
+    comparison look reachable; an orphan with no telemetry voids an otherwise complete
+    metric. This pins the first, which is the one that discards real evidence.
+    """
+    jsonl, result = _run_files(
+        tmp_path,
+        "r",
+        attempts=2,
+        rows=[
+            {"task": "T", "attempt": 0, "metrics": {"tool_calls": 0.0}},
+            {"task": "T", "attempt": 1, "metrics": {"tool_calls": 0.0}},
+            # Orphan: a leftover from an earlier, longer run. It shows activity.
+            {"task": "T", "attempt": 2, "metrics": {"tool_calls": 9.0}},
+        ],
+    )
+    rows, note = select_attempts(jsonl, result)
+
+    assert note["rows_selected"] == 2 and note["rows_in_file"] == 3
+    assert unreachable("tool_output", activity_from_rows(rows)) == {"T"}, (
+        "the orphan's activity must not make a task the summary saw as inactive look reachable"
+    )
+
+
+def test_a_duplicated_attempt_is_refused_rather_than_deduplicated(tmp_path):
+    """A repeated `(task, attempt)` key means the log does not describe one run.
+
+    Keeping either copy picks a winner with no rule behind it, and the two copies can
+    disagree about exactly the metric the exclusion turns on. Refusing surfaces it;
+    `coverage_note` reports the cohort as unusable rather than deriving from a log it
+    cannot interpret.
+    """
+    jsonl, result = _run_files(
+        tmp_path,
+        "d",
+        attempts=1,
+        rows=[
+            {"task": "T", "attempt": 0, "metrics": {"tool_calls": 0.0}},
+            {"task": "T", "attempt": 0, "metrics": {"tool_calls": 7.0}},
+        ],
+    )
+    with pytest.raises(ValueError, match="duplicate attempt"):
+        select_attempts(jsonl, result)
+
+
+def test_a_summarized_attempt_missing_from_the_log_is_refused(tmp_path):
+    """The other direction: a summary that claims attempts the log does not carry.
+    Deriving from the rows that happen to be present would quietly answer a question
+    about a different, smaller cohort than the one `delta` compared."""
+    jsonl, result = _run_files(
+        tmp_path,
+        "m",
+        attempts=3,
+        rows=[{"task": "T", "attempt": 0, "metrics": {"tool_calls": 0.0}}],
+    )
+    with pytest.raises(ValueError, match="summarized but not logged"):
+        select_attempts(jsonl, result)

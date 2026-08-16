@@ -36,6 +36,7 @@ changes. This measures nothing and must never cost a re-measurement.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from dataclasses import dataclass
@@ -109,6 +110,74 @@ REQUIRES: dict[str, Requirement] = {
 }
 
 
+def select_attempts(jsonl: Path, result_json: Path) -> tuple[list[dict], dict]:
+    """The attempt rows a result JSON actually summarizes, plus provenance for them.
+
+    A JSONL is not the same cohort as its result JSON. The runner deliberately leaves
+    higher-numbered attempts in place and ignores them when a later run uses a smaller
+    ``--attempts`` (``runner/run.py`` logs "prior record(s) with attempt index >= n
+    ignored"). Reading the raw file therefore lets a row `delta` never saw decide a
+    coverage claim: an ignored orphan with no telemetry can void an otherwise complete
+    metric, and one with activity can make an inactive comparison look reachable — while
+    `coverage.cohort` truthfully names the file.
+
+    Duplicates are refused rather than deduplicated. A repeated ``(task, attempt)`` key
+    means the log does not describe one run, and silently keeping either copy would pick
+    a winner with no rule behind it.
+    """
+    summary = json.loads(result_json.read_text())["tasks"]
+    wanted = {(name, i) for name, t in summary.items() for i in range(int(t["attempts"]))}
+    raw = [json.loads(line) for line in jsonl.read_text().splitlines() if line.strip()]
+    seen: set[tuple[str, int]] = set()
+    rows: list[dict] = []
+    for row in raw:
+        key = (row.get("task"), row.get("attempt"))
+        if key not in wanted:
+            continue
+        if key in seen:
+            raise ValueError(
+                f"{jsonl.name}: duplicate attempt {key}; log does not describe one run"
+            )
+        seen.add(key)
+        rows.append(row)
+    missing = wanted - seen
+    if missing:
+        raise ValueError(f"{jsonl.name}: {len(missing)} attempts summarized but not logged")
+    digest = hashlib.sha256(
+        json.dumps([r for r in rows], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return rows, {
+        "file": str(jsonl.relative_to(jsonl.parents[1])),
+        "rows_selected": len(rows),
+        "rows_in_file": len(raw),
+        "selected_sha256": digest[:32],
+        "runner_sha": sorted({str(r.get("runner_sha")) for r in rows}),
+        "config_version": sorted({r["config_version"] for r in rows if "config_version" in r}),
+        "model": sorted({str(r["model"]) for r in rows if r.get("model")}),
+    }
+
+
+def activity_from_rows(rows: list[dict]) -> dict[str, dict[str, float]]:
+    """Peak per metric per task, keeping only metrics recorded on EVERY attempt."""
+    peaks: dict[str, dict[str, float]] = {}
+    attempts: dict[str, int] = {}
+    present: dict[str, dict[str, int]] = {}
+    for row in rows:
+        task = row.get("task")
+        if not task:
+            continue
+        attempts[task] = attempts.get(task, 0) + 1
+        seen, counts = peaks.setdefault(task, {}), present.setdefault(task, {})
+        for metric, value in (row.get("metrics") or {}).items():
+            if isinstance(value, int | float):
+                seen[metric] = max(seen.get(metric, 0.0), float(value))
+                counts[metric] = counts.get(metric, 0) + 1
+    return {
+        task: {m: v for m, v in metrics.items() if present[task].get(m, 0) == attempts[task]}
+        for task, metrics in peaks.items()
+    }
+
+
 def observed_activity(paths: list[Path]) -> dict[str, dict[str, float]]:
     """Peak value of each metric per task, across every attempt in every run given.
 
@@ -122,27 +191,10 @@ def observed_activity(paths: list[Path]) -> dict[str, dict[str, float]]:
     and was reported "PROVABLY unreachable" on telemetry that had proven nothing. Partial
     recording is now unknown, and unknown is never an exclusion.
     """
-    peaks: dict[str, dict[str, float]] = {}
-    attempts: dict[str, int] = {}
-    present: dict[str, dict[str, int]] = {}
+    rows: list[dict] = []
     for path in paths:
-        for line in path.read_text().splitlines():
-            if not line.strip():
-                continue
-            row = json.loads(line)
-            task = row.get("task")
-            if not task:
-                continue
-            attempts[task] = attempts.get(task, 0) + 1
-            seen, counts = peaks.setdefault(task, {}), present.setdefault(task, {})
-            for metric, value in (row.get("metrics") or {}).items():
-                if isinstance(value, int | float):
-                    seen[metric] = max(seen.get(metric, 0.0), float(value))
-                    counts[metric] = counts.get(metric, 0) + 1
-    return {
-        task: {m: v for m, v in metrics.items() if present[task].get(m, 0) == attempts[task]}
-        for task, metrics in peaks.items()
-    }
+        rows += [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return activity_from_rows(rows)
 
 
 def cohort(paths: list[Path]) -> dict:

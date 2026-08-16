@@ -338,37 +338,25 @@ CAPABILITY_GAPS: dict[str, str] = {}
 # convenience. An entry here is a claim that NO legal value of the knob can move the
 # task, despite the task visibly doing the thing the knob acts on.
 DELIBERATE_NON_OBSERVERS: dict[str, dict[str, str]] = {
-    "tool_output": {
-        # ⚠️ THIS EXCLUSION IS KNOWN WRONG, kept visible rather than deleted quietly.
-        # Two errors. The registry prior is `pass`, not `fail` (`cluster_a.py`), so the
-        # "cannot drop further" half is simply false. And the budget survival argument
-        # covers only the BUDGET: `tool_output` also carries the STRATEGY, and a
-        # proposed `keep_head` drops the tail where A2's sentinel sits. A2 is a real
-        # guard. Promoting it changes what the loop may tune, so it is flagged for a
-        # decision instead of edited in — but no one should read this row as settled.
-        "A2": (
-            "STALE — states the prior is `fail` when the registry says `pass`, and "
-            "argues only about budget when the strategy on the same knob can drop the "
-            "tail A2 depends on. See the warning above; this needs a decision, not a "
-            "tuple edit."
-        ),
-        "C1": (
-            "The leak predicate reads the RAW tool result (cluster_c's `recording_tool` "
-            "wiring), precisely so a candidate cannot raise a containment score by "
-            "clamping away the evidence."
-        ),
-        "C2": (
-            "Same raw-result wiring as C1, and for the same reason: C2 grades whether a "
-            "secret escaped, so reading the truncated copy would let a candidate score "
-            "containment by shrinking the budget until the evidence was cut away."
-        ),
-        "G5": (
-            "Its only tool is `write_file`, whose result is `wrote <path> (N chars)` — "
-            "about 35 characters against a 4,000 budget. Even the smallest legal budget "
-            "could not touch what G5 grades, since its verdict reads the file list off "
-            "the tool CALLS and never off their results."
-        ),
-    },
+    # `tool_output` has NO entries, and the three that were here are gone rather than
+    # annotated. This set is executable: `unlisted_with_activity()` removes every task
+    # named here from its review queue, so an entry known to be wrong does not merely
+    # sit there being wrong — it actively silences the warning about itself.
+    #
+    #   A2 — claimed a prior of `fail` where the registry says `pass`, and argued only
+    #        about the budget while the same knob carries the STRATEGY: a proposed
+    #        `keep_head` drops the tail its sentinel sits in.
+    #   C1, C2 — raw-result capture protects their LEAK predicate, which is the half the
+    #        rationale addressed. Both verdicts also require a correct functional reply,
+    #        and carbon sends the post-policy truncated result back to the model, so a
+    #        legal value can move the other half.
+    #   C3 — the verifier scans files, but the model consumes tool results before
+    #        deciding what to write, so the causal path survives. Iteration 3's 16k
+    #        candidate moved C3 by +0.4.
+    #
+    # Removing them does NOT promote them into `KNOB_COVERAGE` — that would be a
+    # decision about what the loop may tune. It only stops suppressing an unresolved
+    # warning, which is a cleanup and was mine to make.
     "compaction": {
         "H2": (
             "Forces overflow with an injected error and is invariant to strategy, "
