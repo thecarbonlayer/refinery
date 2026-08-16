@@ -121,14 +121,27 @@ def test_the_review_queue_honours_the_argued_exclusions(activity):
     single genuinely unreviewed entry hides among them. C1/C2 are the clearest case:
     they read the RAW tool result on purpose, so no truncation value can touch them."""
     queue = unlisted_with_activity(activity)
-    for task in ("A2", "C1", "C2"):
+    for task in ("A2", "C1", "C2", "G5"):
         assert task in DELIBERATE_NON_OBSERVERS["tool_output"]
         assert task not in queue.get("tool_output", [])
 
-    # And it must still surface the one an audit found by hand: G5 was added as "the
-    # observer that made compaction-v4 measurable" and never entered the compaction rows.
-    assert "G5" in queue["compaction"]
-    assert "G5" in queue["compaction_prompt"]
+    # G5 is the entry this queue was built to find: added as "the observer that made
+    # compaction-v4 measurable" and never entered the compaction rows. It was queued,
+    # it was argued, and it is now IN those rows — so it must have left the queue.
+    # Asserting it is still there would pin the bug rather than the mechanism.
+    assert "G5" in KNOB_COVERAGE["compaction"]["observers"]
+    assert "G5" in KNOB_COVERAGE["compaction"]["miners"]
+    assert "G5" not in queue.get("compaction", [])
+
+    # The mechanism must still be able to fire, or emptying the queue would look
+    # identical to breaking it.
+    stripped = {
+        role: tuple(t for t in tasks if t != "G4")
+        for role, tasks in KNOB_COVERAGE["compaction"].items()
+    }
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setitem(KNOB_COVERAGE, "compaction", stripped)
+        assert "G4" in unlisted_with_activity(activity)["compaction"]
 
 
 def test_every_argued_exclusion_names_a_knob_that_exists_and_gives_a_reason():

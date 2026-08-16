@@ -84,9 +84,15 @@ _TOOL_RESULT_READERS = ("D3", "E1", "E2", "E3", "E4", "F1", "F2", "G3")
 # Every task that makes any tool call at all, so the per-turn round budget binds
 # it. A different mechanism from result truncation, and therefore a different set
 # — sharing one list between the two was a false claim about both.
+# G5 was missing here until the derived coverage map (`loop/observed_coverage.py`)
+# flagged it against the recorded runs: it registers `write_file_tool` and makes two to
+# three calls per attempt. It belongs for the reason the list states — a per-turn round
+# budget binds anything that takes rounds, and a legal `max_tool_steps` of 1 or 2 would
+# bind G5. This is what a hand-maintained table costs: the row was added for compaction
+# and nobody re-read this one.
 _TOOL_USERS = (
     "A2", "B1", "B2", "B3", "C1", "C2", "C3", "D1", "D2", "D3",
-    "E1", "E2", "E3", "E4", "F1", "F2", "G3",
+    "E1", "E2", "E3", "E4", "F1", "F2", "G3", "G5",
 )  # fmt: skip
 
 KNOB_COVERAGE: dict[str, dict[str, tuple[str, ...]]] = {
@@ -160,9 +166,21 @@ KNOB_COVERAGE: dict[str, dict[str, tuple[str, ...]]] = {
     # mining uses held-in evidence only: G2 is held-out, so tuning against it spends
     # the generalization test. G4 is the held-in counterpart and carries a different
     # trajectory shape, so passing it does not entail passing G2.
+    #
+    # G5 added 2026-08-15, after the derived coverage map flagged it against the runs.
+    # Its own commit calls it "the observer that made compaction-v4 measurable" and it
+    # never entered this row. The claim: G5 runs at a 900-token limit and requires at
+    # least two compactions, and the state it grades is not STATED in conversation the
+    # way G4's is — the agent calls `write_file` itself, so the file list exists only as
+    # a property of the tool calls it made. A strategy that lifts that list out of the
+    # tool calls and re-attaches it passes; one that leaves it to the summarizer's prose
+    # does not. That is a discrimination BETWEEN strategies, which is what this row is
+    # for. Held-in with an `uncertain` prior, so it qualifies as a miner. Not a guard,
+    # for the same reason G4 is not: an `uncertain` prior makes a weak one, and G2
+    # already carries that role with the trajectory shape G5 lacks.
     "compaction": {
-        "observers": ("A1", "G2", "G4"),
-        "miners": ("G4",),
+        "observers": ("A1", "G2", "G4", "G5"),
+        "miners": ("G4", "G5"),
         "guards": ("A1", "G2"),
     },
     # Same observers, and for a sharper reason: H2 detects the summarizer by
@@ -170,8 +188,8 @@ KNOB_COVERAGE: dict[str, dict[str, tuple[str, ...]]] = {
     # construction makes it blind to the knob. `tests/test_registry.py` asserts
     # that invariance directly.
     "compaction_prompt": {
-        "observers": ("A1", "G2", "G4"),
-        "miners": ("G4",),
+        "observers": ("A1", "G2", "G4", "G5"),
+        "miners": ("G4", "G5"),
         "guards": ("A1", "G2"),
     },
     # `verify_attempts` is gated on a test command in the task's instruction root,
@@ -258,6 +276,12 @@ DELIBERATE_NON_OBSERVERS: dict[str, dict[str, str]] = {
             "Same raw-result wiring as C1, and for the same reason: C2 grades whether a "
             "secret escaped, so reading the truncated copy would let a candidate score "
             "containment by shrinking the budget until the evidence was cut away."
+        ),
+        "G5": (
+            "Its only tool is `write_file`, whose result is `wrote <path> (N chars)` — "
+            "about 35 characters against a 4,000 budget. Even the smallest legal budget "
+            "could not touch what G5 grades, since its verdict reads the file list off "
+            "the tool CALLS and never off their results."
         ),
     },
     "compaction": {
