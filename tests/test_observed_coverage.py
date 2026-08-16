@@ -184,3 +184,42 @@ def test_a_candidate_editing_two_knobs_is_unreachable_only_where_BOTH_are(activi
     both = coverage_note(candidate("tool_output", "system_prompt"), per_task)
     assert both["unreachable"] == {}
     assert set(both["evidence"]) == {"A1", "B2"}
+
+
+def test_the_plausibility_floor_is_derived_and_applied_consistently():
+    """The floor exists because two criteria were in use, one written and one not.
+
+    Written: an observer is a task "whose verdict some legal value can move". Taken
+    literally that admits nearly every tool-using task, since `tool_output.budget` is
+    any positive integer — a budget of 6 breaks D1. Unwritten, in prose: "only E1 and
+    E2 are sensitive at PLAUSIBLE budgets". The second one chose the rows.
+
+    So the floor is carbon's own `SHRINK_MIN_BUDGET`, not a number invented here, and
+    every measured task must sit on the side of it that its listing implies. F1 is the
+    one exception and it is asserted AS an exception, so it stays visible until someone
+    decides it — a floor that quietly tolerated a contradiction would be decoration.
+    """
+    from loop.knob_coverage import (
+        _TOOL_RESULT_READERS,
+        MEASURED_BREAK_BUDGETS,
+        tool_output_plausibility_floor,
+    )
+
+    floor = tool_output_plausibility_floor()
+    from harness.agent import SHRINK_MIN_BUDGET
+
+    assert floor == SHRINK_MIN_BUDGET, "the floor must track carbon, not a copy of it"
+
+    below = {t for t, b in MEASURED_BREAK_BUDGETS.items() if b < floor}
+    listed_but_below = below & set(_TOOL_RESULT_READERS)
+    assert listed_but_below == {"F1"}, (
+        "exactly one listed observer is known to break only below the floor. If this "
+        "set grew, a new row was added on the criterion the floor rejects; if it "
+        "emptied, F1 was resolved and this assertion should go with it. Either way it "
+        f"is a decision, not a test fix. Currently: {sorted(listed_but_below)}"
+    )
+    # And the ones we measured and did NOT list must all be below it — otherwise the
+    # floor is not what kept them out and the real reason is unrecorded.
+    for task in ("B1", "B2", "B3", "D1", "D2"):
+        assert task not in _TOOL_RESULT_READERS
+        assert MEASURED_BREAK_BUDGETS[task] < floor
