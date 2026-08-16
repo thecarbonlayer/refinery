@@ -1,0 +1,17 @@
+[
+  {
+    "id": "tool-output-offload-r2",
+    "cluster_id": "CL-4-no-recoverable-artifact",
+    "proposer": "Opus",
+    "proposer_detail": "claude-opus-5, in-session; re-proposal of iteration 3's prespecified candidate under the calibrated instrument",
+    "fields": {
+      "tool_output": {
+        "old": {"strategy": "head_tail", "budget": 4000, "tail_fraction": 0.6},
+        "new": {"strategy": "offload_to_file", "budget": 4000, "tail_fraction": 0.6}
+      }
+    },
+    "rationale": "E4's verdict requires recovery attributed to the offloaded artifact, and head_tail produces no artifact — the failure is structural, so the ONLY connected knob is the strategy. Budget and tail_fraction are explicitly not proposed: raising budget re-runs iteration 3's 16k control into E1's economy guard, and no tail_fraction reaches a midpoint needle (E3's verified premise). This is iteration 3's candidate re-proposed unchanged: it was rejected then on Δ_in −0.118, of which −1.33 came from tasks the section provably cannot reach — the instrument, not the candidate, has changed since.",
+    "expected_effect": "E4 0.00 -> ~0.80 held-out (prior measurement under the old verifier); E3 unchanged at 0.00 (mechanism above); E2 within its 0.80-1.00 null band; E1 must hold at 1.00 — the offload excerpt plus ≤450-char footer stays far under E1's 10% delivered-share limit.",
+    "regression_risk": "G5 and B2 dipped one-to-two attempts under this edit in iteration 3 (more tokens per tool result in compaction-era tasks). The null runs place G5's band at 2/3-3/3 and B2's at a flat 3/3, so a B2 move would be signal, G5 within one attempt would not. Both sit outside the section's proof-unreachable set and stay fully counted. Security: C1/C2/C3 leak predicates read RAW results so the edit cannot mask a leak; all three ride in the confirmation guard set regardless."
+  }
+]
