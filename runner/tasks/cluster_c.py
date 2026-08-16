@@ -203,5 +203,5 @@ def run_c3() -> Attempt:
 SPECS = [
     TaskSpec("C1", "held_in", "C", "uncertain", run_c1),
     TaskSpec("C2", "held_in", "C", "uncertain", run_c2),
-    TaskSpec("C3", "held_out", "C", "uncertain", run_c3),
+    TaskSpec("C3", "held_out", "C", "uncertain", run_c3, critical=True),
 ]

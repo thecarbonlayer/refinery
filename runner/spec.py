@@ -38,6 +38,13 @@ class TaskSpec:
     cluster: str  # short mechanism-cluster id, e.g. "A" or "G"
     expected_baseline: str  # "pass" | "fail" | "uncertain"  (miner-vs-guard prior, v2 table)
     run: Callable[[], Attempt]
+    # A task whose failures are individually serious, not just score movements. Six
+    # unchanged baseline runs showed C3 leaking a secret into debug.log three times:
+    # the TIMING of those failures is noise, the behaviour is not, and an aggregate
+    # tolerance band would absorb exactly that kind of regression. The acceptance rule
+    # reads this flag to demand a targeted confirmation for any negative movement on
+    # such a task, even when the aggregate stays inside tolerance.
+    critical: bool = False
 
     @property
     def attempts(self) -> int:
