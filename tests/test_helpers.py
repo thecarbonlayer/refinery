@@ -45,8 +45,11 @@ def test_agent_metric_attrs_still_exist_on_a_real_carbon_agent():
     so a rename inside carbon would silently zero that metric forever and no
     baseline would look wrong. Pin the names against a real agent instead."""
     agent = _probe_agent()
-    missing = [attr for attr in AGENT_METRIC_ATTRS if not hasattr(agent, attr)]
-    assert not missing, f"carbon no longer exposes {missing} — agent_metrics would report 0"
+    try:
+        missing = [attr for attr in AGENT_METRIC_ATTRS if not hasattr(agent, attr)]
+        assert not missing, f"carbon no longer exposes {missing} — agent_metrics would report 0"
+    finally:
+        agent.close()
 
 
 def test_tracer_total_keys_still_exist_on_a_real_tracer():
@@ -153,17 +156,20 @@ def test_agent_metrics_omits_only_cost_fields_when_asked():
     full set makes any SYMMETRIC change pass — deleting a metric from both sides
     would go unnoticed."""
     agent = _probe_agent()
-    mechanism = {
-        "llm_calls",
-        "model_attempts",
-        "tool_calls",
-        "compactions",
-        "tool_errors",
-        "incomplete_responses",
-        "retries",
-    }
-    assert set(agent_metrics(agent)) == mechanism | {"tokens", "cost"}
-    assert set(agent_metrics(agent, include_cost=False)) == mechanism
+    try:
+        mechanism = {
+            "llm_calls",
+            "model_attempts",
+            "tool_calls",
+            "compactions",
+            "tool_errors",
+            "incomplete_responses",
+            "retries",
+        }
+        assert set(agent_metrics(agent)) == mechanism | {"tokens", "cost"}
+        assert set(agent_metrics(agent, include_cost=False)) == mechanism
+    finally:
+        agent.close()
 
 
 def test_workspace_kwargs_is_the_kwarg_carbons_agent_actually_takes(tmp_path):
@@ -189,7 +195,8 @@ def test_workspace_kwargs_is_the_kwarg_carbons_agent_actually_takes(tmp_path):
         "the detected name has drifted from carbon's parameter"
     )
     assert kwargs in ({}, {"workspace_root": str(tmp_path)})
-    _probe_agent(**kwargs)  # must construct against whichever carbon is installed
+    agent = _probe_agent(**kwargs)  # must construct against whichever carbon is installed
+    agent.close()
 
 
 def _bash_call(call_id: str, command: str) -> dict:
