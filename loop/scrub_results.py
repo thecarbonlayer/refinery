@@ -33,7 +33,7 @@ import json
 import sys
 from pathlib import Path
 
-from runner.scrub import _username, scrub_text  # noqa: F401
+from runner.scrub import _username, scrub_text
 
 RESULTS_DIR = Path(__file__).resolve().parents[1] / "results"
 

@@ -5,11 +5,13 @@ grep covered `/Users/` and `/home/` and was blind to `/var/folders`, so two comm
 candidate logs carried per-run temp paths for weeks — and a baseline log was found
 holding an entire `$PATH` dump, home directory included, quoted inside a task detail.
 
-This test is the recurrence-killer, placed OUTSIDE `runner/` on purpose: the durable
-fix (scrub at generation) means touching the runner and therefore `runner_sha`, which
-invalidates every recorded baseline — queued for the next invalidation window instead.
-A red suite the moment an unscrubbed artifact lands makes the scrub impossible to
-forget without costing a re-measurement today. `loop/scrub_results.py` fixes what this
+This test is the recurrence-killer. Rows are born scrubbed now: `runner.run.
+write_record` scrubs every string at serialization, after verifiers have already read
+the raw text. This module remains the enforcement regardless — nothing under
+`results/` may carry a machine path, whether the cause is a bug in that scrub, a
+record resumed from before it existed, or a file dropped in by hand — so a red suite
+the moment an unscrubbed artifact lands still makes the scrub impossible to forget.
+`loop/scrub_results.py` remains the repair tool for anything older: it fixes what this
 test finds, and proves it changed nothing but the offending strings.
 """
 
@@ -109,3 +111,6 @@ def test_rows_are_scrubbed_at_generation_time(tmp_path):
 
     out = json.loads(f.read_text())
     assert "<TMPDIR>" in out["detail"] and "/var/folders" not in f.read_text()
+    # Non-string/structure fields must survive untouched — a scrubber that rewrote
+    # keys or coerced values would pass the string check above and still be broken.
+    assert out["passed"] is False and out["attempt"] == 0 and out["metrics"] == {}
