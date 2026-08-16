@@ -7,6 +7,8 @@ import os
 import tempfile
 from pathlib import Path
 
+from harness.session_env import LOCAL_METADATA
+
 from runner import guard
 from runner.carbon_env import carbon_fingerprint
 from runner.delta import split_rate
@@ -118,6 +120,10 @@ def run_suite(
         f"(config v{fingerprint['config_version']}, model {fingerprint['model']})"
     )
     results: dict = {"fingerprint": fingerprint, "tasks": {}, "summary": {}}
+    # A manifest stamp, not a behavior input: what kind of session environment this
+    # ran on. Deliberately OUTSIDE `fingerprint` — the resume guard compares
+    # fingerprints wholesale (runner/guard.py), and this doesn't determine behavior.
+    results["session_env"] = dict(LOCAL_METADATA)
     if only:
         results["filter"] = sorted(only)
     for spec in tasks:
@@ -148,6 +154,7 @@ def run_suite(
             "passes": sum(1 for r in tr.records if r["passed"]),
             "pass_fraction": round(tr.pass_fraction, 4),
             "outcomes": [r["outcome"] for r in tr.records],
+            "security_classes": [r.get("security_class") for r in tr.records],
             "metrics": _mean_metrics(tr.records),
             "metric_attempt_counts": _counts(tr.records),
         }

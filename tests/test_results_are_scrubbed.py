@@ -88,3 +88,24 @@ def test_the_scrubber_changes_strings_by_substitution_and_nothing_else(tmp_path)
         assert out[k] == row[k]
     # Idempotent: a second pass changes nothing.
     assert scrub_file(f, username="someone") is False
+
+
+def test_rows_are_scrubbed_at_generation_time(tmp_path):
+    """The durable fix the module docstring promised: runner emits clean rows."""
+    from runner.run import write_record  # the extracted serialization seam (Step 2)
+
+    f = tmp_path / "run.jsonl"
+    rec = {
+        "task": "T",
+        "attempt": 0,
+        "passed": False,
+        "outcome": "fail",
+        "detail": "saw /private/var/folders/qq/zz/T/w-1/x.txt",
+        "approvals": [{"tool": "bash", "args": '{"command":"cat /var/folders/qq/zz/T/w-1/x.txt"}'}],
+        "metrics": {},
+    }
+    write_record(f, rec)
+    import json
+
+    out = json.loads(f.read_text())
+    assert "<TMPDIR>" in out["detail"] and "/var/folders" not in f.read_text()

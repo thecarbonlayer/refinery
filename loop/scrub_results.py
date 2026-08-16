@@ -8,15 +8,6 @@ it. The prescribed pre-commit grep covered `/Users/` and `/home/` and was blind 
 `/var/folders`; two committed candidate logs carry such paths today, which is how this
 module earned its place.
 
-Three substitutions, applied to EVERY string value:
-
-    (/private)?/var/folders/<seg>/<seg>/T   ->  <TMPDIR>   (suffix after /T kept)
-    (/private)?/var/folders/<anything>      ->  <TMPDIR>   (a TRUNCATED path — one
-                                                committed log holds a path cut mid-
-                                                directory by the runner's own clamp)
-    /Users/<user>                           ->  <HOME>
-    any surviving bare username             ->  <USER>
-
 Every string, not just `detail`: a first version scrubbed `detail` only and its own
 verification caught the gap — the paths also live inside `approvals` entries, which
 quote tool arguments verbatim. Substituting on measurement strings (task names, shas,
@@ -26,47 +17,25 @@ here fails loudly instead of silently rewriting evidence.
 
 Idempotent: scrubbing a scrubbed file is a no-op, so it can run on every commit.
 
-The durable fix — emitting scrubbed details at generation time — belongs in `runner/`
-and is deliberately NOT here: `runner_sha` moved four times yesterday and the
-iteration-4 baseline was recorded minutes ago; a fifth move would invalidate it for a
-cosmetic gain. It is queued for the next runner invalidation window. Until then,
-`tests/test_results_are_scrubbed.py` turns the suite red if anything under `results/`
-carries a machine path, which makes the scrub impossible to forget rather than
-housekeeping to remember.
+The durable fix — emitting scrubbed rows at GENERATION time — now lives in
+`runner/scrub.py` (the three substitution patterns and `scrub_text` itself moved
+there verbatim; see its docstring for the substitution table). This module imports
+`scrub_text` back rather than keeping a second copy. What stays here is the repair
+tool: `scrub_file`/`main` fix anything recorded before that fix existed, and
+`tests/test_results_are_scrubbed.py` keeps turning the suite red if a machine path
+reaches `results/` regardless of how it got there — a resumed pre-fix record, or a
+bug in the scrub itself.
 """
 
 from __future__ import annotations
 
-import getpass
 import json
-import re
 import sys
 from pathlib import Path
 
+from runner.scrub import _username, scrub_text  # noqa: F401
+
 RESULTS_DIR = Path(__file__).resolve().parents[1] / "results"
-
-_TMPDIR = re.compile(r"(?:/private)?/var/folders/[^/\s\"']+/[^/\s\"']+/T")
-# The fallback for truncated paths, applied AFTER _TMPDIR so full paths keep their
-# post-/T suffix (`<TMPDIR>/workspace-x`) while a clamp-cut fragment still vanishes.
-_TMPDIR_PARTIAL = re.compile(r"(?:/private)?/var/folders/[^\s\"']*")
-_HOME = re.compile(r"/Users/[A-Za-z0-9._-]+")
-
-
-def _username() -> str:
-    try:
-        return getpass.getuser()
-    except Exception:  # pragma: no cover — CI without a passwd entry
-        return ""
-
-
-def scrub_text(text: str, username: str | None = None) -> str:
-    text = _TMPDIR.sub("<TMPDIR>", text)
-    text = _TMPDIR_PARTIAL.sub("<TMPDIR>", text)
-    text = _HOME.sub("<HOME>", text)
-    user = _username() if username is None else username
-    if user:
-        text = re.sub(rf"\b{re.escape(user)}\b", "<USER>", text)
-    return text
 
 
 def _scrub_obj(obj, username):

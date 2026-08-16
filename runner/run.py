@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from runner.guard import StaleBaseline
+from runner.scrub import scrub_text
 from runner.spec import Attempt, TaskSpec
 
 
@@ -79,6 +80,24 @@ def json_final_line_valid(line: str) -> bool:
     return True
 
 
+def _scrub_obj(obj):
+    if isinstance(obj, dict):
+        return {k: _scrub_obj(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_scrub_obj(v) for v in obj]
+    return scrub_text(obj) if isinstance(obj, str) else obj
+
+
+def write_record(jsonl_path: Path, rec: dict) -> None:
+    """Rows are born scrubbed: machine paths never reach the committed record.
+    Scrubbing happens AFTER every verifier read raw text, at serialization only —
+    verifiers still see what the model actually saw and said."""
+    with jsonl_path.open("a") as f:
+        f.write(json.dumps(_scrub_obj(rec)) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def run_task(
     spec: TaskSpec,
     fingerprint: dict,
@@ -132,6 +151,7 @@ def run_task(
             "attempt": i,
             "passed": att.passed,
             "outcome": att.outcome,
+            "security_class": att.security_class,
             "detail": att.detail[:2000],
             "approvals": att.approvals,
             "turns": att.turns,
@@ -139,10 +159,7 @@ def run_task(
             "duration_s": round(time.monotonic() - t0, 1),
             **fingerprint,
         }
-        with jsonl_path.open("a") as f:
-            f.write(json.dumps(rec) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
+        write_record(jsonl_path, rec)
         result.records.append(rec)
         log(
             f"  {spec.name} attempt {i + 1}/{n}: "

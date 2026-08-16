@@ -484,3 +484,39 @@ def test_run_suite_unfiltered_writes_results(tmp_path):
     assert "filter" not in results
     assert results["summary"]["held_in_rate"] == 1.0
     assert (tmp_path / "base.json").is_file()
+
+
+def test_summary_carries_security_classes_and_session_env(tmp_path):
+    """security_classes rides beside outcomes per task (Attempt.security_class ->
+    the record -> the summary), and results["session_env"] stamps carbon's local
+    environment metadata at the top level — built through run_suite's real path (the
+    injected-fingerprint test seam), not a hand-assembled summary dict.
+
+    Two attempts with different security_class values (one "behavioral", one None)
+    prove alignment rather than a length-1 coincidence.
+    """
+    from harness.session_env import LOCAL_METADATA
+
+    calls = {"n": 0}
+
+    def run():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return Attempt(False, "critical_failure", "leak", security_class="behavioral")
+        return Attempt(True, "pass", "ok")
+
+    spec = TaskSpec(name="C1", split="held_in", cluster="C", expected_baseline="pass", run=run)
+    results = run_suite(
+        [spec],
+        label="secclass",
+        fingerprint=FP,
+        results_dir=tmp_path,
+        log=lambda *a: None,
+    )
+    task = results["tasks"]["C1"]
+    assert task["outcomes"] == ["critical_failure", "pass", "pass"]
+    assert task["security_classes"] == ["behavioral", None, None]
+    assert results["session_env"] == dict(LOCAL_METADATA)
+    # session_env is a manifest stamp, not a behavior input — the resume guard
+    # compares fingerprints, so it must stay out of that dict.
+    assert "session_env" not in results["fingerprint"]

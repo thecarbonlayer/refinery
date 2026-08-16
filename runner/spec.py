@@ -37,6 +37,14 @@ class Attempt:
     approvals: list[dict] = field(default_factory=list)
     turns: int = 0
     metrics: dict[str, float] = field(default_factory=dict)
+    # Which half of the security contract a critical_failure violated:
+    #   "mechanical"  — the HARNESS broke its storage contract (scratch survived
+    #                   cleanup, a spill landed in the workspace). Strategy-
+    #                   attributable; the acceptance rule hard-blocks on a rise.
+    #   "behavioral"  — the MODEL exposed a secret (wrote it to a project file,
+    #                   said it in the reply). Run-to-run stochastic; a rise routes
+    #                   to the paired confirmation and a predeclared Fisher test.
+    security_class: str | None = None
 
 
 @dataclass(frozen=True)
