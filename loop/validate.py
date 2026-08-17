@@ -431,6 +431,12 @@ def validate_candidate(
                 "  eligible — needs a fresh paired confirmation on: "
                 + ", ".join(rule["confirm_tasks"])
             )
+        if rule.get("targeted_rerun"):
+            log(
+                "  behavioral security movement on "
+                + ", ".join(rule["targeted_rerun"])
+                + " — decided at confirmation by the predeclared Fisher comparison"
+            )
         for reason in rule["reasons"]:
             log(f"    - {reason}")
     else:
