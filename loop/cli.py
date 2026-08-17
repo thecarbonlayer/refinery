@@ -101,13 +101,10 @@ def main() -> None:
             record = validate_candidate(cand, baseline_path=args.baseline)
             out = write_validation_record(record, it_dir / f"validation-{cand.id}.json")
             print(f"wrote {out}")
-            outcomes.append((cand.id, record.accepted, record.delta_in, record.delta_ho))
+            outcomes.append((cand.id, record.disposition, record.delta_in, record.delta_ho))
         print("\n=== validation summary ===")
-        for cand_id, accepted, d_in, d_ho in outcomes:
-            print(
-                f"{cand_id}: Δ_in={d_in:+.4f} Δ_ho={d_ho:+.4f} "
-                f"{'ACCEPTED' if accepted else 'REJECTED'}"
-            )
+        for cand_id, disposition, d_in, d_ho in outcomes:
+            print(f"{cand_id}: Δ_in={d_in:+.4f} Δ_ho={d_ho:+.4f} {disposition}")
         return
 
     # pr

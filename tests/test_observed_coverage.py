@@ -298,9 +298,21 @@ def test_the_written_artifact_carries_the_gate_and_coverage_fields():
     # not silently dropped the same way.
     from dataclasses import fields
 
-    assert set(written) == {f.name for f in fields(ValidationRecord)}, (
+    declared = {f.name for f in fields(ValidationRecord)}
+    # Values `to_json` adds on purpose that are NOT dataclass fields. `disposition` is
+    # a derived property (ACCEPTED / PENDING_CONFIRMATION / REJECTED), so it cannot be
+    # "silently dropped" the way a field can — but it must not be silently ADDED
+    # either, so it is named here rather than blanket-allowing extra keys.
+    derived = {"disposition"}
+    missing = declared - set(written)
+    assert not missing, (
         "to_json() and the dataclass have diverged — a field that exists on the record "
-        "but never reaches disk is worse than one that was never added"
+        f"but never reaches disk is worse than one that was never added: {sorted(missing)}"
+    )
+    unexpected = set(written) - declared - derived
+    assert not unexpected, (
+        f"to_json() wrote keys that are neither declared fields nor declared derived "
+        f"values: {sorted(unexpected)}"
     )
 
 

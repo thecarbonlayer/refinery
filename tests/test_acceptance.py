@@ -581,3 +581,62 @@ def test_unmoved_guards_ride_into_the_confirmation_set():
     fc = _run({n: (9, 9, "held_in") for n in ("I0", "I1")}, filtered=True)
     with pytest.raises(ValueError, match="exactly the selected tasks"):
         confirmed(d, fb, fc)  # a pair that skips the guard is refused
+
+
+def test_a_confirm_candidate_reports_pending_confirmation_not_rejected():
+    """ "Not yet accepted" and "rejected" are materially different states.
+
+    The first CONFIRM this rule ever produced printed as "REJECTED" in the validation
+    summary — beside a rule outcome of CONFIRM, an intact gain, and holding guards.
+    `accepted` stays the shipping gate (only a confirmation flips it true); the
+    disposition is what the record and the summary say out loud.
+    """
+    from loop.artifacts import ValidationRecord
+
+    confirm = ValidationRecord(
+        candidate_id="c",
+        label="cand-c",
+        accepted=False,
+        delta_in=0.0,
+        delta_ho=0.04,
+        rule={"applied": True, "outcome": "CONFIRM"},
+    )
+    assert confirm.disposition == "PENDING_CONFIRMATION"
+    assert confirm.to_json()["disposition"] == "PENDING_CONFIRMATION"
+    assert confirm.accepted is False, "CONFIRM must not ship: the bool gate stays shut"
+
+    rejected = ValidationRecord(
+        candidate_id="c",
+        label="cand-c",
+        accepted=False,
+        delta_in=-0.5,
+        delta_ho=0.0,
+        rule={"applied": True, "outcome": "REJECT"},
+    )
+    assert rejected.disposition == "REJECTED"
+
+    accepted = ValidationRecord(
+        candidate_id="c",
+        label="cand-c",
+        accepted=True,
+        delta_in=0.0,
+        delta_ho=0.04,
+        rule={"applied": True, "outcome": "ACCEPT"},
+    )
+    assert accepted.disposition == "ACCEPTED"
+
+    # Gate failures and uncalibrated sections have no rule outcome to read; they must
+    # fall back to the bool rather than claim a confirmation is pending.
+    gate_failed = ValidationRecord(
+        candidate_id="c", label="cand-c", accepted=False, delta_in=0.0, delta_ho=0.0
+    )
+    assert gate_failed.disposition == "REJECTED"
+    uncalibrated = ValidationRecord(
+        candidate_id="c",
+        label="cand-c",
+        accepted=False,
+        delta_in=0.0,
+        delta_ho=0.0,
+        rule={"applied": False, "why": "section not calibrated"},
+    )
+    assert uncalibrated.disposition == "REJECTED"

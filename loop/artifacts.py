@@ -177,11 +177,31 @@ class ValidationRecord:
     # confirmation run recorded separately.
     rule: dict = field(default_factory=dict)
 
+    @property
+    def disposition(self) -> str:
+        """The candidate's STATE, which `accepted: bool` cannot express.
+
+        "Not yet accepted" and "rejected" are materially different, and collapsing
+        them into one boolean made the record say the wrong thing out loud: the first
+        CONFIRM this rule ever produced — a candidate whose gain was real, whose
+        guards held, and whose only remaining step was a paired rerun — printed as
+        "REJECTED" in the validation summary, beside a rule outcome of CONFIRM.
+
+        `accepted` stays a bool because it is the SHIPPING gate (`pr` refuses anything
+        false, and only a confirmation can make it true). This is what humans and
+        reports read instead.
+        """
+        outcome = self.rule.get("outcome") if self.rule.get("applied") else None
+        if outcome == "CONFIRM":
+            return "PENDING_CONFIRMATION"
+        return "ACCEPTED" if self.accepted else "REJECTED"
+
     def to_json(self) -> dict:
         return {
             "candidate_id": self.candidate_id,
             "label": self.label,
             "accepted": self.accepted,
+            "disposition": self.disposition,
             "delta_in": self.delta_in,
             "delta_ho": self.delta_ho,
             "per_task": self.per_task,
