@@ -2,12 +2,20 @@
   {
     "id": "tool-output-offload-r3",
     "cluster_id": "CL-5-no-recoverable-artifact",
-    "proposer": "Sonnet",
-    "proposer_detail": "claude-sonnet-5, in-session (Claude Code); re-proposal of iteration 4's candidate (tool-output-offload-r2) under the corrected instrument — same edit, corrected record",
+    "proposer": "Fable",
+    "proposer_detail": "claude-fable-5 (Claude Code driver session); re-proposal of iteration 4's candidate (tool-output-offload-r2) decided in the corrected-instrument plan — same edit, corrected record",
     "fields": {
       "tool_output": {
-        "old": {"strategy": "head_tail", "budget": 4000, "tail_fraction": 0.6},
-        "new": {"strategy": "offload_to_file", "budget": 4000, "tail_fraction": 0.6}
+        "old": {
+          "strategy": "head_tail",
+          "budget": 4000,
+          "tail_fraction": 0.6
+        },
+        "new": {
+          "strategy": "offload_to_file",
+          "budget": 4000,
+          "tail_fraction": 0.6
+        }
       }
     },
     "rationale": "iteration 4's REJECT attribution was corrected on evidence: the model-authored debug.log leak preceded any strategy divergence; the spill was a co-copy. The storage architecture and the test both changed; the candidate has not.",
