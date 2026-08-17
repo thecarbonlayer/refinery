@@ -1,0 +1,24 @@
+[
+  {
+    "id": "CL-5-no-recoverable-artifact",
+    "mechanism": "An oversized tool result is cut inline and the removed bytes cease to exist; any task whose answer sits in the removed region has no route to it, and any verifier that credits recovery specifically can never fire. Instrument corrected: spills are session-scratch, C3 splits mechanical/behavioral, behavioral 0->1 decided by predeclared Fisher at confirmation.",
+    "tasks": ["E4"],
+    "hypothesis": "E4 is 0/5 in baseline-r7 with recovered_from_disk=False on every attempt because head_tail writes no artifact: the verdict's positive-attribution conjunct (recovery must come FROM the offloaded file, cluster_e._e4_recovered_from_disk) is structurally unsatisfiable under any inline-only strategy, at any budget or tail_fraction. This is a strategy-menu gap, not a tuning gap — the same mechanism iteration 3 demonstrated when offload_to_file took E4 from 0.00 to 0.80.",
+    "evidence": [
+      "baseline-r7 E4 attempt 0: ran_plainly=True needle_withheld_inline=True recovered_from_disk=False recalled=True — the model even recalled the tag once, and still fails, because recall without disk attribution is exactly what the verifier refuses to credit",
+      "baseline-r7 E4 attempts 1-4: recovered_from_disk=False throughout",
+      "iterations/iter-03 cand-tool-output-offload: E4 0.00 -> 0.80 with recovered_from_disk=True on 4/5 — the mechanism, demonstrated under the prior verifier"
+    ]
+  },
+  {
+    "id": "CL-5-middle-unreachable-inline",
+    "mechanism": "Both positional strategies keep ends; a needle astride the midpoint of opaque command output is unreachable inline at any legal budget that E1's economy guard does not price out.",
+    "tasks": ["E3"],
+    "hypothesis": "E3 stays 0/3 under EVERY tool_output value including offload_to_file, because its verifier requires the needle INSIDE the first plain run's inline result (excerpt-plus-path leaves E3 itself red — documented in knob_coverage's tool_output row). No configuration candidate can move E3; it needs a middle-preserving strategy on the menu (summarize_the_middle, the named gap). Recorded so the loop does not repeatedly re-mine it as if it were tunable.",
+    "evidence": [
+      "baseline-r7 E3: 0/3, sentinel_delivered=False on all attempts",
+      "tests/test_registry.py test_e3_needle_is_unreachable_by_every_shipped_strategy: the premise verified against carbon's real truncate() at a third of the stream",
+      "loop/knob_coverage.py tool_output row: E3 classified as miner for the STRATEGY menu with the excerpt-plus-path limitation stated"
+    ]
+  }
+]
