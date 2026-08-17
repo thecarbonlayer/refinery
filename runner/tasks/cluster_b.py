@@ -153,8 +153,8 @@ def _build_b_agent(seed: dict[str, str]):
     tools.register(write_file_tool(ws))
     tools.register(edit_file_tool(ws))
     # scratch_dir=: the graded model's OWN bash tool needs the same shell route to
-    # scratch that read_file's scratch_root above already grants — see cluster_c's
-    # identical comment for the measured failure this closes.
+    # scratch that read_file's scratch_root above already grants — see
+    # cluster_e.py's run_e4 for the measured failure (E4 scored 0/10) this closes.
     tools.register(
         bash_tool(
             Sandbox(trusted=True, timeout=60, scratch_dir=agent.session_env.scratch_root),
