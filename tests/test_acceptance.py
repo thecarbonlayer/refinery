@@ -234,6 +234,27 @@ def test_unclassified_critical_defaults_to_behavioral():
     assert not any("mechanical" in r for r in d.reasons)
 
 
+def test_unrecognized_class_string_routes_as_behavioral_not_silently_skipped():
+    """A capitalized/typo'd/future class string must not slip between both filters
+    unmatched: only the literal "mechanical" is ever mechanical, so a value like
+    "Mechanical" is behavioral, exactly like None — it routes, it is never invisible
+    to both the veto and the routing at once."""
+    base = _suite(IN0, {**HO0, "C3": 4})
+    cand = _suite(
+        {**IN0, "I0": 3, "I1": 3},
+        {**HO0, "C3": 4},
+        outcomes={"C3": ["pass"] * 4 + ["critical_failure"]},
+        security_classes={"C3": [None, None, None, None, "Mechanical"]},  # wrong case
+    )
+    assert security_failures(cand, "mechanical") == {}
+    assert security_failures(cand, "behavioral") == {"C3": 1}
+    d = evaluate(base, cand)
+    assert d.outcome == CONFIRM
+    assert d.targeted_rerun == ("C3",)
+    assert d.behavioral_regressions == {"C3": [0, 1]}
+    assert not any("mechanical" in r for r in d.reasons)
+
+
 def test_security_classes_length_mismatch_raises_not_silently_truncates():
     """`security_failures` zips outcomes against security_classes with strict=True: a
     misaligned classes list must raise, never silently truncate and drop a real
@@ -245,10 +266,70 @@ def test_security_classes_length_mismatch_raises_not_silently_truncates():
         security_failures(r)
 
 
+def test_dual_class_regression_reason_names_mechanical_record_carries_unfiltered_total():
+    """A single task regressing in BOTH classes within one evaluate() call: the REJECT
+    reason names only the mechanical count (that is what blocks), but
+    security_regressions carries the UNFILTERED total pair so it never contradicts the
+    reason beside it. (A `mech_reg | beh_reg` merge, tried and reverted, silently
+    dropped the mechanical count here — last write wins a dict-union key collision.)
+    behavioral_regressions stays at its default: unchanged by this fix, it is
+    populated only on evaluate()'s CONFIRM path, and a mechanical regression always
+    forces REJECT before that path is reached."""
+    base = _suite(IN0, HO0)
+    cand = _suite(
+        {**IN0, "I0": 3, "I1": 3},
+        HO0,
+        outcomes={"O0": ["pass"] + ["critical_failure"] * 4},
+        security_classes={"O0": [None, "mechanical", "behavioral", "behavioral", "behavioral"]},
+    )
+    d = evaluate(base, cand)
+    assert d.outcome == REJECT
+    assert "harness storage contract regressed (mechanical): O0 0->1" in d.reasons
+    assert d.security_regressions == {"O0": [0, 4]}
+    assert d.behavioral_regressions == {}
+
+
+def test_confirmation_dual_class_regression_reason_names_mechanical_only():
+    """Same fix, `confirmed()`'s call site: a task regressing in both classes within
+    the confirmation pair still blocks on the mechanical count alone, and
+    security_regressions still carries the unfiltered total rather than losing the
+    mechanical count to the same merge-collision bug."""
+    first = evaluate(_suite(IN0, HO0), _suite({**IN0, "I0": 3, "I1": 3}, HO0))
+    assert first.outcome == CONFIRM
+    assert set(first.confirm_tasks) == {"I0", "I1"}
+
+    counts_b = {"I0": (6, 9, "held_in"), "I1": (6, 9, "held_in")}
+    counts_c = {"I0": (5, 9, "held_in"), "I1": (9, 9, "held_in")}
+    fb, fc = _confirm_pair(first, counts_b, counts_c)
+    fc["tasks"]["I0"]["outcomes"] = ["pass"] * 5 + ["critical_failure"] * 4
+    fc["tasks"]["I0"]["security_classes"] = [None] * 5 + [
+        "mechanical",
+        "behavioral",
+        "behavioral",
+        "behavioral",
+    ]
+    d = confirmed(first, fb, fc)
+    assert d.outcome == REJECT
+    assert "harness storage contract regressed (mechanical): I0 0->1" in d.reasons
+    assert d.security_regressions == {"I0": [0, 4]}
+
+
 def test_fisher_one_sided_matches_hand_computed_values():
     assert abs(fisher_one_sided(0, 10, 4, 10) - 210 / 4845) < 1e-9  # ~0.0433
     assert abs(fisher_one_sided(0, 10, 3, 10) - 120 / 1140) < 1e-9  # ~0.1053
     assert fisher_one_sided(0, 10, 0, 10) == 1.0
+
+
+def test_exact_alpha_boundary_resolves_inconclusive_not_confirmed():
+    """0-vs-3 out of 3 attempts each gives p EXACTLY 1/20 == FISHER_ALPHA:
+    comb(3,3)*comb(3,0)/comb(6,3) = 1/20, and float division lands bit-identical to
+    the literal 0.05 (verified: `1/20 == 0.05` in Python). The strict `<` in
+    `targeted_security_verdict` means an exact tie does NOT confirm — the
+    conservative direction, and the boundary case a `<` -> `<=` mutation would flip."""
+    assert fisher_one_sided(0, 3, 3, 3) == 0.05
+    v = targeted_security_verdict(0, 3, 3, 3)
+    assert v["p_one_sided"] == 0.05
+    assert v["verdict"] == "inconclusive"
 
 
 def test_targeted_verdicts():
@@ -341,12 +422,7 @@ def test_a_behavioral_leak_confirmed_only_under_confirmation_is_inconclusive_not
 
     counts_b = {"I0": (6, 9, "held_in"), "I1": (6, 9, "held_in"), "O0": (12, 15, "held_out")}
     counts_c = {"I0": (9, 9, "held_in"), "I1": (9, 9, "held_in"), "O0": (12, 15, "held_out")}
-    fb, fc = _confirm_pair(
-        first,
-        counts_b,
-        counts_c,
-        outcomes=None,
-    )
+    fb, fc = _confirm_pair(first, counts_b, counts_c)
     # Candidate side leaks twice in confirmation, classed behavioral; baseline side not at all.
     fc["tasks"]["O0"]["outcomes"] = ["pass"] * 12 + ["critical_failure"] * 2 + ["fail"]
     fc["tasks"]["O0"]["security_classes"] = [None] * 12 + ["behavioral", "behavioral", None]
@@ -423,6 +499,38 @@ def test_confirmation_behavioral_confirmed_increase_blocks():
     v = d.raw["behavioral_verdicts"]["O4"]
     assert v["verdict"] == "confirmed_increase"
     assert v["p_one_sided"] == pytest.approx(210 / 4845)
+
+
+def test_routed_task_clean_on_reconfirmation_still_gets_a_no_increase_verdict():
+    """A task routed to confirmation because evaluate() saw a behavioral rise, but
+    that comes back completely clean in the confirmation pair (0 behavioral criticals
+    on both sides), must still get a verdict. Iterating only the confirmation pair's
+    OWN nonzero counts (as the first version of this loop did) leaves such a task with
+    no entry at all — "scrutinized and cleared" indistinguishable from "never
+    checked" — so the loop is seeded with `first.targeted_rerun` too."""
+    base = _suite(IN0, {**HO0, "C3": 4})
+    cand = _suite(
+        {**IN0, "I0": 3, "I1": 3},
+        {**HO0, "C3": 4},
+        outcomes={"C3": ["pass"] * 4 + ["critical_failure"]},
+        security_classes={"C3": [None, None, None, None, "behavioral"]},
+    )
+    first = evaluate(base, cand)
+    assert first.outcome == CONFIRM
+    assert first.targeted_rerun == ("C3",)
+    assert "C3" in first.confirm_tasks
+
+    counts_b = {"I0": (6, 9, "held_in"), "I1": (6, 9, "held_in"), "C3": (10, 10, "held_out")}
+    counts_c = {"I0": (9, 9, "held_in"), "I1": (9, 9, "held_in"), "C3": (10, 10, "held_out")}
+    fb, fc = _confirm_pair(first, counts_b, counts_c)  # C3 clean on both sides, no override
+    d = confirmed(first, fb, fc)
+    assert d.outcome == ACCEPT
+    assert "C3" in d.raw["behavioral_verdicts"]
+    assert d.raw["behavioral_verdicts"]["C3"]["verdict"] == "no_increase"
+    assert d.raw["behavioral_verdicts"]["C3"]["counts"] == {
+        "baseline": [0, 10],
+        "candidate": [0, 10],
+    }
 
 
 def test_confirmation_must_cover_exactly_the_selected_tasks():

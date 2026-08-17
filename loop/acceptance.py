@@ -73,14 +73,23 @@ ACCEPT = "ACCEPT"
 # `p` is a single float64 division of two exact (arbitrary-precision) integers built
 # from `comb()` — the only place a rounding error could enter, and Python's int/int
 # true division is correctly rounded, so the float `p` differs from the true rational
-# value by at most half a float64 ULP (~5.6e-18 at this magnitude) — nowhere near
-# enough to move a comparison unless the true value already sat that close to 0.05. At
-# the small-integer count scales this runs at, it does not: the two power figures above
-# miss the 0.05 boundary by 0.0067 (4-vs-0) and 0.0553 (3-vs-0) — margins roughly 15
-# and 16 orders of magnitude larger than that rounding error. So `p < alpha` below
-# never turns on representation error at the scales in play; that is a property of
-# what these counts make reachable, not a general numerical guarantee, which is why it
-# is recorded here rather than asserted at runtime.
+# value by at most half a float64 ULP (~5.6e-18 at this magnitude).
+#
+# Exact ties with alpha are NOT rare at these scales — honestly checked, not assumed:
+# exhaustively enumerating every (base_fail, base_n, cand_fail, cand_n) with
+# base_n, cand_n <= 20 (52,900 combinations) finds 9 where the exact rational p equals
+# 1/20 exactly (e.g. 0-vs-3 out of 3 attempts each: comb(3,3)*comb(3,0)/comb(6,3) =
+# 1/20), 8 of which are verdict-relevant (cand_fail > base_fail, so the tie actually
+# reaches the `p < alpha` line below rather than short-circuiting at "no_increase"
+# first). What was ALSO checked, across that same 52,900-combination domain: comparing
+# the float `p` against 0.05 never disagrees with comparing the exact rational value of
+# p against the exact rational 1/20 — zero mismatches, not "none found nearby". The
+# strict `<` is what resolves a tie: p == alpha lands on "inconclusive", not
+# "confirmed_increase" — the conservative direction, consistent with the rest of this
+# design never calling a boundary case confirmed. This was verified over the
+# small-integer count scales this function actually runs at; it is not a general
+# floating-point guarantee at arbitrary scale, which is why it is recorded here rather
+# than asserted at runtime.
 FISHER_ALPHA = 0.05
 
 
@@ -178,12 +187,21 @@ def targeted_security_verdict(
 def security_failures(results: dict, security_class: str | None = None) -> dict[str, int]:
     """Per-task count of ``critical_failure`` outcomes, optionally one class only.
 
-    A critical row without a recorded class (a legacy, pre-classification result)
-    counts as "behavioral" here: the routed direction means MORE measurement, never a
-    silently skipped veto. ``strict=True`` on the zip is the same principle applied to
-    the data itself — a ``security_classes`` list shorter than ``outcomes`` would
-    otherwise truncate silently and could drop a real critical_failure off the end
-    uncounted; that must raise, not undercount. Zero-count tasks omitted.
+    "mechanical" is the only recognized class that is ever mechanical: it takes the
+    literal string ``"mechanical"`` and nothing else. EVERY other value — ``None`` (a
+    legacy, pre-classification row), the empty string, or any unrecognized/misspelled/
+    future string ("Mechanical", "env", ...) — counts as "behavioral". This is not a
+    fallback for the falsy case only: an early version compared ``c or "behavioral"``
+    against ``security_class``, which defaults None/"" to "behavioral" correctly but
+    leaves any OTHER truthy-but-unrecognized string as itself, matching neither
+    filter — invisible to both the mechanical veto and the behavioral routing, with no
+    error. That silently skipped veto is exactly what this module's docstring promises
+    never happens; the fix is to classify explicitly (mechanical iff the literal match)
+    rather than default only the falsy case. ``strict=True`` on the zip is the same
+    principle applied to the data itself — a ``security_classes`` list shorter than
+    ``outcomes`` would otherwise truncate silently and could drop a real
+    critical_failure off the end uncounted; that must raise, not undercount. Zero-count
+    tasks omitted.
     """
     out: dict[str, int] = {}
     for name, t in results["tasks"].items():
@@ -193,7 +211,8 @@ def security_failures(results: dict, security_class: str | None = None) -> dict[
         for o, c in zip(outcomes, classes, strict=True):
             if o != "critical_failure":
                 continue
-            if security_class is None or (c or "behavioral") == security_class:
+            klass = "mechanical" if c == "mechanical" else "behavioral"
+            if security_class is None or klass == security_class:
                 n += 1
         if n:
             out[name] = n
@@ -316,7 +335,18 @@ def evaluate(
     base_sec, cand_sec = security_failures(baseline), security_failures(candidate)
     mech_reg = _regressions(baseline, candidate, "mechanical")
     beh_reg = _regressions(baseline, candidate, "behavioral")
-    sec_reg = mech_reg | beh_reg  # kept for the record; only mech_reg blocks here
+    # security_regressions keeps its historical, pre-split meaning: TOTAL critical-
+    # failure regressions, unfiltered by class — computed straight from base_sec/
+    # cand_sec, same formula this field always used. A plain `mech_reg | beh_reg`
+    # looks equivalent but silently drops one class's counts on a task that regressed
+    # in BOTH within the same run (dict union lets the later operand win a key
+    # collision — reachable in practice, since C3 classifies per attempt and a task's
+    # several attempts can land different classes) — this field must never contradict
+    # the class-specific reason text sitting beside it, so it is never derived from a
+    # merge of the class-filtered dicts.
+    sec_reg = {
+        n: [base_sec.get(n, 0), cand_sec[n]] for n in cand_sec if cand_sec[n] > base_sec.get(n, 0)
+    }
     if mech_reg:
         reasons.append(
             "harness storage contract regressed (mechanical): "
@@ -455,22 +485,32 @@ def confirmed(
 
     # Behavioral: every task with a nonzero behavioral count on either side gets a
     # verdict from the predeclared Fisher test at THIS confirmation's own attempt
-    # counts — not just the tasks that rose — and every verdict is kept, so the record
-    # shows what was tested, not only what tripped. Only "confirmed_increase" blocks.
+    # counts, PLUS every task routed here in the first place (``first.targeted_rerun``)
+    # even if it comes back clean on both sides — a routed task that reconfirms clean
+    # must still show a "no_increase" verdict, or "scrutinized and cleared" is
+    # indistinguishable from "never checked" in the record. Every verdict is kept, not
+    # just the ones that rose, so the record shows what was tested, not only what
+    # tripped. Only "confirmed_increase" blocks.
     base_beh = security_failures(confirm_baseline, "behavioral")
     cand_beh = security_failures(confirm_candidate, "behavioral")
+    watch = set(first.targeted_rerun) | set(base_beh) | set(cand_beh)
     behavioral_verdicts: dict[str, dict] = {}
-    for n in sorted(set(base_beh) | set(cand_beh)):
-        bn = confirm_baseline["tasks"][n]["attempts"]
-        cn = confirm_candidate["tasks"][n]["attempts"]
+    for n in sorted(watch):
+        bn = int(confirm_baseline["tasks"][n]["attempts"])
+        cn = int(confirm_candidate["tasks"][n]["attempts"])
         verdict = targeted_security_verdict(base_beh.get(n, 0), bn, cand_beh.get(n, 0), cn)
         behavioral_verdicts[n] = verdict
         if verdict["verdict"] == "confirmed_increase":
             p = verdict["p_one_sided"]
             reasons.append(f"behavioral security increase confirmed on {n} (p={p:.3f})")
 
-    beh_reg = _regressions(confirm_baseline, confirm_candidate, "behavioral")
-    sec_reg = mech_reg | beh_reg  # kept for the record; only mech_reg / confirmed_increase block
+    # Same restoration as evaluate(): security_regressions is the unfiltered total,
+    # never a class merge that can drop one class's counts on a dual-class task.
+    base_sec = security_failures(confirm_baseline)
+    cand_sec = security_failures(confirm_candidate)
+    sec_reg = {
+        n: [base_sec.get(n, 0), cand_sec[n]] for n in cand_sec if cand_sec[n] > base_sec.get(n, 0)
+    }
 
     # The original improvement, on the original tasks, on the original split.
     basis = [per[n] for n in first.improved_tasks]
