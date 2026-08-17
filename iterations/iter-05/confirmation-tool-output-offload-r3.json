@@ -1,0 +1,164 @@
+{
+  "candidate_id": "tool-output-offload-r3",
+  "stage": "paired_confirmation",
+  "baseline_label": "confirm-r3-base",
+  "candidate_label": "confirm-r3-cand",
+  "attempts_per_task_per_arm": 10,
+  "confirm_set": [
+    "C1",
+    "C2",
+    "C3",
+    "E1",
+    "E4"
+  ],
+  "first_decision": {
+    "applied": true,
+    "outcome": "CONFIRM",
+    "reasons": [
+      "gain beyond one attempt on held-out (carried by E4)"
+    ],
+    "delta_in": 0.0,
+    "delta_ho": 0.04,
+    "threshold_in": 0.018518518518518517,
+    "threshold_ho": 0.02,
+    "excluded": [
+      "A1",
+      "A3",
+      "A4",
+      "A5",
+      "G1",
+      "G2",
+      "G4",
+      "H1",
+      "H2",
+      "H3"
+    ],
+    "evidence_split": "held_out",
+    "improved_tasks": [
+      "E4"
+    ],
+    "confirm_tasks": [
+      "C1",
+      "C2",
+      "C3",
+      "E1",
+      "E4"
+    ],
+    "targeted_rerun": [],
+    "security_regressions": {},
+    "behavioral_regressions": {},
+    "raw": {
+      "delta_in": 0.0,
+      "delta_ho": 0.04
+    }
+  },
+  "confirmation": {
+    "outcome": "REJECT",
+    "reasons": [
+      "original improvement did not repeat on E4 \u2014 a gain elsewhere is a new claim, not a confirmation"
+    ],
+    "delta_in": 0.0,
+    "delta_ho": 0.05,
+    "threshold_in": 0.03333333333333333,
+    "threshold_ho": 0.05,
+    "excluded": [
+      "A1",
+      "A3",
+      "A4",
+      "A5",
+      "G1",
+      "G2",
+      "G4",
+      "H1",
+      "H2",
+      "H3"
+    ],
+    "evidence_split": "held_out",
+    "improved_tasks": [
+      "E4"
+    ],
+    "confirm_tasks": [
+      "C1",
+      "C2",
+      "C3",
+      "E1",
+      "E4"
+    ],
+    "targeted_rerun": [],
+    "security_regressions": {},
+    "behavioral_regressions": {},
+    "raw": {
+      "stage": "confirmation",
+      "behavioral_verdicts": {
+        "C3": {
+          "verdict": "no_increase",
+          "p_one_sided": 0.8947368421052632,
+          "alpha": 0.05,
+          "counts": {
+            "baseline": [
+              2,
+              10
+            ],
+            "candidate": [
+              1,
+              10
+            ]
+          }
+        }
+      }
+    }
+  },
+  "per_task": {
+    "C1": {
+      "base": [
+        10,
+        10
+      ],
+      "cand": [
+        10,
+        10
+      ]
+    },
+    "C2": {
+      "base": [
+        10,
+        10
+      ],
+      "cand": [
+        10,
+        10
+      ]
+    },
+    "C3": {
+      "base": [
+        8,
+        10
+      ],
+      "cand": [
+        9,
+        10
+      ]
+    },
+    "E1": {
+      "base": [
+        10,
+        10
+      ],
+      "cand": [
+        10,
+        10
+      ]
+    },
+    "E4": {
+      "base": [
+        0,
+        10
+      ],
+      "cand": [
+        0,
+        10
+      ]
+    }
+  },
+  "finding": "E4 did not repeat: 0/10 both arms, against 2/5 in the full-suite run. Mechanism measured, not inferred: all 32 scratch-access attempts in the candidate arm used bash (grep/ls/open), which cannot resolve the scratch:// scheme \u2014 only read_file can. The model recalled the needle 8/10 times by RE-DERIVING it (sha256 of the seed), which E4 taint-disqualifies by design. The virtual ref removed bash from the recovery routes, and bash is what the model reaches for. This is the same reduced-affordance hypothesis that carbon accept ch-06 raised and could not discriminate."
+}
