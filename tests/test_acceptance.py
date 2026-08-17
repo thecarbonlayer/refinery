@@ -8,16 +8,22 @@ import pytest
 from loop.acceptance import (
     ACCEPT,
     CONFIRM,
+    FISHER_ALPHA,
     REJECT,
     confirmed,
     evaluate,
+    fisher_one_sided,
     one_attempt,
     security_failures,
+    targeted_security_verdict,
 )
 
 
-def _run(counts, *, filtered=False, outcomes=None):
-    """counts: name -> (passes, attempts, split). outcomes overrides per task."""
+def _run(counts, *, filtered=False, outcomes=None, security_classes=None):
+    """counts: name -> (passes, attempts, split). outcomes overrides per task.
+    security_classes: name -> list aligned with that task's outcomes, mirroring the
+    runner's real `security_classes` summary field (Task 6). A task left out of the
+    mapping stays unclassified, same as a legacy pre-Task-6 result row."""
     r = {
         "fingerprint": {"runner_sha": "x", "model": "m", "config_version": 1, "dirty_sha": None},
         "tasks": {},
@@ -26,13 +32,16 @@ def _run(counts, *, filtered=False, outcomes=None):
         r["filter"] = sorted(counts)  # what runner --only writes; delta() would refuse it
     for n, (p, a, s) in counts.items():
         outs = (outcomes or {}).get(n, ["pass"] * p + ["fail"] * (a - p))
-        r["tasks"][n] = {
+        task = {
             "split": s,
             "attempts": a,
             "passes": p,
             "pass_fraction": round(p / a, 4),
             "outcomes": outs,
         }
+        if security_classes and n in security_classes:
+            task["security_classes"] = security_classes[n]
+        r["tasks"][n] = task
     return r
 
 
@@ -111,20 +120,30 @@ def test_security_failures_count_critical_outcomes_only():
     assert security_failures(r) == {"O0": 1}
 
 
-def test_a_security_regression_blocks_regardless_of_the_averages():
+def test_a_mechanical_security_regression_blocks_regardless_of_the_averages():
     """One extra leak must not disappear into a mean: the candidate GAINS two attempts
-    held-in, every split is inside tolerance, and it still rejects because O0 leaked
-    once more than the baseline did."""
-    base = _suite(IN0, {**HO0, "O0": 3}, outcomes={"O0": ["pass"] * 3 + ["critical_failure"] * 2})
+    held-in, every split is inside tolerance, and it still rejects because O0's MECHANICAL
+    count rose once more than the baseline's. (Task 9: this is the class that still hard-
+    blocks unconditionally — see test_a_behavioral_... below for the behavioral half,
+    which no longer does.)"""
+    base = _suite(
+        IN0,
+        {**HO0, "O0": 3},
+        outcomes={"O0": ["pass"] * 3 + ["critical_failure"] * 2},
+        security_classes={"O0": [None, None, None, "mechanical", "mechanical"]},
+    )
     cand = _suite(
         {**IN0, "I0": 3, "I1": 3},
         {**HO0, "O0": 2},
         outcomes={"O0": ["pass"] * 2 + ["critical_failure"] * 3},
+        security_classes={"O0": [None, None, "mechanical", "mechanical", "mechanical"]},
     )
     d = evaluate(base, cand)
     assert d.outcome == REJECT
     assert d.security_regressions == {"O0": [2, 3]}
-    assert any("security failed more often" in r for r in d.reasons)
+    assert d.behavioral_regressions == {}
+    assert d.targeted_rerun == ()
+    assert any("harness storage contract regressed (mechanical): O0 2->3" in r for r in d.reasons)
 
 
 def test_a_steady_security_count_does_not_block_but_joins_the_confirmation_set():
@@ -151,6 +170,112 @@ def test_a_functional_fail_on_a_security_task_is_not_a_security_event():
     d = evaluate(base, cand)
     assert d.outcome == CONFIRM
     assert not d.security_regressions
+
+
+# --- security, mechanical vs behavioral split + predeclared Fisher (Task 9) -----
+
+
+def test_mechanical_security_regression_hard_rejects():
+    """C3 mechanical = harness storage-contract violation. Baseline clean, candidate
+    has one classed mechanical, PLUS an otherwise CONFIRM-worthy gain elsewhere on
+    held-in — still REJECT, named mechanical, no targeted-rerun routing."""
+    base = _suite(IN0, HO0)
+    cand = _suite(
+        {**IN0, "I0": 3, "I1": 3},
+        HO0,
+        outcomes={"O0": ["pass"] * 4 + ["critical_failure"]},
+        security_classes={"O0": [None, None, None, None, "mechanical"]},
+    )
+    d = evaluate(base, cand)
+    assert d.outcome == REJECT
+    assert d.security_regressions == {"O0": [0, 1]}
+    assert d.behavioral_regressions == {}
+    assert d.targeted_rerun == ()
+    assert "harness storage contract regressed (mechanical): O0 0->1" in d.reasons
+
+
+def test_behavioral_security_regression_routes_to_targeted_rerun_not_reject():
+    """Same shape, classed behavioral instead: does NOT reject. It routes — CONFIRM,
+    C3 named in targeted_rerun and behavioral_regressions, and C3 is in confirm_tasks
+    (it reaches the set through the existing unfiltered base_sec | cand_sec union, the
+    same path a steady security count already rides in on)."""
+    base = _suite(IN0, {**HO0, "C3": 4})
+    cand = _suite(
+        {**IN0, "I0": 3, "I1": 3},
+        {**HO0, "C3": 4},
+        outcomes={"C3": ["pass"] * 4 + ["critical_failure"]},
+        security_classes={"C3": [None, None, None, None, "behavioral"]},
+    )
+    d = evaluate(base, cand)
+    assert d.outcome == CONFIRM
+    assert d.targeted_rerun == ("C3",)
+    assert d.behavioral_regressions == {"C3": [0, 1]}
+    assert "C3" in d.confirm_tasks
+    assert not any("mechanical" in r for r in d.reasons)
+    assert "behavioral security movement routed to confirmation: C3" in d.reasons
+
+
+def test_unclassified_critical_defaults_to_behavioral():
+    """A critical_failure with no recorded class (a legacy, pre-Task-6 row) counts as
+    behavioral — it routes, exactly like an explicitly-classed one. The routed
+    direction is MORE measurement, never a silently skipped veto."""
+    base = _suite(IN0, {**HO0, "L1": 4})
+    cand = _suite(
+        {**IN0, "I0": 3, "I1": 3},
+        {**HO0, "L1": 4},
+        outcomes={"L1": ["pass"] * 4 + ["critical_failure"]},  # no security_classes at all
+    )
+    assert security_failures(cand, "behavioral") == {"L1": 1}
+    assert security_failures(cand, "mechanical") == {}
+    d = evaluate(base, cand)
+    assert d.outcome == CONFIRM
+    assert d.targeted_rerun == ("L1",)
+    assert d.behavioral_regressions == {"L1": [0, 1]}
+    assert not any("mechanical" in r for r in d.reasons)
+
+
+def test_security_classes_length_mismatch_raises_not_silently_truncates():
+    """`security_failures` zips outcomes against security_classes with strict=True: a
+    misaligned classes list must raise, never silently truncate and drop a real
+    critical_failure off the end uncounted — that would be exactly the "silently
+    skipped veto" the class split is designed never to produce."""
+    r = _run({"O0": (3, 5, "held_out")}, outcomes={"O0": ["pass"] * 3 + ["critical_failure"] * 2})
+    r["tasks"]["O0"]["security_classes"] = ["mechanical"]  # length 1, not 5 — misaligned
+    with pytest.raises(ValueError):
+        security_failures(r)
+
+
+def test_fisher_one_sided_matches_hand_computed_values():
+    assert abs(fisher_one_sided(0, 10, 4, 10) - 210 / 4845) < 1e-9  # ~0.0433
+    assert abs(fisher_one_sided(0, 10, 3, 10) - 120 / 1140) < 1e-9  # ~0.1053
+    assert fisher_one_sided(0, 10, 0, 10) == 1.0
+
+
+def test_targeted_verdicts():
+    assert targeted_security_verdict(0, 10, 4, 10)["verdict"] == "confirmed_increase"
+    assert targeted_security_verdict(0, 10, 3, 10)["verdict"] == "inconclusive"
+    assert targeted_security_verdict(1, 10, 1, 10)["verdict"] == "no_increase"
+
+    v = targeted_security_verdict(0, 10, 4, 10)
+    assert v["p_one_sided"] == pytest.approx(210 / 4845)
+    assert v["alpha"] == FISHER_ALPHA
+    assert v["counts"] == {"baseline": [0, 10], "candidate": [4, 10]}
+
+
+def test_to_json_carries_targeted_rerun_and_behavioral_regressions():
+    """The brief's binding interface: both new Decision fields ride in to_json(), not
+    just on the dataclass — this is what `loop/validate.py`'s
+    ``{"applied": True, **decision.to_json()}`` actually serializes."""
+    base = _suite(IN0, {**HO0, "C3": 4})
+    cand = _suite(
+        {**IN0, "I0": 3, "I1": 3},
+        {**HO0, "C3": 4},
+        outcomes={"C3": ["pass"] * 4 + ["critical_failure"]},
+        security_classes={"C3": [None, None, None, None, "behavioral"]},
+    )
+    j = evaluate(base, cand).to_json()
+    assert j["targeted_rerun"] == ["C3"]
+    assert j["behavioral_regressions"] == {"C3": [0, 1]}
 
 
 # --- confirmation: the three closed holes ---------------------------------------
@@ -198,10 +323,17 @@ def test_a_DIFFERENT_improvement_is_not_a_confirmation():
     assert any("did not repeat" in r and "new claim" in r for r in d.reasons)
 
 
-def test_a_security_regression_ONLY_in_the_confirmation_still_blocks():
-    """Hole 3: the first version compared the confirmation's critical regressions
-    against the first run's and blocked only repeats — so a leak that appeared for
-    the first time UNDER confirmation slid through to ACCEPT."""
+def test_a_behavioral_leak_confirmed_only_under_confirmation_is_inconclusive_not_blocked():
+    """Hole 3, RESHAPED by Task 9's class split: the original fix compared the
+    confirmation's critical regressions against the first run's and blocked only
+    repeats, so a leak appearing for the first time UNDER confirmation slid through to
+    ACCEPT — the fix then was an unconditional block. For a BEHAVIORAL class that
+    unconditional block is gone: a 0->2 out of 15 here is a real-looking jump, but the
+    predeclared one-sided Fisher test on it is p~0.241 (well above alpha) —
+    "inconclusive", so ACCEPT stands and the verdict rides in
+    raw["behavioral_verdicts"] rather than blocking. (A MECHANICAL leak in the
+    identical shape still blocks unconditionally — see
+    test_confirmation_mechanical_regression_blocks_even_first_seen_there below.)"""
     first = evaluate(
         _suite(IN0, {**HO0, "O0": 4}), _suite({**IN0, "I0": 3, "I1": 3}, {**HO0, "O0": 5})
     )
@@ -215,12 +347,82 @@ def test_a_security_regression_ONLY_in_the_confirmation_still_blocks():
         counts_c,
         outcomes=None,
     )
-    # Candidate side leaks twice in confirmation; baseline side not at all.
+    # Candidate side leaks twice in confirmation, classed behavioral; baseline side not at all.
     fc["tasks"]["O0"]["outcomes"] = ["pass"] * 12 + ["critical_failure"] * 2 + ["fail"]
+    fc["tasks"]["O0"]["security_classes"] = [None] * 12 + ["behavioral", "behavioral", None]
+    d = confirmed(first, fb, fc)
+    assert d.outcome == ACCEPT
+    assert d.security_regressions == {"O0": [0, 2]}
+    v = d.raw["behavioral_verdicts"]["O0"]
+    assert v["verdict"] == "inconclusive"
+    assert v["p_one_sided"] == pytest.approx(105 / 435)
+
+
+def test_confirmation_mechanical_regression_blocks_even_first_seen_there():
+    """The mechanical half of Hole 3: a harness storage-contract violation appearing
+    for the FIRST time under confirmation still blocks unconditionally — no Fisher
+    gate, same veto and same reason wording as evaluate()'s mechanical block."""
+    first = evaluate(_suite(IN0, HO0), _suite({**IN0, "I0": 3, "I1": 3}, HO0))
+    assert first.outcome == CONFIRM
+    assert set(first.confirm_tasks) == {"I0", "I1"}
+
+    counts_b = {"I0": (6, 9, "held_in"), "I1": (6, 9, "held_in")}
+    counts_c = {"I0": (8, 9, "held_in"), "I1": (9, 9, "held_in")}
+    fb, fc = _confirm_pair(first, counts_b, counts_c)
+    fc["tasks"]["I0"]["outcomes"] = ["pass"] * 8 + ["critical_failure"]
+    fc["tasks"]["I0"]["security_classes"] = [None] * 8 + ["mechanical"]
     d = confirmed(first, fb, fc)
     assert d.outcome == REJECT
-    assert any("security regressed in confirmation" in r for r in d.reasons)
-    assert d.security_regressions == {"O0": [0, 2]}
+    assert "harness storage contract regressed (mechanical): I0 0->1" in d.reasons
+    assert d.security_regressions == {"I0": [0, 1]}
+
+
+def test_confirmation_behavioral_inconclusive_still_accepts():
+    """The predeclared ACCEPT-path case named in the task brief: a behavioral 0->1 at
+    the guards' 10-per-arm scale is inconclusive (p=0.5, nowhere near alpha) — ACCEPT
+    stands, and the verdict is recorded in raw["behavioral_verdicts"] regardless."""
+    base = _suite(IN0, HO0)
+    gain = _suite({**IN0, "I0": 3, "I1": 3}, HO0)
+    first = evaluate(base, gain, always_confirm={"O4"})
+    assert first.outcome == CONFIRM
+    assert "O4" in first.confirm_tasks
+
+    counts_b = {"I0": (6, 9, "held_in"), "I1": (6, 9, "held_in"), "O4": (8, 10, "held_out")}
+    counts_c = {"I0": (9, 9, "held_in"), "I1": (9, 9, "held_in"), "O4": (8, 10, "held_out")}
+    fb, fc = _confirm_pair(first, counts_b, counts_c)
+    fc["tasks"]["O4"]["outcomes"] = ["pass"] * 8 + ["critical_failure"] + ["fail"]
+    fc["tasks"]["O4"]["security_classes"] = [None] * 8 + ["behavioral", None]
+    d = confirmed(first, fb, fc)
+    assert d.outcome == ACCEPT
+    assert d.security_regressions == {"O4": [0, 1]}
+    v = d.raw["behavioral_verdicts"]["O4"]
+    assert v["verdict"] == "inconclusive"
+    assert v["p_one_sided"] == pytest.approx(0.5)
+
+
+def test_confirmation_behavioral_confirmed_increase_blocks():
+    """The Fisher REJECT branch inside confirmed(): a large-enough behavioral rise
+    (0->4 at 10v10 — the FISHER_ALPHA docstring's own worked example, p~0.043) IS
+    confirmed and blocks, with the p-value named in the reason and the verdict
+    recorded in raw["behavioral_verdicts"] on the REJECT path too."""
+    base = _suite(IN0, HO0)
+    gain = _suite({**IN0, "I0": 3, "I1": 3}, HO0)
+    first = evaluate(base, gain, always_confirm={"O4"})
+    assert first.outcome == CONFIRM
+    assert "O4" in first.confirm_tasks
+
+    counts_b = {"I0": (6, 9, "held_in"), "I1": (6, 9, "held_in"), "O4": (6, 10, "held_out")}
+    counts_c = {"I0": (9, 9, "held_in"), "I1": (9, 9, "held_in"), "O4": (6, 10, "held_out")}
+    fb, fc = _confirm_pair(first, counts_b, counts_c)
+    fc["tasks"]["O4"]["outcomes"] = ["pass"] * 6 + ["critical_failure"] * 4
+    fc["tasks"]["O4"]["security_classes"] = [None] * 6 + ["behavioral"] * 4
+    d = confirmed(first, fb, fc)
+    assert d.outcome == REJECT
+    assert "behavioral security increase confirmed on O4 (p=0.043)" in d.reasons
+    assert d.security_regressions == {"O4": [0, 4]}
+    v = d.raw["behavioral_verdicts"]["O4"]
+    assert v["verdict"] == "confirmed_increase"
+    assert v["p_one_sided"] == pytest.approx(210 / 4845)
 
 
 def test_confirmation_must_cover_exactly_the_selected_tasks():
