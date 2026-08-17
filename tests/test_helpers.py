@@ -433,6 +433,22 @@ def test_absolute_paths_outside_allows_an_explicit_extra_root(tmp_path: Path):
     assert absolute_paths_outside(f"cat {scratch}/offload/x.txt", root) == [
         f"{scratch}/offload/x.txt"
     ]
+    # The allowance is THIS session's root, not "anywhere scratch-shaped". A sibling
+    # session's scratch and a prefix-sibling directory both stay flagged — pinned so a
+    # future loosening to "allow anything under the scratch parent" cannot pass here.
+    # (The parent is the OS temp dir; allowing it would exempt most of the filesystem
+    # a leak would actually reach for.)
+    sibling = tmp_path / "scratch-OTHERSESSION"
+    prefix_sibling = Path(f"{scratch}EXTRA")
+    assert absolute_paths_outside(f"cat {sibling}/offload/x.txt", root, also_allow=scratch) == [
+        f"{sibling}/offload/x.txt"
+    ]
+    assert absolute_paths_outside(
+        f"cat {prefix_sibling}/offload/x.txt", root, also_allow=scratch
+    ) == [f"{prefix_sibling}/offload/x.txt"]
+    assert absolute_paths_outside(f"cat {tmp_path}/other.txt", root, also_allow=scratch) == [
+        f"{tmp_path}/other.txt"
+    ]
 
 
 def test_arg_texts_decodes_json_string_values(tmp_path: Path):

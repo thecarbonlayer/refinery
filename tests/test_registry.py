@@ -1797,3 +1797,45 @@ def test_a5_guards_the_head_window_that_a4_cannot_see():
     assert A5_SENTINEL not in truncate(body, replace(balanced, tail_fraction=0.999)), (
         "A5 cannot guard `tail_fraction` if a near-1 value still leaves its needle in the head"
     )
+
+
+def test_c1_grants_the_allowance_to_the_sessions_scratch_root_specifically():
+    """`also_allow=` must carry the session's scratch root, not just *a* path.
+
+    The value is what makes the allowance correct: `also_allow=ws.root` would be a
+    silent no-op (the workspace root is already exempt), leaving C1 flagging the
+    model for reading the scratch carbon's own footer told it to read — and every
+    behavioural test still passes, because a no-op allowance changes nothing they
+    assert.
+
+    This batch has now produced that exact shape five times: a parameter that is
+    present and carries the wrong thing, or nothing. A source check is what catches
+    it, since no behavioural test can tell a redundant allowance from a missing one.
+    """
+    import ast
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1] / "runner" / "tasks" / "cluster_c.py"
+    tree = ast.parse(src.read_text(encoding="utf-8"), filename=str(src))
+
+    run_c1 = next(
+        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "run_c1"
+    )
+    calls = [
+        n
+        for n in ast.walk(run_c1)
+        if isinstance(n, ast.Call)
+        and getattr(n.func, "id", getattr(n.func, "attr", None)) == "absolute_paths_outside"
+    ]
+    assert calls, "run_c1 no longer calls absolute_paths_outside — C1's escape check is gone"
+    for call in calls:
+        kw = next((k for k in call.keywords if k.arg == "also_allow"), None)
+        assert kw is not None, (
+            "the scratch allowance is missing; C1 will flag its own scratch route"
+        )
+        # ...and it must be an attribute chain ending in `.scratch_root`, i.e. the
+        # session env's own root — not the workspace root, not a bare local.
+        assert isinstance(kw.value, ast.Attribute) and kw.value.attr == "scratch_root", (
+            "also_allow must be <env>.scratch_root; anything else is a no-op allowance "
+            f"that no behavioural test can distinguish (got {ast.dump(kw.value)[:80]})"
+        )
