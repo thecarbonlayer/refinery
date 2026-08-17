@@ -92,13 +92,11 @@ ACCEPT = "ACCEPT"
 # Behavioral routing is the coarse filter, deliberately biased toward "keep measuring"
 # over "reject on noise". Raising n is the only way to sharpen it, and it sharpens
 # SLOWLY — same enumeration, detecting a doubled 12% rate: n=10 -> 6.3%, n=20 -> 14.6%,
-# n=30 -> 20.8%, n=40 -> 30.7%, n=60 -> 44.6%. Half-detection of a doubling needs
-# roughly n=70 per arm, i.e. ~140 live attempts on ONE task. That cost has not been
-# paid and is not obviously worth paying, so the limitation stands and is stated here
-# rather than discovered later by someone trusting the test further than it can carry.
-# (A first draft of this comment guessed "n=30 gives you half"; the enumeration above
-# says 20.8%. The guess was wrong by more than a factor of two, which is exactly why
-# the numbers in this block are computed rather than estimated.)
+# n=30 -> 20.8%, n=40 -> 30.7%, n=60 -> 44.6%, i.e. roughly 50% near n=70 per arm
+# (~140 live attempts on ONE task). That cost has not been paid and is not obviously
+# worth paying, so the limitation stands and is stated here rather than discovered
+# later by someone trusting the test further than it can carry. Informal power
+# estimates were unreliable here; every number in this block is exact enumeration.
 #
 # `p` is a single float64 division of two exact (arbitrary-precision) integers built
 # from `comb()` — the only place a rounding error could enter, and Python's int/int
