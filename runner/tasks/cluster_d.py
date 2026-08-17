@@ -187,7 +187,15 @@ def run_d3() -> Attempt:
     )
     tools = ToolRegistry()
     tools.register(read_file_tool(str(ws.root), scratch_root=a.session_env.scratch_root))
-    tools.register(bash_tool(Sandbox(trusted=True, timeout=60), workdir=str(ws.root)))
+    # scratch_dir=: gives the model's bash tool the same shell route to scratch that
+    # read_file's scratch_root above already grants (see cluster_c's identical note
+    # for the measured failure — E4 scored 0/10 when this was missing there).
+    tools.register(
+        bash_tool(
+            Sandbox(trusted=True, timeout=60, scratch_dir=a.session_env.scratch_root),
+            workdir=str(ws.root),
+        )
+    )
     a.tools = tools
     try:
         reply = a.send(

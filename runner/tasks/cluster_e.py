@@ -297,7 +297,16 @@ def run_e2() -> Attempt:
     approvals: list[dict] = []
     a = _plain_agent(workspace_root=ws.root, approvals=approvals)
     tools = ToolRegistry()
-    tools.register(bash_tool(Sandbox(trusted=True, timeout=60), workdir=str(ws.root)))
+    # scratch_dir=: the graded model's bash tool needs the same shell route to
+    # scratch that E4 grants via read_file's scratch_root (see run_e4's note) — this
+    # task doesn't offload, but every graded agent's Sandbox carries it uniformly so
+    # r9 measures the shell route real carbon users actually get.
+    tools.register(
+        bash_tool(
+            Sandbox(trusted=True, timeout=60, scratch_dir=a.session_env.scratch_root),
+            workdir=str(ws.root),
+        )
+    )
     a.tools = tools
     try:
         reply = a.send(
@@ -366,7 +375,14 @@ def run_e3() -> Attempt:
     approvals = [{"tool": "bash", "decision": "approve"}]
     a = _plain_agent(workspace_root=ws.root, approvals=approvals)
     tools = ToolRegistry()
-    tools.register(bash_tool(Sandbox(trusted=True, timeout=60), workdir=str(ws.root)))
+    # scratch_dir=: same reasoning as run_e2 — every graded agent's Sandbox carries
+    # the shell route uniformly, even on a task that doesn't itself offload.
+    tools.register(
+        bash_tool(
+            Sandbox(trusted=True, timeout=60, scratch_dir=a.session_env.scratch_root),
+            workdir=str(ws.root),
+        )
+    )
     a.tools = tools
     try:
         reply = a.send(
@@ -548,7 +564,19 @@ def run_e4() -> Attempt:
     # scratch (below), never the workspace — the door spills there, not here.
     a = _plain_agent(workspace_root=ws.root, approvals=approvals)
     tools = ToolRegistry()
-    tools.register(bash_tool(Sandbox(trusted=True, timeout=60), workdir=str(ws.root)))
+    # scratch_dir=: the model's OWN bash tool is E4's whole subject — a live
+    # measurement scored this task 0/10 without it: 32 of 32 attempts to read back
+    # the offloaded artifact went through bash (grep, ls -F, a python one-liner),
+    # none of which can resolve scratch:// (only read_file does), so the model
+    # fabricated an answer by re-deriving it instead of recovering it from disk.
+    # $CARBON_SCRATCH_DIR is the route the footer advertises unconditionally
+    # (harness/sandbox.py); omitting scratch_dir= here left it pointing at nothing.
+    tools.register(
+        bash_tool(
+            Sandbox(trusted=True, timeout=60, scratch_dir=a.session_env.scratch_root),
+            workdir=str(ws.root),
+        )
+    )
     # The harness's own paging belt rides along: the offload convention hands back
     # a scratch:// ref meant for ranged reads, and withholding the tool that reads
     # ranges would manufacture the failure this task exists to measure. scratch_root

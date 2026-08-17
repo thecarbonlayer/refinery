@@ -1,24 +1,62 @@
-"""Test isolation: sweep leaked carbon scratch directories (mirrors carbon's
-``tests/conftest.py``).
+"""Test isolation: give the whole suite its own scratch parent (mirrors carbon's
+own ``tests/conftest.py`` fix).
 
 refinery's tests build real carbon ``Agent``/``SessionEnvironment`` objects (e.g.
 ``test_helpers.py``'s ``_probe_agent``, ``test_registry.py``'s ``_build_c_agent``) to
 pin behavior against the live harness rather than a mock. Each one that reaches
-construction makes a real ``mkdtemp()`` scratch directory under the OS temp dir. Most
-of those tests close what they own — the ownership/lifecycle tests
-(``test_build_c_agent_binds_recording_wrapped_tools_and_scratch_root`` and friends)
-assert exactly that in-body, and this fixture changes nothing about what THEY prove,
-since the sweep below only runs after the test function has already returned. But a
-future test that forgets its ``close()``, or crashes before reaching one, would
-otherwise abandon a ``carbon-scratch-*`` directory for carbon's own ``scavenge()`` to
-find — up to 24h later (see carbon's ``harness/session_env.py``), and every stray
-directory in the temp dir slows every later ``Agent()`` construction's glob+stat, not
-just the leaking test's.
+construction makes a real ``mkdtemp()`` scratch directory under the OS temp dir.
 
-Snapshot-before/remove-only-new-after, same as carbon: never touch a directory this
-test did not create, so a directory another process (or a test that legitimately
-keeps its env alive past its own yield) owns is left alone. Explicit ``close()``/
-``cleanup()`` calls remain the contract; this is only the net underneath it.
+The previous version of this fixture snapshot-diffed the REAL OS temp dir once per
+test: anything matching ``carbon-scratch-*`` that appeared since the last ``yield``
+was assumed to be this test's own leak and removed. That cannot tell "this test's
+leak" from "a different process's directory that happened to appear in the same
+window" — refinery's own purpose is running live measurements against carbon
+(``runner/``), and a live measurement running concurrently on the same machine loses
+its scratch mid-attempt, which surfaces as a fabricated C3 mechanical security
+failure (see ``runner/tasks/cluster_c.py``), not as what it actually is: a test
+sweep with no way to tell the two apart. Carbon's own test suite had the identical
+P1, fixed the same way; this mirrors that fix.
+
+Fixed by OWNERSHIP, not diffing: replace ``harness.session_env``'s own
+``scratch_parent_dir`` — the ONE function ``local_session_env`` and ``scavenge()``'s
+default root both call for "where does ephemeral scratch live" (see that module) —
+for the life of this pytest process, so every session env built anywhere, any way,
+during the whole suite lands under a throwaway root nothing else on the machine ever
+writes to. A concurrent process (a live measurement, a different pytest run) runs its
+OWN Python process with its OWN imported copy of ``harness.session_env`` — this
+patches only the copy loaded into THIS process — so its scratch keeps landing in the
+real OS temp dir, structurally out of reach of anything below: not merely excluded by
+a check that could be wrong, but never glob-reachable from the redirected root at all.
+
+A monkeypatched FUNCTION, deliberately — not an env var. An earlier version of
+carbon's own fixture used an env var, which a review caught as reachable from
+PRODUCTION: an env var crosses via ``.env`` too (carbon's ``model/provider.py``
+``Provider.from_env()`` calls ``os.environ.setdefault`` for every key in that file,
+and every production entrypoint resolves a ``Provider`` before constructing its first
+``Agent``), so a single stray line in the file carbon tells users to edit for their
+model endpoint would have been enough to silently redirect a REAL session's scratch
+(into the repo if the value were ``.``) and silently stop ``scavenge()`` from ever
+sweeping the real temp dir again. A swapped FUNCTION has zero production surface:
+nothing outside this fixture's own process can ever replace it, so there is no file,
+environment variable, or subprocess boundary left for a stray value to cross.
+
+``pytest.MonkeyPatch()`` is used directly, not the ordinary function-scoped
+``monkeypatch`` fixture (which pytest does not allow at session scope) — the patch is
+undone explicitly in ``finally`` instead of automatically at a function's end.
+
+Session-scoped, not per-test: the old fixture's snapshot-diff globbed the real temp
+dir twice per test regardless of whether that test ever built an Agent. Redirecting
+once, up front, costs one function swap for the whole session; nothing per-test
+remains to glob at all.
+
+The root's own name still starts with ``SCRATCH_PREFIX``
+(``carbon-scratch-pytest-session-<random>``, not an unrelated prefix): a run killed
+hard enough to skip this fixture's own ``finally`` (SIGKILL, an OOM-kill — the one
+failure mode no process-local cleanup can guard against) leaves the whole root
+behind, but named this way it stays glob-reachable by a FUTURE, unrelated
+``scavenge()`` sweep of the real temp dir — reaped as one unit after
+``SCAVENGE_AGE_S``, the same backstop every ordinary abandoned session already relies
+on, rather than orphaned forever under a prefix nothing will ever look for again.
 """
 
 from __future__ import annotations
@@ -30,12 +68,15 @@ from pathlib import Path
 import pytest
 
 
-@pytest.fixture(autouse=True)
-def _sweep_scratch_dirs_this_test_leaked():
-    from harness.session_env import SCRATCH_PREFIX
+@pytest.fixture(scope="session", autouse=True)
+def _isolated_scratch_root():
+    import harness.session_env as session_env_mod
 
-    root = Path(tempfile.gettempdir())
-    before = set(root.glob(f"{SCRATCH_PREFIX}*"))
-    yield
-    for stray in set(root.glob(f"{SCRATCH_PREFIX}*")) - before:
-        shutil.rmtree(stray, ignore_errors=True)
+    root = Path(tempfile.mkdtemp(prefix=f"{session_env_mod.SCRATCH_PREFIX}pytest-session-"))
+    mp = pytest.MonkeyPatch()
+    mp.setattr(session_env_mod, "scratch_parent_dir", lambda: root)
+    try:
+        yield root
+    finally:
+        mp.undo()
+        shutil.rmtree(root, ignore_errors=True)

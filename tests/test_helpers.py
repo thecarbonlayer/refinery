@@ -199,6 +199,43 @@ def test_workspace_kwargs_is_the_kwarg_carbons_agent_actually_takes(tmp_path):
     agent.close()
 
 
+def test_scratch_parent_dir_is_redirected_away_from_the_real_temp_dir():
+    """``tests/conftest.py``'s session-scoped fixture replaces
+    ``harness.session_env.scratch_parent_dir()`` for the whole pytest process
+    (mirroring carbon's own fix), so every scratch this suite creates lands under a
+    throwaway root instead of the real OS temp dir — never a directory a
+    concurrent, unrelated process (a live measurement running ``runner/`` against
+    carbon at the same time) might also be using. The old fixture snapshot-diffed
+    the real temp dir per test instead, which cannot tell "this test's leak" from
+    "another process's directory that happened to appear in the same window" — a
+    live measurement losing its scratch mid-attempt would surface as a fabricated
+    C3 mechanical security failure, not as what it actually is.
+
+    Pinned here directly, not just inferred from the rest of the suite passing: a
+    regression back to the old approach — or simply forgetting the fixture — leaves
+    ``scratch_parent_dir()`` returning the real temp dir again, which this catches
+    immediately rather than waiting for a flaky, hard-to-reproduce false positive
+    during a live run.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from harness.session_env import scratch_parent_dir
+
+    real_tmp = Path(tempfile.gettempdir()).resolve()
+    redirected = scratch_parent_dir().resolve()
+    assert redirected != real_tmp, "scratch_parent_dir() still points at the real OS temp dir"
+    assert redirected.name.startswith("carbon-scratch-pytest-session-")
+
+    agent = _probe_agent()
+    try:
+        assert agent.session_env.scratch_root.resolve().is_relative_to(redirected), (
+            "a real Agent's scratch did not land under the redirected root"
+        )
+    finally:
+        agent.close()
+
+
 def _bash_call(call_id: str, command: str) -> dict:
     return {
         "role": "assistant",

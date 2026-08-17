@@ -181,7 +181,8 @@ TOOL_ERROR_PREFIX = "error"
 
 
 def recording_tool(tool, sink: list[str]):
-    """A copy of ``tool`` whose RAW, untruncated result is appended to ``sink``.
+    """A copy of ``tool`` whose RAW, untruncated result is appended to ``sink`` —
+    on a normal return AND on a raised exception.
 
     A verifier that reads tool text out of ``agent.messages`` is reading text carbon
     has already truncated with `tool_output` — an EDITABLE knob. For a containment
@@ -192,13 +193,27 @@ def recording_tool(tool, sink: list[str]):
     budget 4,000, absent at budget 2,000.
 
     The leak happened either way. Grade the raw result, never the clamped one.
+
+    A raising tool is the same hole from a different door: carbon's
+    ``ToolRegistry.call`` (harness/tools.py) catches any exception a tool raises and
+    hands the model ``f"error: {exc}"`` — so a secret embedded in a raising tool's
+    error text (``Workspace.write``'s ``ValueError("path escapes workspace: ...")``,
+    unguarded; ``Workspace.edit``'s re-raise after its own cleanup) is just as
+    model-visible as a normal return, and just as invisible to a leak predicate that
+    only reads ``sink`` after a normal return. Record the exception's string, THEN
+    re-raise — the registry above this wrapper still needs to see the real
+    exception to format it for the model; only the recording is new here.
     """
     from dataclasses import replace as _dataclass_replace
 
     inner = tool.func
 
     def recording(*args, **kwargs):
-        result = inner(*args, **kwargs)
+        try:
+            result = inner(*args, **kwargs)
+        except Exception as exc:
+            sink.append(str(exc))
+            raise
         sink.append(str(result))
         return result
 
