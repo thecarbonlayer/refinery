@@ -146,6 +146,124 @@ def test_pr_body_is_the_required_template():
     assert "computed locally against LM Studio" in body  # disclosed limitation
 
 
+def _rule(outcome, **extra):
+    """A minimal `rule` dict shaped exactly like `{"applied": True, **decision.to_json()}`
+    — the contract `loop/validate.py` actually writes onto `ValidationRecord.rule`
+    (see `rule_disposition()` in loop/validate.py)."""
+    base = {
+        "applied": True,
+        "outcome": outcome,
+        "reasons": (),
+        "delta_in": 0.0,
+        "delta_ho": 0.0,
+        "threshold_in": 0.0,
+        "threshold_ho": 0.0,
+        "excluded": [],
+        "evidence_split": "",
+        "improved_tasks": [],
+        "confirm_tasks": [],
+        "targeted_rerun": [],
+        "security_regressions": {},
+        "behavioral_regressions": {},
+        "raw": {},
+    }
+    base.update(extra)
+    return base
+
+
+def test_pr_body_renders_the_rules_disposition_word_not_a_hardcoded_one():
+    """A human approving a PR must see the RULE's disposition, not a literal "ACCEPTED"
+    baked into the template: a CONFIRM-outcome record (not yet shipped — only a fresh
+    paired confirmation can accept it) must never read as accepted, and a REJECT-outcome
+    record must never read as pending."""
+    pending = replace(RECORD, accepted=False, rule=_rule("CONFIRM"))
+    body = pr_body(CANDIDATE, pending, CLUSTER, BASELINE_RESULTS, CANDIDATE_RESULTS)
+    assert "-> PENDING_CONFIRMATION" in body
+    assert "-> ACCEPTED" not in body and "-> REJECTED" not in body
+    assert "**Disposition: PENDING_CONFIRMATION**" in body
+
+    rejected = replace(RECORD, accepted=False, rule=_rule("REJECT"))
+    body = pr_body(CANDIDATE, rejected, CLUSTER, BASELINE_RESULTS, CANDIDATE_RESULTS)
+    assert "-> REJECTED" in body
+    assert "-> ACCEPTED" not in body and "-> PENDING_CONFIRMATION" not in body
+
+    accepted = replace(RECORD, accepted=True, rule=_rule("ACCEPT"))
+    body = pr_body(CANDIDATE, accepted, CLUSTER, BASELINE_RESULTS, CANDIDATE_RESULTS)
+    assert "-> ACCEPTED" in body
+
+
+def test_pr_body_renders_security_regressions_with_class():
+    """`O0` regressed purely mechanically, `O1` purely behaviorally — a reviewer must
+    see WHICH is which, not just that two tasks' critical-failure counts rose."""
+    rule = _rule(
+        "REJECT",
+        security_regressions={"O0": [0, 1], "O1": [0, 1]},
+        behavioral_regressions={"O1": [0, 1]},
+    )
+    rec = replace(RECORD, accepted=False, rule=rule)
+    body = pr_body(CANDIDATE, rec, CLUSTER, BASELINE_RESULTS, CANDIDATE_RESULTS)
+    assert "`O0` (mechanical 0->1)" in body
+    assert "`O1` (behavioral 0->1)" in body
+
+
+def test_pr_body_renders_a_mixed_class_security_regression():
+    """A task regressing in BOTH classes at once (the same shape as
+    test_dual_class_regression_reason_names_mechanical_record_carries_unfiltered_total
+    in test_acceptance.py) must show both halves: total [0, 4], of which [0, 3] is
+    behavioral (from `behavioral_regressions`) and the remaining [0, 1] is mechanical
+    (the unfiltered total minus the behavioral component) — a reviewer reading only the
+    total would not know one leak type dominates over the other."""
+    rule = _rule(
+        "REJECT",
+        security_regressions={"O0": [0, 4]},
+        behavioral_regressions={"O0": [0, 3]},
+    )
+    rec = replace(RECORD, accepted=False, rule=rule)
+    body = pr_body(CANDIDATE, rec, CLUSTER, BASELINE_RESULTS, CANDIDATE_RESULTS)
+    assert "`O0` (mechanical 0->1, behavioral 0->3)" in body
+
+
+def test_pr_body_renders_fisher_verdicts_and_the_power_limitation():
+    """A confirmed behavioral increase must show the task, the verdict word, and the
+    p-value — and every render must carry the stated power limitation so "no_increase"/
+    "inconclusive" is never read as "clean", quoted (not re-derived) from
+    loop/acceptance.py's FISHER_ALPHA comment: 10 attempts/arm against C3's measured
+    ~12%/attempt base rate catches a doubled rate 6.3% of the time, a tripled rate
+    19.1% (exact enumeration)."""
+    rule = _rule(
+        "ACCEPT",
+        raw={
+            "stage": "confirmation",
+            "behavioral_verdicts": {
+                "O4": {
+                    "verdict": "confirmed_increase",
+                    "p_one_sided": 210 / 4845,
+                    "alpha": 0.05,
+                    "counts": {"baseline": [0, 10], "candidate": [4, 10]},
+                }
+            },
+        },
+    )
+    rec = replace(RECORD, accepted=True, rule=rule)
+    body = pr_body(CANDIDATE, rec, CLUSTER, BASELINE_RESULTS, CANDIDATE_RESULTS)
+    assert "`O4` **confirmed_increase** (p=0.043, baseline 0/10, candidate 4/10)" in body
+    assert "10 attempts per arm" in body
+    assert "12%/attempt" in body
+    assert "6.3%" in body
+    assert "19.1%" in body
+    assert "FISHER_ALPHA" in body
+
+
+def test_pr_body_security_section_renders_none_when_the_record_carries_no_security_story():
+    """ "The record carries the security story on every path" includes the path where
+    there is none to tell: the default RECORD (rule={}) must still render a Security
+    section, honestly saying "none" rather than the section silently disappearing."""
+    body = pr_body(CANDIDATE, RECORD, CLUSTER, BASELINE_RESULTS, CANDIDATE_RESULTS)
+    assert "## Security" in body
+    security_section = body.split("## Security", 1)[1].split("###", 1)[0]
+    assert "none" in security_section
+
+
 TELEMETRY_RECORD = replace(
     RECORD,
     baseline_metrics={"tokens": 1000.0, "cost": 0.42},

@@ -234,7 +234,17 @@ def security_failures(results: dict, security_class: str | None = None) -> dict[
     out: dict[str, int] = {}
     for name, t in results["tasks"].items():
         outcomes = t.get("outcomes", ())
-        classes = t.get("security_classes") or [None] * len(outcomes)
+        # A MISSING key (a legacy, pre-Task-6 row) gets the `[None] * len(outcomes)`
+        # fallback. A PRESENT key — even an empty list — does not: `or [None] *
+        # len(outcomes)` treated `[]` as falsy and therefore as missing, padding it to
+        # match `outcomes` before the `strict=True` zip below ever saw a mismatch. That
+        # silently equalizes the lengths the strict zip exists to catch, and a
+        # `"security_classes": []` alongside nonempty outcomes would then reclassify
+        # every critical_failure on the task as unclassified (behavioral) instead of
+        # raising — the same silently-skipped-veto failure mode this module refuses
+        # everywhere else. Checking `in` instead of truthiness is what tells "absent"
+        # from "present but wrong length" apart.
+        classes = t["security_classes"] if "security_classes" in t else [None] * len(outcomes)
         n = 0
         for o, c in zip(outcomes, classes, strict=True):
             if o != "critical_failure":
@@ -386,6 +396,15 @@ def evaluate(
     # Fisher comparison. A confirmed increase blocks THERE; an inconclusive does not.
 
     raw_evidence = {"delta_in": float(d_in), "delta_ho": float(d_ho)}
+    # Both REJECT branches below carry `behavioral_regressions`/`targeted_rerun` too,
+    # not just `security_regressions` — `beh_reg` is computed unconditionally above,
+    # independent of which reason (or no reason at all) ends up rejecting. A behavioral
+    # rise that merely CO-OCCURS with a mechanical veto, a collapse, a split regression,
+    # or a no-gain rejection is still an observation this run made; the fact that
+    # something else already decided the outcome must not make that observation vanish
+    # from the record. Nothing routes anywhere from a REJECT (there is no confirmation
+    # ahead of it), so these two fields are audit trail here, not routing instructions —
+    # exactly like `security_regressions` already is on this same path.
     if reasons:
         return Decision(
             outcome=REJECT,
@@ -396,6 +415,8 @@ def evaluate(
             threshold_ho=float(thr_ho),
             excluded=tuple(sorted(excluded)),
             security_regressions=sec_reg,
+            behavioral_regressions=beh_reg,
+            targeted_rerun=tuple(sorted(beh_reg)),
             raw=raw_evidence,
         )
 
@@ -413,6 +434,8 @@ def evaluate(
             threshold_ho=float(thr_ho),
             excluded=tuple(sorted(excluded)),
             security_regressions=sec_reg,
+            behavioral_regressions=beh_reg,
+            targeted_rerun=tuple(sorted(beh_reg)),
             raw=raw_evidence,
         )
 

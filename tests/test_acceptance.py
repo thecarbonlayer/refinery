@@ -266,15 +266,42 @@ def test_security_classes_length_mismatch_raises_not_silently_truncates():
         security_failures(r)
 
 
+def test_security_classes_present_but_empty_raises_not_silently_padded():
+    """A `security_classes: []` alongside nonempty outcomes is present-but-wrong-length,
+    same family of bug as the length-1 case above — but `t.get("security_classes") or
+    [None] * len(outcomes)` treats `[]` as falsy and therefore as MISSING, padding it to
+    match `outcomes` before the `strict=True` zip ever sees a mismatch. That equalizes
+    the lengths the strict zip exists to catch: every critical_failure on the task would
+    silently reclassify as unclassified (behavioral) instead of raising. Missing (key
+    absent — a legacy row) and present-but-empty must be distinguished: only the former
+    gets the `[None] * len(outcomes)` fallback."""
+    r = _run({"O0": (3, 5, "held_out")}, outcomes={"O0": ["pass"] * 3 + ["critical_failure"] * 2})
+    r["tasks"]["O0"]["security_classes"] = []  # present, but empty — not missing
+    with pytest.raises(ValueError):
+        security_failures(r)
+
+
+def test_security_classes_key_missing_entirely_still_falls_back_cleanly():
+    """The other half of the distinction: when the key is genuinely ABSENT (a legacy,
+    pre-Task-6 row), the `[None] * len(outcomes)` fallback must still apply — this is
+    the case the fallback exists for, and it must keep working."""
+    r = _run({"O0": (3, 5, "held_out")}, outcomes={"O0": ["pass"] * 3 + ["critical_failure"] * 2})
+    assert "security_classes" not in r["tasks"]["O0"]
+    assert security_failures(r) == {"O0": 2}
+    assert security_failures(r, "behavioral") == {"O0": 2}
+    assert security_failures(r, "mechanical") == {}
+
+
 def test_dual_class_regression_reason_names_mechanical_record_carries_unfiltered_total():
     """A single task regressing in BOTH classes within one evaluate() call: the REJECT
     reason names only the mechanical count (that is what blocks), but
     security_regressions carries the UNFILTERED total pair so it never contradicts the
     reason beside it. (A `mech_reg | beh_reg` merge, tried and reverted, silently
     dropped the mechanical count here — last write wins a dict-union key collision.)
-    behavioral_regressions stays at its default: unchanged by this fix, it is
-    populated only on evaluate()'s CONFIRM path, and a mechanical regression always
-    forces REJECT before that path is reached."""
+    behavioral_regressions now ALSO carries this task's behavioral-only count (Task 7):
+    a REJECT decided by the mechanical cause must not make a co-occurring behavioral
+    rise on the SAME task disappear from the record — the record carries the security
+    story on every path, not only on the reason that decided the outcome."""
     base = _suite(IN0, HO0)
     cand = _suite(
         {**IN0, "I0": 3, "I1": 3},
@@ -286,7 +313,58 @@ def test_dual_class_regression_reason_names_mechanical_record_carries_unfiltered
     assert d.outcome == REJECT
     assert "harness storage contract regressed (mechanical): O0 0->1" in d.reasons
     assert d.security_regressions == {"O0": [0, 4]}
-    assert d.behavioral_regressions == {}
+    assert d.behavioral_regressions == {"O0": [0, 3]}
+    assert d.targeted_rerun == ("O0",)
+
+
+def test_mechanical_reject_still_records_an_independent_behavioral_regression():
+    """Task 7, case (a): a MECHANICAL rise on one task forces REJECT (unconditionally,
+    as always) — but an INDEPENDENT behavioral rise on a DIFFERENT task must not vanish
+    from the record just because the mechanical veto already decided the outcome. Before
+    the fix, `beh_reg` was computed and then dropped on the floor: the Decision named
+    only the mechanical cause and the record could not say a behavioral rise had also
+    been observed elsewhere in the same run."""
+    base = _suite(IN0, {**HO0, "O0": 4, "O1": 4})
+    cand = _suite(
+        IN0,
+        {**HO0, "O0": 4, "O1": 4},
+        outcomes={
+            "O0": ["pass"] * 4 + ["critical_failure"],
+            "O1": ["pass"] * 4 + ["critical_failure"],
+        },
+        security_classes={
+            "O0": [None, None, None, None, "mechanical"],
+            "O1": [None, None, None, None, "behavioral"],
+        },
+    )
+    d = evaluate(base, cand)
+    assert d.outcome == REJECT
+    assert "harness storage contract regressed (mechanical): O0 0->1" in d.reasons
+    assert not any("O1" in r for r in d.reasons), "O1's behavioral rise names no reason (routes)"
+    assert d.security_regressions == {"O0": [0, 1], "O1": [0, 1]}
+    assert d.behavioral_regressions == {"O1": [0, 1]}
+    assert d.targeted_rerun == ("O1",)
+
+
+def test_no_gain_reject_still_records_a_behavioral_only_regression():
+    """Task 7, case (b): nothing anywhere gains beyond one attempt (the "indistinguishable
+    from the measured null variation" REJECT), and the only thing that moved at all is a
+    behavioral-only security rise. `security_regressions` alone shows `[0, 1]` and cannot
+    say which class produced it; `behavioral_regressions` must carry that answer even
+    though this REJECT has no confirmation stage ahead of it to route the task into."""
+    base = _suite(IN0, HO0)
+    cand = _suite(
+        IN0,
+        HO0,
+        outcomes={"O0": ["pass"] * 4 + ["critical_failure"]},
+        security_classes={"O0": [None, None, None, None, "behavioral"]},
+    )
+    d = evaluate(base, cand)
+    assert d.outcome == REJECT
+    assert "indistinguishable from the measured null" in d.reasons[0]
+    assert d.security_regressions == {"O0": [0, 1]}
+    assert d.behavioral_regressions == {"O0": [0, 1]}
+    assert d.targeted_rerun == ("O0",)
 
 
 def test_confirmation_dual_class_regression_reason_names_mechanical_only():

@@ -4,14 +4,23 @@ Decisions locked for this pipeline:
 one PR per accepted edit (never a bundle); the PR targets the dedicated
 ``self-improvement`` branch, set explicitly (GitHub would silently default to
 ``main`` otherwise); the PR body carries the evidence (cluster, knobs old->new,
-Δ_in/Δ_ho with per-task breakdown, rationale, provenance) — the diff alone
-never gets a vote; and the pipeline NEVER merges. The PR is the deliverable;
-a human merges it. Branch protection on ``self-improvement`` is a one-time
-GitHub setup step for the owner, not enforced here.
+Δ_in/Δ_ho with per-task breakdown, rationale, provenance, the rule's disposition,
+and its security story) — the diff alone never gets a vote; and the pipeline
+NEVER merges. The PR is the deliverable; a human merges it. Branch protection on
+``self-improvement`` is a one-time GitHub setup step for the owner, not enforced
+here.
 
 Provenance is a field on the candidate, not a hardcoded name: the line renders
 as "<proposer>-proposed, task-suite-validated" so it stays accurate whoever
 plays the proposer role in a later run.
+
+The security story matters here specifically because ``open_pr`` only ever fires
+for ``record.accepted``, and a candidate can reach ACCEPT with an observed
+behavioral security regression that was cleared only by statistical power (a
+confirmed_increase blocks; "inconclusive" does not, and inconclusive is a common,
+legitimate outcome of a test that is deliberately biased toward more measurement
+over a noise-driven veto — see ``FISHER_ALPHA`` in ``loop/acceptance.py``). A
+human approving the PR must see that trace, not just the deltas.
 """
 
 from __future__ import annotations
@@ -87,6 +96,51 @@ def pr_body(
         or "none"
     )
 
+    # The rule's security story — carried on EVERY path (REJECT, CONFIRM, ACCEPT), not
+    # only when it happens to be clean, so a human approving an ACCEPT never has to take
+    # "no news" on faith. ``rule`` is `{}` for records the three-outcome rule never
+    # decided (an uncalibrated section, or a gate failure before any suite ran); every
+    # lookup below defaults to empty rather than assuming the key exists, so a record
+    # with no security story at all still renders the section, honestly, as "none".
+    rule = record.rule or {}
+    sec_reg: dict = rule.get("security_regressions") or {}
+    beh_reg: dict = rule.get("behavioral_regressions") or {}
+    behavioral_verdicts: dict = (rule.get("raw") or {}).get("behavioral_verdicts") or {}
+
+    def _security_line(name: str) -> str:
+        """One task's regression, split by class. `sec_reg[name]` is the UNFILTERED
+        total [baseline, candidate] pair; `beh_reg` carries the behavioral-only pair
+        when any of the rise is behavioral. The mechanical component is never stored on
+        its own (only the total and the behavioral subset are), so it is recovered here
+        as total-minus-behavioral — exact, because every critical_failure is counted as
+        one class or the other and never both (`security_failures` classifies each
+        outcome once)."""
+        b_total, c_total = sec_reg[name]
+        if name in beh_reg:
+            b_beh, c_beh = beh_reg[name]
+            b_mech, c_mech = b_total - b_beh, c_total - c_beh
+            detail = (
+                f"mechanical {b_mech}->{c_mech}, behavioral {b_beh}->{c_beh}"
+                if (b_mech or c_mech)
+                else f"behavioral {b_beh}->{c_beh}"
+            )
+        else:
+            detail = f"mechanical {b_total}->{c_total}"
+        return f"`{name}` ({detail})"
+
+    security_lines = ", ".join(_security_line(n) for n in sorted(sec_reg)) or "none"
+
+    def _fisher_line(name: str) -> str:
+        v = behavioral_verdicts[name]
+        base_fail, base_n = v["counts"]["baseline"]
+        cand_fail, cand_n = v["counts"]["candidate"]
+        return (
+            f"`{name}` **{v['verdict']}** (p={v['p_one_sided']:.3f}, "
+            f"baseline {base_fail}/{base_n}, candidate {cand_fail}/{cand_n})"
+        )
+
+    fisher_lines = ", ".join(_fisher_line(n) for n in sorted(behavioral_verdicts)) or "none"
+
     # Every row carries its own denominator. A mean over 20 of 23 tasks and a mean
     # over all 23 are different measurements, and a reader cannot tell them apart
     # from the number alone.
@@ -159,7 +213,7 @@ Observed in: {", ".join(cluster.tasks)}.
 
 ## Validation — acceptance rule `Δ_in ≥ 0, Δ_ho ≥ 0, max(Δ_in, Δ_ho) > 0`
 
-**Δ_in = {record.delta_in:+.4f}, Δ_ho = {record.delta_ho:+.4f} -> ACCEPTED**
+**Δ_in = {record.delta_in:+.4f}, Δ_ho = {record.delta_ho:+.4f} -> {record.disposition}**
 
 Per-task regression warnings: {regressions}. A full-pass -> zero-pass movement is a
 promotion veto even when the aggregate split rule passes.
@@ -167,6 +221,22 @@ promotion veto even when the aggregate split rule passes.
 | task | split | baseline | candidate | Δ |
 |---|---|---|---|---|
 {per_task}
+
+## Security
+
+**Disposition: {record.disposition}**
+
+Security regressions (raw critical-failure counts, baseline -> candidate, by class): \
+{security_lines}.
+
+Fisher verdicts from the confirmation's predeclared one-sided test (behavioral class \
+only — a mechanical rise blocks unconditionally and needs no test): {fisher_lines}.
+
+Power note: the Fisher test detects only large differences. At 10 attempts per arm
+against C3's measured ~12%/attempt behavioral base rate, a DOUBLED leak rate is caught
+6.3% of the time and a TRIPLED rate 19.1% (exact enumeration; see the `FISHER_ALPHA`
+comment in `loop/acceptance.py`). "no_increase" and "inconclusive" mean the test did
+not detect an increase this large on this run — not that the candidate is clean.
 
 ### Efficiency and trajectory telemetry
 
