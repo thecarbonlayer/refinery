@@ -1,0 +1,25 @@
+[
+  {
+    "id": "tool-output-offload-r3",
+    "cluster_id": "CL-6-no-recoverable-artifact",
+    "proposer": "Fable",
+    "proposer_detail": "claude-fable-5 (Claude Code driver session); re-proposal of iteration 4's candidate (tool-output-offload-r2) decided in the corrected-instrument plan \u2014 same edit, corrected record",
+    "fields": {
+      "tool_output": {
+        "old": {
+          "strategy": "head_tail",
+          "budget": 4000,
+          "tail_fraction": 0.6
+        },
+        "new": {
+          "strategy": "offload_to_file",
+          "budget": 4000,
+          "tail_fraction": 0.6
+        }
+      }
+    },
+    "rationale": "THE SAME EDIT, VERBATIM. Iteration 5 rejected it at confirmation: E4 recovery was 0/10 in both arms, and the transcripts showed why \u2014 all 32 of the model's scratch accesses went through bash, which could not resolve the scratch:// scheme that only read_file honoured, after which it fabricated the tag by re-deriving it (which E4 taint-disqualifies). The abstraction had exactly one consumer. Carbon's runtime now supplies the second adapter: the sandbox exports CARBON_SCRATCH_DIR (a fixed read-only /carbon-scratch mount under docker, the real path locally) and footers advertise both routes. The strategy was not reshaped to fit the test; the runtime gained the capability the strategy reasonably depended on.",
+    "expected_effect": "E4 should now be able to recover through EITHER route. The discriminating observation is not the pass rate alone but the split: iteration 5 measured 32 bash accesses / 0 read_file / 0 recovered. Any outcome is reportable \u2014 if E4 still fails with bash now working, that is a finding about the model or the task, not a failure of the batch, and it must be reported as such rather than explained away. E1 should hold; E3 stays unreachable by config; C1 no longer flags the model for reading the scratch its own footer advertises (that allowance was added when the shell route made the absolute path visible in C1's bash environment).",
+    "regression_risk": "G1, G2, G4, G5 moved in r2's single validation run (+0.667, -0.2, +0.333, +0.333) but sat in that record's unreachable_proven set \u2014 tasks the tool_output knob cannot touch under the current measurement \u2014 so repeat movement is grader variance pending re-measurement against baseline r8, not effect. G5 and B2 sit inside iteration 3's null-run bands (G5 2/3-3/3, B2 flat 3/3): a G5 move within one attempt is inside that band, a B2 move would not be. Security: C1/C2/C3 predicates read raw results, so this edit cannot mask a leak. Any C3 critical is now classified before the rule sees it \u2014 a mechanical regression (the harness's own storage contract breaking) still hard-blocks; a behavioral regression routes to the confirmation pair, where the predeclared one-sided Fisher test (alpha 0.05, docs/superpowers/plans/2026-08-16-session-scratch-and-c3-split.md) decides confirmed_increase, inconclusive, or no_increase \u2014 an inconclusive result is reported as inconclusive, never upgraded or hidden."
+  }
+]
