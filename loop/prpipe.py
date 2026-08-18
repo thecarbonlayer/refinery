@@ -99,36 +99,50 @@ def pr_body(
     # The rule's security story — carried on EVERY path (REJECT, CONFIRM, ACCEPT), not
     # only when it happens to be clean, so a human approving an ACCEPT never has to take
     # "no news" on faith. ``rule`` is `{}` for records the three-outcome rule never
-    # decided (an uncalibrated section, or a gate failure before any suite ran); every
-    # lookup below defaults to empty rather than assuming the key exists, so a record
-    # with no security story at all still renders the section, honestly, as "none".
+    # decided (an uncalibrated section, or a gate failure before any suite ran) — that
+    # state is named explicitly below ("the rule did not run"), never folded into
+    # "none": "none" is reserved for a rule that ran and found nothing, the same
+    # unknown-vs-clean distinction the denominator note ~40 lines below already draws.
     rule = record.rule or {}
+    rule_applied = bool(rule.get("applied"))
     sec_reg: dict = rule.get("security_regressions") or {}
     beh_reg: dict = rule.get("behavioral_regressions") or {}
     behavioral_verdicts: dict = (rule.get("raw") or {}).get("behavioral_verdicts") or {}
 
     def _security_line(name: str) -> str:
-        """One task's regression, split by class. `sec_reg[name]` is the UNFILTERED
-        total [baseline, candidate] pair; `beh_reg` carries the behavioral-only pair
-        when any of the rise is behavioral. The mechanical component is never stored on
-        its own (only the total and the behavioral subset are), so it is recovered here
-        as total-minus-behavioral — exact, because every critical_failure is counted as
-        one class or the other and never both (`security_failures` classifies each
-        outcome once)."""
-        b_total, c_total = sec_reg[name]
-        if name in beh_reg:
-            b_beh, c_beh = beh_reg[name]
+        """One task's regression, split by class where the record actually supports
+        the split. `sec_reg[name]` is the UNFILTERED total [baseline, candidate] pair,
+        known whenever the task's total critical-failure count rose. `beh_reg[name]`
+        is the behavioral-only pair, known only when the BEHAVIORAL count itself rose
+        — its absence means "behavioral did not rise", never "behavioral is zero". A
+        task can carry a rising total built from a FALLING behavioral count and a
+        larger mechanical one (mechanical 0->3, behavioral 2->1 renders total 2->4,
+        with no behavioral pair on record to subtract out); a legacy record written
+        before `behavioral_regressions` existed carries `security_regressions` with no
+        behavioral key at all, for any task. Both must render the total, unclassified,
+        rather than assert "mechanical" for arithmetic the record does not support —
+        only when `name in beh_reg` are both halves on record, making total-minus-
+        behavioral exact. A task can also carry a behavioral pair with NO total on
+        record at all: the total fell or held while the behavioral count alone rose,
+        so it never entered `sec_reg` — only the behavioral numbers are known then."""
+        total = sec_reg.get(name)
+        beh = beh_reg.get(name)
+        if total is not None and beh is not None:
+            b_total, c_total = total
+            b_beh, c_beh = beh
             b_mech, c_mech = b_total - b_beh, c_total - c_beh
             detail = (
                 f"mechanical {b_mech}->{c_mech}, behavioral {b_beh}->{c_beh}"
                 if (b_mech or c_mech)
                 else f"behavioral {b_beh}->{c_beh}"
             )
+        elif total is not None:
+            b_total, c_total = total
+            detail = f"unclassified {b_total}->{c_total}"
         else:
-            detail = f"mechanical {b_total}->{c_total}"
+            b_beh, c_beh = beh
+            detail = f"behavioral {b_beh}->{c_beh} (total did not rise)"
         return f"`{name}` ({detail})"
-
-    security_lines = ", ".join(_security_line(n) for n in sorted(sec_reg)) or "none"
 
     def _fisher_line(name: str) -> str:
         v = behavioral_verdicts[name]
@@ -139,7 +153,49 @@ def pr_body(
             f"baseline {base_fail}/{base_n}, candidate {cand_fail}/{cand_n})"
         )
 
-    fisher_lines = ", ".join(_fisher_line(n) for n in sorted(behavioral_verdicts)) or "none"
+    if rule_applied:
+        # A behavioral-only rise (total fell or held) never enters `sec_reg`, so the
+        # union is iterated rather than `sec_reg` alone: iterating `sec_reg` alone
+        # silently dropped exactly this case — mechanical 3->0, behavioral 0->2 nets a
+        # FALLING total, so the routed behavioral rise disappeared from the section
+        # instead of rendering, and `targeted_rerun` is never rendered either, so
+        # nothing else recovers it.
+        security_lines = (
+            ", ".join(_security_line(n) for n in sorted(set(sec_reg) | set(beh_reg))) or "none"
+        )
+        fisher_lines = ", ".join(_fisher_line(n) for n in sorted(behavioral_verdicts)) or "none"
+    else:
+        # applied=False (uncalibrated section) and the fully-empty `{}` (a gate failure
+        # or a pre-rule legacy record) mean the same thing here: no security count was
+        # ever computed for this record, so "none" — "measured, and clean" — would be a
+        # stronger claim than the data supports.
+        why = rule.get("why") or "no rule verdict is recorded on this record"
+        security_lines = fisher_lines = f"rule did not run — {why}"
+
+    def _confirmation_arm_n() -> int | None:
+        """The attempts-per-arm behind every verdict rendered above, when they all
+        agree on one count across both arms — None with no verdicts to check it
+        against, or when they disagree, so the power note only ever states a headcount
+        this record actually backs."""
+        ns = {
+            n
+            for v in behavioral_verdicts.values()
+            for n in (v["counts"]["baseline"][1], v["counts"]["candidate"][1])
+        }
+        return ns.pop() if len(ns) == 1 else None
+
+    _arm_n = _confirmation_arm_n()
+    # The 6.3%/19.1% figures below are exact only AT the 10-attempts-per-arm table in
+    # loop/acceptance.py's `FISHER_ALPHA` comment. Hardcoding "10 attempts per arm" as
+    # if it always describes the run being reported left the note beside contradicting
+    # numbers whenever a confirmation actually ran at a different count.
+    power_caveat = (
+        f" This confirmation ran at {_arm_n} attempts per arm, not the 10 the figures "
+        "above assume — read 6.3%/19.1% as the shape of the test's power, not this "
+        "run's actual power."
+        if _arm_n is not None and _arm_n != 10
+        else ""
+    )
 
     # Every row carries its own denominator. A mean over 20 of 23 tasks and a mean
     # over all 23 are different measurements, and a reader cannot tell them apart
@@ -222,22 +278,6 @@ promotion veto even when the aggregate split rule passes.
 |---|---|---|---|---|
 {per_task}
 
-## Security
-
-**Disposition: {record.disposition}**
-
-Security regressions (raw critical-failure counts, baseline -> candidate, by class): \
-{security_lines}.
-
-Fisher verdicts from the confirmation's predeclared one-sided test (behavioral class \
-only — a mechanical rise blocks unconditionally and needs no test): {fisher_lines}.
-
-Power note: the Fisher test detects only large differences. At 10 attempts per arm
-against C3's measured ~12%/attempt behavioral base rate, a DOUBLED leak rate is caught
-6.3% of the time and a TRIPLED rate 19.1% (exact enumeration; see the `FISHER_ALPHA`
-comment in `loop/acceptance.py`). "no_increase" and "inconclusive" mean the test did
-not detect an increase this large on this run — not that the candidate is clean.
-
 ### Efficiency and trajectory telemetry
 
 These values are diagnostic and do not override task correctness. Negative cost,
@@ -267,6 +307,23 @@ byte-identical to this PR's; rejected candidates never become commits.
 
 Known limitation (disclosed by design): these Δ numbers were computed locally against LM Studio; \
 hosted CI cannot re-verify them.
+
+## Security
+
+**Disposition: {record.disposition}**
+
+Security regressions (raw critical-failure counts, baseline -> candidate, by class): \
+{security_lines}.
+
+Fisher verdicts from the confirmation's predeclared one-sided test (behavioral class \
+only — a mechanical rise blocks unconditionally and needs no test): {fisher_lines}.
+
+Power note: the Fisher test detects only large differences. At 10 attempts per arm
+against C3's measured ~12%/attempt behavioral base rate, a DOUBLED leak rate is caught
+6.3% of the time and a TRIPLED rate 19.1% (exact enumeration; see the `FISHER_ALPHA`
+comment in `loop/acceptance.py`). "no_increase" and "inconclusive" mean the test did
+not detect an increase this large on this run — not that the candidate is clean.\
+{power_caveat}
 
 ## Proposer's rationale
 

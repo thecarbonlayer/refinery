@@ -4,6 +4,7 @@ import json
 import shutil
 import subprocess
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +13,7 @@ from loop.prpipe import commit_message, ensure_base_branch, open_pr, pr_body, pr
 from runner.carbon_env import CARBON_ROOT, _git
 
 REAL_CONFIG = CARBON_ROOT / "harness" / "harness_config.json"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _bumped() -> int:
@@ -193,8 +195,14 @@ def test_pr_body_renders_the_rules_disposition_word_not_a_hardcoded_one():
 
 
 def test_pr_body_renders_security_regressions_with_class():
-    """`O0` regressed purely mechanically, `O1` purely behaviorally — a reviewer must
-    see WHICH is which, not just that two tasks' critical-failure counts rose."""
+    """`O1` regressed purely behaviorally — both its baseline and candidate behavioral
+    counts are on record, so the pure-behavioral rendering is exact. `O0`'s TOTAL rose
+    with no entry in `behavioral_regressions` at all: that shape does NOT prove the
+    rise was mechanical (absence means "behavioral did not rise", not "there is no
+    behavioral component" — see
+    test_pr_body_renders_unclassified_when_the_total_rose_but_behavioral_fell for why
+    asserting "mechanical" here can print numbers that are not the actual mechanical
+    count), so it renders unclassified."""
     rule = _rule(
         "REJECT",
         security_regressions={"O0": [0, 1], "O1": [0, 1]},
@@ -202,7 +210,7 @@ def test_pr_body_renders_security_regressions_with_class():
     )
     rec = replace(RECORD, accepted=False, rule=rule)
     body = pr_body(CANDIDATE, rec, CLUSTER, BASELINE_RESULTS, CANDIDATE_RESULTS)
-    assert "`O0` (mechanical 0->1)" in body
+    assert "`O0` (unclassified 0->1)" in body
     assert "`O1` (behavioral 0->1)" in body
 
 
@@ -221,6 +229,55 @@ def test_pr_body_renders_a_mixed_class_security_regression():
     rec = replace(RECORD, accepted=False, rule=rule)
     body = pr_body(CANDIDATE, rec, CLUSTER, BASELINE_RESULTS, CANDIDATE_RESULTS)
     assert "`O0` (mechanical 0->1, behavioral 0->3)" in body
+
+
+def test_pr_body_renders_unclassified_when_the_total_rose_but_behavioral_fell():
+    """A task's TOTAL can rise while its behavioral count FALLS: mechanical 0->3,
+    behavioral 2->1 nets a total of 2->4. `behavioral_regressions` only ever carries a
+    task whose behavioral count itself rose, so this task is absent from it even though
+    the total genuinely regressed — the record carries neither baseline's nor
+    candidate's individual behavioral count, so `pr_body` cannot recover the mechanical
+    split (0->3) from what it has (2->4 total, no behavioral pair). It must say
+    "unclassified 2->4", never assert "mechanical 2->4": that would both mislabel the
+    class and print numbers that are not the actual mechanical count."""
+    rule = _rule("REJECT", security_regressions={"C3": [2, 4]})  # behavioral_regressions: {}
+    rec = replace(RECORD, accepted=False, rule=rule)
+    body = pr_body(CANDIDATE, rec, CLUSTER, BASELINE_RESULTS, CANDIDATE_RESULTS)
+    assert "`C3` (unclassified 2->4)" in body
+    # Scoped to the rendered regression line, not the whole section — the Fisher-verdict
+    # sentence right below it legitimately uses the word "mechanical" in static prose.
+    reg_line = next(line for line in body.splitlines() if line.startswith("Security regressions"))
+    assert "mechanical" not in reg_line
+
+
+def test_pr_body_renders_a_legacy_record_with_no_behavioral_regressions_key_at_all():
+    """`iterations/iter-04/validation-tool-output-offload-r2.json` predates
+    `behavioral_regressions` entirely: its `rule["security_regressions"]` is
+    `{"C3": [0, 1]}` and `behavioral_regressions` is not a key in the dict at all —
+    not even an empty one. That 0->1 was actually the BEHAVIORAL case, but nothing in
+    the record can prove that to `pr_body`, so it must render unclassified, never
+    "mechanical" — the module comment's old claim that such records "still render
+    cleanly" was true only in the sense that they render without crashing."""
+    legacy_path = REPO_ROOT / "iterations" / "iter-04" / "validation-tool-output-offload-r2.json"
+    legacy_rule = json.loads(legacy_path.read_text())["rule"]
+    assert "behavioral_regressions" not in legacy_rule  # the historical shape this guards
+    rec = replace(RECORD, accepted=False, rule=legacy_rule)
+    body = pr_body(CANDIDATE, rec, CLUSTER, BASELINE_RESULTS, CANDIDATE_RESULTS)
+    assert "`C3` (unclassified 0->1)" in body
+    assert "`C3` (mechanical 0->1)" not in body
+
+
+def test_pr_body_recovers_a_behavioral_rise_hidden_by_a_falling_total():
+    """mechanical 3->0, behavioral 0->2: the TOTAL falls (3->2), so the task never
+    enters `security_regressions` at all (`_regressions()` only keeps a task whose
+    candidate count exceeds baseline) — only `behavioral_regressions` carries it.
+    Iterating `sorted(security_regressions)` alone silently drops the task from the
+    section entirely, even though a real routed behavioral rise exists; the union of
+    both dicts must be walked instead."""
+    rule = _rule("REJECT", behavioral_regressions={"C3": [0, 2]})  # security_regressions: {}
+    rec = replace(RECORD, accepted=False, rule=rule)
+    body = pr_body(CANDIDATE, rec, CLUSTER, BASELINE_RESULTS, CANDIDATE_RESULTS)
+    assert "`C3` (behavioral 0->2 (total did not rise))" in body
 
 
 def test_pr_body_renders_fisher_verdicts_and_the_power_limitation():
@@ -252,16 +309,93 @@ def test_pr_body_renders_fisher_verdicts_and_the_power_limitation():
     assert "6.3%" in body
     assert "19.1%" in body
     assert "FISHER_ALPHA" in body
+    # This fixture's confirmation ran at exactly the table's own 10-per-arm, so no
+    # mismatch caveat belongs here — one would be noise beside numbers that agree.
+    assert "This confirmation ran at" not in body
 
 
-def test_pr_body_security_section_renders_none_when_the_record_carries_no_security_story():
-    """ "The record carries the security story on every path" includes the path where
-    there is none to tell: the default RECORD (rule={}) must still render a Security
-    section, honestly saying "none" rather than the section silently disappearing."""
+def test_pr_body_power_note_flags_a_confirmation_that_ran_at_a_different_arm_count():
+    """The 6.3%/19.1% figures are exact only at 10 attempts per arm (the table in
+    loop/acceptance.py's `FISHER_ALPHA` comment). A confirmation that actually ran at a
+    different count must not leave that fixed table standing, uncontradicted, beside
+    verdicts that show a different n — the note must derive and state the count this
+    record actually used."""
+    rule = _rule(
+        "ACCEPT",
+        raw={
+            "stage": "confirmation",
+            "behavioral_verdicts": {
+                "O4": {
+                    "verdict": "no_increase",
+                    "p_one_sided": 1.0,
+                    "alpha": 0.05,
+                    "counts": {"baseline": [1, 20], "candidate": [1, 20]},
+                }
+            },
+        },
+    )
+    rec = replace(RECORD, accepted=True, rule=rule)
+    body = pr_body(CANDIDATE, rec, CLUSTER, BASELINE_RESULTS, CANDIDATE_RESULTS)
+    assert "This confirmation ran at 20 attempts per arm, not the 10" in body
+
+
+def test_pr_body_security_section_says_none_only_when_the_rule_actually_ran_clean():
+    """ "none" must mean "the rule ran and found nothing" — not "nothing was computed".
+    A record whose rule genuinely applied and found no regressions or verdicts still
+    renders "none"; that is the ONE state the word may honestly describe."""
+    clean = replace(RECORD, accepted=True, rule=_rule("ACCEPT"))
+    body = pr_body(CANDIDATE, clean, CLUSTER, BASELINE_RESULTS, CANDIDATE_RESULTS)
+    security_section = body.split("## Security", 1)[1].split("\n## ", 1)[0]
+    assert "none" in security_section
+    assert "did not run" not in security_section
+
+
+def test_pr_body_names_an_uncalibrated_sections_rule_as_not_run_not_none():
+    """`rule_disposition()` returns `{"applied": False, "why": ...}` when the edited
+    section is not `tool_output` — the ONLY shape today's CLI can hand `pr_body` besides
+    an applied rule (a gate failure never reaches here: `open_pr` only ever fires for
+    `record.accepted`, and a gate failure forces `accepted=False`). No security count is
+    ever computed in this state, so "none" — indistinguishable from "measured, clean" —
+    is a stronger claim than the data supports; the section must say the rule did not
+    run, and why, echoing the same unknown-vs-clean standard the denominator note
+    already applies to telemetry."""
+    uncalibrated = replace(
+        RECORD,
+        accepted=True,  # the CAUSAL verdict can still accept outside RULE_SECTIONS
+        rule={"applied": False, "why": "edited sections ['max_tokens'] are not calibrated"},
+    )
+    body = pr_body(CANDIDATE, uncalibrated, CLUSTER, BASELINE_RESULTS, CANDIDATE_RESULTS)
+    security_section = body.split("## Security", 1)[1].split("\n## ", 1)[0]
+    assert "rule did not run" in security_section
+    assert "edited sections ['max_tokens'] are not calibrated" in security_section
+    assert "none" not in security_section
+
+
+def test_pr_body_names_a_fully_empty_rule_as_not_run_too():
+    """The default `ValidationRecord.rule` is `{}` (a gate failure before any suite
+    ran, or a record written before the rule existed at all) — no "why" to quote, but
+    it is still "the rule did not run", not "none": "the record carries the security
+    story on every path" includes the path where there is none to tell, honestly."""
     body = pr_body(CANDIDATE, RECORD, CLUSTER, BASELINE_RESULTS, CANDIDATE_RESULTS)
     assert "## Security" in body
-    security_section = body.split("## Security", 1)[1].split("###", 1)[0]
-    assert "none" in security_section
+    security_section = body.split("## Security", 1)[1].split("\n## ", 1)[0]
+    assert "rule did not run" in security_section
+    assert "none" not in security_section
+
+
+def test_pr_body_nests_efficiency_telemetry_under_validation_not_security():
+    """`### Efficiency and trajectory telemetry` must stay a subsection of `##
+    Validation` — inserting `## Security` directly above it nested cost/token telemetry
+    under Security instead, changing what the heading hierarchy claims without changing
+    a single number. Isolating a section by its heading must anchor on the next
+    TOP-LEVEL (`##`) heading, not the next `###` — the latter only ever bounded the
+    Security section by coincidence, while it happened to be followed immediately by a
+    `###` subsection that belonged to Validation."""
+    body = pr_body(CANDIDATE, RECORD, CLUSTER, BASELINE_RESULTS, CANDIDATE_RESULTS)
+    validation_section = body.split("## Validation", 1)[1].split("\n## ", 1)[0]
+    assert "### Efficiency and trajectory telemetry" in validation_section
+    security_section = body.split("## Security", 1)[1].split("\n## ", 1)[0]
+    assert "### Efficiency and trajectory telemetry" not in security_section
 
 
 TELEMETRY_RECORD = replace(
