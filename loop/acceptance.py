@@ -528,6 +528,13 @@ def confirmed(
     # Mechanical: same unconditional veto as evaluate(), same reason wording — it does
     # not matter that this is the confirmation and not the first run.
     mech_reg = _regressions(confirm_baseline, confirm_candidate, "mechanical")
+    # Behavioral counts belong on EVERY Decision this function returns, including the
+    # ACCEPT. `pr_body` recovers the mechanical component as total-minus-behavioral, so
+    # an empty `behavioral_regressions` beside a nonzero `security_regressions` makes a
+    # behavioral rise render as MECHANICAL to the human approving the merge — and a
+    # mechanical rise is the one that would have rejected the candidate outright. The
+    # PR would state the opposite of what the rule decided.
+    beh_reg = _regressions(confirm_baseline, confirm_candidate, "behavioral")
     if mech_reg:
         reasons.append(
             "harness storage contract regressed (mechanical): "
@@ -595,6 +602,7 @@ def confirmed(
             improved_tasks=first.improved_tasks,
             confirm_tasks=first.confirm_tasks,
             security_regressions=sec_reg,
+            behavioral_regressions=beh_reg,
             raw=raw,
         )
     return Decision(
@@ -612,5 +620,6 @@ def confirmed(
         improved_tasks=first.improved_tasks,
         confirm_tasks=first.confirm_tasks,
         security_regressions=sec_reg,
+        behavioral_regressions=beh_reg,
         raw=raw,
     )

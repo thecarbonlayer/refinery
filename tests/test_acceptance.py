@@ -718,3 +718,78 @@ def test_a_confirm_candidate_reports_pending_confirmation_not_rejected():
         rule={"applied": False, "why": "section not calibrated"},
     )
     assert uncalibrated.disposition == "REJECTED"
+
+
+def test_confirmation_decisions_carry_behavioral_counts_so_the_pr_cannot_mislabel_them():
+    """`pr_body` recovers the mechanical count as total-minus-behavioral.
+
+    `confirmed()` never computed `beh_reg` at all, so every Decision it returned had
+    an empty `behavioral_regressions` beside a populated `security_regressions` — and
+    the subtraction then rendered a BEHAVIORAL rise as MECHANICAL to the human
+    approving the merge. A mechanical rise is the one that rejects a candidate
+    outright, so the PR would have stated the opposite of what the rule decided.
+    """
+    from loop.acceptance import Decision, confirmed
+
+    def res(passes: int, outcomes: list[str], classes: list[str | None]) -> dict:
+        return {
+            "fingerprint": {"runner_sha": "x"},
+            "tasks": {
+                "C3": {
+                    "split": "held_out",
+                    "passes": passes,
+                    "attempts": 10,
+                    "outcomes": outcomes,
+                    "security_classes": classes,
+                }
+            },
+        }
+
+    base = res(10, ["pass"] * 10, [None] * 10)
+    cand = res(9, ["pass"] * 9 + ["critical_failure"], [None] * 9 + ["behavioral"])
+    first = Decision(
+        outcome="CONFIRM",
+        reasons=(),
+        delta_in=0.0,
+        delta_ho=0.05,
+        threshold_in=0.01,
+        threshold_ho=0.01,
+        improved_tasks=("C3",),
+        confirm_tasks=("C3",),
+    )
+    d = confirmed(first, base, cand)
+    assert d.security_regressions == {"C3": [0, 1]}
+    assert d.behavioral_regressions == {"C3": [0, 1]}, (
+        "an empty behavioral dict here makes pr_body derive mechanical=1 and tell the "
+        "human a storage-contract breach occurred"
+    )
+
+
+def test_a_written_validation_record_can_be_loaded_back_by_the_pr_command(tmp_path):
+    """`to_json` writes DERIVED keys the constructor does not take.
+
+    Adding `disposition` to the serialized record broke `loop pr` outright — it loads
+    with `ValidationRecord(**rec_raw)` and died on TypeError before opening anything.
+    The record on disk is the durable artifact and may carry more than the dataclass
+    accepts, so the loader filters rather than the writer omitting evidence.
+    """
+    import dataclasses
+    import json
+
+    from loop.artifacts import ValidationRecord, write_validation_record
+
+    rec = ValidationRecord(
+        candidate_id="c",
+        label="cand-c",
+        accepted=False,
+        delta_in=0.0,
+        delta_ho=0.04,
+        rule={"applied": True, "outcome": "CONFIRM"},
+    )
+    out = write_validation_record(rec, tmp_path / "validation-c.json")
+    raw = json.loads(out.read_text())
+    assert "disposition" in raw, "the derived value must still reach the record"
+
+    fields = {f.name for f in dataclasses.fields(ValidationRecord)}
+    loaded = ValidationRecord(**{k: v for k, v in raw.items() if k in fields})
+    assert loaded.candidate_id == "c" and loaded.disposition == "PENDING_CONFIRMATION"

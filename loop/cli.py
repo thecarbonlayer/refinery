@@ -12,6 +12,7 @@ are written here, accepted or rejected alike.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -118,7 +119,12 @@ def main() -> None:
     if not rec_path.is_file():
         raise SystemExit(f"no validation record {rec_path} — run `validate` first")
     rec_raw = json.loads(rec_path.read_text())
-    record = ValidationRecord(**rec_raw)
+    # `to_json` also writes DERIVED values (`disposition`) that are not constructor
+    # fields, so a bare `ValidationRecord(**rec_raw)` raises TypeError and `pr` dies
+    # before it can open anything. Filter to declared fields: the record on disk is
+    # the durable artifact and may legitimately carry more than the dataclass takes.
+    fields = {f.name for f in dataclasses.fields(ValidationRecord)}
+    record = ValidationRecord(**{k: v for k, v in rec_raw.items() if k in fields})
     baseline_results = json.loads(Path(args.baseline).read_text())
     if baseline_results.get("fingerprint") != record.baseline_fingerprint:
         raise SystemExit(
