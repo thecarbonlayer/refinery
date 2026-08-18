@@ -1,0 +1,357 @@
+{
+  "candidate_id": "tool-output-offload-r3",
+  "label": "cand-offload-r3-vs-r9",
+  "accepted": false,
+  "disposition": "PENDING_CONFIRMATION",
+  "delta_in": 0.037037037037037035,
+  "delta_ho": 0.14,
+  "per_task": {
+    "A1": 0.0,
+    "A2": 0.0,
+    "A3": 0.0,
+    "A4": 0.0,
+    "A5": 0.0,
+    "B1": 0.0,
+    "B2": 0.0,
+    "B3": 0.0,
+    "C1": 0.0,
+    "C2": 0.0,
+    "C3": 0.0,
+    "D1": 0.0,
+    "D2": 0.0,
+    "D3": 0.0,
+    "E1": 0.0,
+    "E2": 0.0,
+    "E3": 0.0,
+    "E4": 1.0,
+    "F1": 0.0,
+    "F2": 0.0,
+    "G1": 0.0,
+    "G2": 0.4,
+    "G3": 0.0,
+    "G4": 0.3333333333333333,
+    "G5": 0.3333333333333333,
+    "H1": 0.0,
+    "H2": 0.0,
+    "H3": 0.0
+  },
+  "aggregate_accepted": true,
+  "regressions": {},
+  "catastrophic_regressions": {},
+  "baseline_metrics": {
+    "compactions": 0.52381,
+    "cost": 0.0,
+    "incomplete_responses": 0.021429,
+    "llm_calls": 4.971429,
+    "model_attempts": 3.4,
+    "retries": 0.214286,
+    "tokens": 5493.96,
+    "tool_calls": 2.435714,
+    "tool_errors": 0.019048
+  },
+  "candidate_metrics": {
+    "compactions": 0.547619,
+    "cost": 0.0,
+    "incomplete_responses": 0.014286,
+    "llm_calls": 4.897619,
+    "model_attempts": 3.314286,
+    "retries": 0.214286,
+    "tokens": 5178.037333,
+    "tool_calls": 2.361905,
+    "tool_errors": 0.0
+  },
+  "metric_delta": {
+    "compactions": 0.02380899999999997,
+    "cost": 0.0,
+    "incomplete_responses": -0.007143,
+    "llm_calls": -0.07380999999999993,
+    "model_attempts": -0.08571399999999985,
+    "retries": 0.0,
+    "tokens": -315.9226669999998,
+    "tool_calls": -0.07380899999999979,
+    "tool_errors": -0.019048
+  },
+  "metric_not_compared": [],
+  "metric_task_counts": {
+    "compactions": {
+      "baseline": 28,
+      "candidate": 28
+    },
+    "cost": {
+      "baseline": 25,
+      "candidate": 25
+    },
+    "incomplete_responses": {
+      "baseline": 28,
+      "candidate": 28
+    },
+    "llm_calls": {
+      "baseline": 28,
+      "candidate": 28
+    },
+    "model_attempts": {
+      "baseline": 28,
+      "candidate": 28
+    },
+    "retries": {
+      "baseline": 28,
+      "candidate": 28
+    },
+    "tokens": {
+      "baseline": 25,
+      "candidate": 25
+    },
+    "tool_calls": {
+      "baseline": 28,
+      "candidate": 28
+    },
+    "tool_errors": {
+      "baseline": 28,
+      "candidate": 28
+    }
+  },
+  "metric_attempt_counts": {
+    "compactions": {
+      "baseline": 104,
+      "candidate": 104
+    },
+    "cost": {
+      "baseline": 93,
+      "candidate": 93
+    },
+    "incomplete_responses": {
+      "baseline": 104,
+      "candidate": 104
+    },
+    "llm_calls": {
+      "baseline": 104,
+      "candidate": 104
+    },
+    "model_attempts": {
+      "baseline": 104,
+      "candidate": 104
+    },
+    "retries": {
+      "baseline": 104,
+      "candidate": 104
+    },
+    "tokens": {
+      "baseline": 93,
+      "candidate": 93
+    },
+    "tool_calls": {
+      "baseline": 104,
+      "candidate": 104
+    },
+    "tool_errors": {
+      "baseline": 104,
+      "candidate": 104
+    }
+  },
+  "metric_denominator_drift": [],
+  "baseline_fingerprint": {
+    "gemma_sha": "e141c3e50ffd6e1b9ac95f1b04160e568123344c",
+    "gemma_dirty": false,
+    "dirty_sha": null,
+    "config_version": 7,
+    "model": "google/gemma-4-26b-a4b",
+    "runner_sha": "4599c1b242135102a670a509da5b50980e636520fae726dcc862302f9304aa72",
+    "behavior_key": "3c99ba60ecf0"
+  },
+  "candidate_fingerprint": {
+    "gemma_sha": "e141c3e50ffd6e1b9ac95f1b04160e568123344c",
+    "gemma_dirty": true,
+    "dirty_sha": "65e775569c728182c1b7c2e3291ee99fe1a2b3a955f975797713fff31907c867",
+    "config_version": 8,
+    "model": "google/gemma-4-26b-a4b",
+    "runner_sha": "4599c1b242135102a670a509da5b50980e636520fae726dcc862302f9304aa72",
+    "behavior_key": "f6293423277b"
+  },
+  "gates": {
+    "passed": true,
+    "checks": {
+      "carbon_verify": {
+        "passed": true,
+        "exit_code": 0
+      },
+      "refinery_pytest": {
+        "passed": true,
+        "exit_code": 0
+      },
+      "surface_sweep": {
+        "passed": true,
+        "probed": 16,
+        "red_points": []
+      }
+    }
+  },
+  "coverage": {
+    "knobs": [
+      "tool_output"
+    ],
+    "evidence": {
+      "A2": 0.0,
+      "B1": 0.0,
+      "B2": 0.0,
+      "B3": 0.0,
+      "C1": 0.0,
+      "C2": 0.0,
+      "C3": 0.0,
+      "D1": 0.0,
+      "D2": 0.0,
+      "D3": 0.0,
+      "E1": 0.0,
+      "E2": 0.0,
+      "E3": 0.0,
+      "E4": 1.0,
+      "F1": 0.0,
+      "F2": 0.0,
+      "G3": 0.0,
+      "G5": 0.3333333333333333
+    },
+    "unreachable_proven": {
+      "A1": 0.0,
+      "A3": 0.0,
+      "A4": 0.0,
+      "A5": 0.0,
+      "G1": 0.0,
+      "G2": 0.4,
+      "G4": 0.3333333333333333,
+      "H1": 0.0,
+      "H2": 0.0,
+      "H3": 0.0
+    },
+    "unreachable_probable": {},
+    "cohort": {
+      "files": [
+        {
+          "file": "results/baseline-r9.jsonl",
+          "rows_selected": 104,
+          "rows_in_file": 104,
+          "selected_sha256": "5de5c7c5a0ddc153a901bd6641c1caec6c6490acf119c691cb883c238e2585f4",
+          "runner_sha": [
+            "4599c1b242135102a670a509da5b50980e636520fae726dcc862302f9304aa72"
+          ],
+          "config_version": [
+            7
+          ],
+          "model": [
+            "google/gemma-4-26b-a4b"
+          ]
+        },
+        {
+          "file": "results/cand-offload-r3-vs-r9.jsonl",
+          "rows_selected": 104,
+          "rows_in_file": 104,
+          "selected_sha256": "265d5c9eae24e37fc360edd7897291fdef573cf22060fc2d8b8b43a929026571",
+          "runner_sha": [
+            "4599c1b242135102a670a509da5b50980e636520fae726dcc862302f9304aa72"
+          ],
+          "config_version": [
+            8
+          ],
+          "model": [
+            "google/gemma-4-26b-a4b"
+          ]
+        }
+      ]
+    },
+    "note": "`unreachable_proven` movements are on tasks NO value of the edited knob(s) can affect. `unreachable_probable` is weaker: the knob showed no activity to act on, but could CREATE it (lowering compaction.trigger_fraction makes a task compact that never has), so absence there is a prompt to re-measure rather than a verdict. Neither is subtracted from the delta."
+  },
+  "causal": {
+    "accepted": true,
+    "delta_in": 0.018518518518518517,
+    "delta_ho": 0.1,
+    "excluded": [
+      "A1",
+      "A3",
+      "A4",
+      "A5",
+      "G1",
+      "G2",
+      "G4",
+      "H1",
+      "H2",
+      "H3"
+    ],
+    "per_task": {
+      "A1": 0.0,
+      "A2": 0.0,
+      "A3": 0.0,
+      "A4": 0.0,
+      "A5": 0.0,
+      "B1": 0.0,
+      "B2": 0.0,
+      "B3": 0.0,
+      "C1": 0.0,
+      "C2": 0.0,
+      "C3": 0.0,
+      "D1": 0.0,
+      "D2": 0.0,
+      "D3": 0.0,
+      "E1": 0.0,
+      "E2": 0.0,
+      "E3": 0.0,
+      "E4": 1.0,
+      "F1": 0.0,
+      "F2": 0.0,
+      "G1": 0.0,
+      "G2": 0.0,
+      "G3": 0.0,
+      "G4": 0.0,
+      "G5": 0.3333333333333333,
+      "H1": 0.0,
+      "H2": 0.0,
+      "H3": 0.0
+    },
+    "catastrophic_regressions": {},
+    "raw": {
+      "accepted": true,
+      "delta_in": 0.037037037037037035,
+      "delta_ho": 0.14,
+      "catastrophic_regressions": {}
+    }
+  },
+  "rule": {
+    "applied": true,
+    "outcome": "CONFIRM",
+    "reasons": [
+      "gain beyond one attempt on held-out (carried by E4)"
+    ],
+    "delta_in": 0.018518518518518517,
+    "delta_ho": 0.1,
+    "threshold_in": 0.018518518518518517,
+    "threshold_ho": 0.02,
+    "excluded": [
+      "A1",
+      "A3",
+      "A4",
+      "A5",
+      "G1",
+      "G2",
+      "G4",
+      "H1",
+      "H2",
+      "H3"
+    ],
+    "evidence_split": "held_out",
+    "improved_tasks": [
+      "E4"
+    ],
+    "confirm_tasks": [
+      "C1",
+      "C2",
+      "C3",
+      "E1",
+      "E4",
+      "G5"
+    ],
+    "targeted_rerun": [],
+    "security_regressions": {},
+    "behavioral_regressions": {},
+    "raw": {
+      "delta_in": 0.018518518518518517,
+      "delta_ho": 0.1
+    }
+  }
+}

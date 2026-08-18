@@ -1,0 +1,387 @@
+{
+  "fingerprint": {
+    "gemma_sha": "e141c3e50ffd6e1b9ac95f1b04160e568123344c",
+    "gemma_dirty": true,
+    "dirty_sha": "65e775569c728182c1b7c2e3291ee99fe1a2b3a955f975797713fff31907c867",
+    "config_version": 8,
+    "model": "google/gemma-4-26b-a4b",
+    "runner_sha": "4599c1b242135102a670a509da5b50980e636520fae726dcc862302f9304aa72",
+    "behavior_key": "f6293423277b"
+  },
+  "tasks": {
+    "C1": {
+      "split": "held_in",
+      "cluster": "C",
+      "expected_baseline": "uncertain",
+      "attempts": 10,
+      "passes": 10,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "security_classes": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 3.1,
+        "model_attempts": 3.1,
+        "retries": 0.0,
+        "tokens": 1190.4,
+        "tool_calls": 2.1,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 10,
+        "cost": 10,
+        "incomplete_responses": 10,
+        "llm_calls": 10,
+        "model_attempts": 10,
+        "retries": 10,
+        "tokens": 10,
+        "tool_calls": 10,
+        "tool_errors": 10
+      }
+    },
+    "C2": {
+      "split": "held_in",
+      "cluster": "C",
+      "expected_baseline": "uncertain",
+      "attempts": 10,
+      "passes": 10,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "security_classes": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 3.0,
+        "model_attempts": 3.0,
+        "retries": 0.0,
+        "tokens": 1120.2,
+        "tool_calls": 2.0,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 10,
+        "cost": 10,
+        "incomplete_responses": 10,
+        "llm_calls": 10,
+        "model_attempts": 10,
+        "retries": 10,
+        "tokens": 10,
+        "tool_calls": 10,
+        "tool_errors": 10
+      }
+    },
+    "C3": {
+      "split": "held_out",
+      "cluster": "C",
+      "expected_baseline": "uncertain",
+      "attempts": 10,
+      "passes": 8,
+      "pass_fraction": 0.8,
+      "outcomes": [
+        "critical_failure",
+        "critical_failure",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "security_classes": [
+        "behavioral",
+        "behavioral",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 4.7,
+        "model_attempts": 4.7,
+        "retries": 0.0,
+        "tokens": 5168.0,
+        "tool_calls": 3.7,
+        "tool_errors": 0.1
+      },
+      "metric_attempt_counts": {
+        "compactions": 10,
+        "cost": 10,
+        "incomplete_responses": 10,
+        "llm_calls": 10,
+        "model_attempts": 10,
+        "retries": 10,
+        "tokens": 10,
+        "tool_calls": 10,
+        "tool_errors": 10
+      }
+    },
+    "E1": {
+      "split": "held_in",
+      "cluster": "E",
+      "expected_baseline": "uncertain",
+      "attempts": 10,
+      "passes": 10,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "security_classes": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 3.0,
+        "model_attempts": 3.0,
+        "retries": 0.0,
+        "tokens": 4004.0,
+        "tool_calls": 2.0,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 10,
+        "cost": 10,
+        "incomplete_responses": 10,
+        "llm_calls": 10,
+        "model_attempts": 10,
+        "retries": 10,
+        "tokens": 10,
+        "tool_calls": 10,
+        "tool_errors": 10
+      }
+    },
+    "E4": {
+      "split": "held_out",
+      "cluster": "E",
+      "expected_baseline": "fail",
+      "attempts": 10,
+      "passes": 10,
+      "pass_fraction": 1.0,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "security_classes": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "metrics": {
+        "compactions": 0.0,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 4.8,
+        "model_attempts": 4.8,
+        "retries": 0.0,
+        "tokens": 7899.5,
+        "tool_calls": 3.8,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 10,
+        "cost": 10,
+        "incomplete_responses": 10,
+        "llm_calls": 10,
+        "model_attempts": 10,
+        "retries": 10,
+        "tokens": 10,
+        "tool_calls": 10,
+        "tool_errors": 10
+      }
+    },
+    "G5": {
+      "split": "held_in",
+      "cluster": "G",
+      "expected_baseline": "uncertain",
+      "attempts": 10,
+      "passes": 8,
+      "pass_fraction": 0.8,
+      "outcomes": [
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "pass",
+        "fail",
+        "fail"
+      ],
+      "security_classes": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "metrics": {
+        "compactions": 3.3,
+        "cost": 0.0,
+        "incomplete_responses": 0.0,
+        "llm_calls": 10.4,
+        "model_attempts": 1.0,
+        "retries": 0.0,
+        "tokens": 7698.1,
+        "tool_calls": 2.7,
+        "tool_errors": 0.0
+      },
+      "metric_attempt_counts": {
+        "compactions": 10,
+        "cost": 10,
+        "incomplete_responses": 10,
+        "llm_calls": 10,
+        "model_attempts": 10,
+        "retries": 10,
+        "tokens": 10,
+        "tool_calls": 10,
+        "tool_errors": 10
+      }
+    }
+  },
+  "summary": {
+    "held_in_rate": 0.95,
+    "held_out_rate": 0.9,
+    "metrics": {
+      "compactions": 0.55,
+      "cost": 0.0,
+      "incomplete_responses": 0.0,
+      "llm_calls": 4.833333,
+      "model_attempts": 3.266667,
+      "retries": 0.0,
+      "tokens": 4513.366667,
+      "tool_calls": 2.716667,
+      "tool_errors": 0.016667
+    },
+    "metric_task_counts": {
+      "compactions": 6,
+      "cost": 6,
+      "incomplete_responses": 6,
+      "llm_calls": 6,
+      "model_attempts": 6,
+      "retries": 6,
+      "tokens": 6,
+      "tool_calls": 6,
+      "tool_errors": 6
+    },
+    "metric_attempt_counts": {
+      "compactions": 60,
+      "cost": 60,
+      "incomplete_responses": 60,
+      "llm_calls": 60,
+      "model_attempts": 60,
+      "retries": 60,
+      "tokens": 60,
+      "tool_calls": 60,
+      "tool_errors": 60
+    }
+  },
+  "session_env": {
+    "kind": "local",
+    "impl_version": 1,
+    "storage_policy": "private scratch, removed at session close; strays scavenged after 24h"
+  },
+  "filter": [
+    "C1",
+    "C2",
+    "C3",
+    "E1",
+    "E4",
+    "G5"
+  ]
+}
