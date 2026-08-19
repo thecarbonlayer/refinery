@@ -24,15 +24,11 @@ def test_current_pair_is_compatible():
 
 
 def test_pin_file_schema():
-    # Membership/shape only — the branch and commit are allowed to change
-    # (promotion will move them); pinning literals would assert "nothing has
-    # ever changed".
-    pin = load_pin()
+    # Shape enforcement (keys, non-empty symbols, entry arity, commit shape)
+    # lives in load_pin() itself now and is covered by the failure-mode
+    # tests below; this just confirms the committed pin actually loads.
+    load_pin()
     assert PIN_FILE.is_file()
-    assert set(pin) >= {"carbon_branch", "carbon_commit", "required_symbols"}
-    assert len(pin["carbon_commit"]) == 40
-    assert pin["required_symbols"], "an empty required list checks nothing"
-    assert all(len(entry) == 2 for entry in pin["required_symbols"])
 
 
 def test_missing_module_fails_with_remediation(tmp_path):
@@ -125,3 +121,50 @@ def test_junk_module_name_folds_into_carbon_base_error(tmp_path):
     with pytest.raises(CarbonBaseError) as excinfo:
         require_carbon_base(pin_file)
     assert "import failed" in str(excinfo.value)
+
+
+def test_getattr_exception_folds_into_attribute_check_failed(tmp_path, monkeypatch):
+    # PEP 562: a module-level __getattr__ can raise on any attribute access.
+    # hasattr() only swallows AttributeError, so anything else must be caught
+    # explicitly or it escapes require_carbon_base raw.
+    (tmp_path / "pep562_boom_mod.py").write_text(
+        "def __getattr__(name):\n    raise ValueError('boom')\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    pin_file = _derived_pin(tmp_path, [["pep562_boom_mod", "whatever"]])
+    with pytest.raises(CarbonBaseError) as excinfo:
+        require_carbon_base(pin_file)
+    assert "attribute check failed" in str(excinfo.value)
+
+
+def test_dependency_import_failure_is_not_read_as_module_missing(tmp_path, monkeypatch):
+    # The module itself exists; its own import statement fails on a
+    # dependency. That must not read the same as the module being absent.
+    (tmp_path / "depfail_mod.py").write_text("import no_such_dependency_xyz\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    pin_file = _derived_pin(tmp_path, [["depfail_mod", "X"]])
+    with pytest.raises(CarbonBaseError) as excinfo:
+        require_carbon_base(pin_file)
+    message = str(excinfo.value)
+    assert "import failed" in message
+    assert "module missing" not in message
+
+
+def test_empty_carbon_branch_rejected(tmp_path):
+    pin = load_pin()
+    pin["carbon_branch"] = ""
+    pin_file = tmp_path / "carbon-base.json"
+    pin_file.write_text(json.dumps(pin))
+    with pytest.raises(CarbonBaseError) as excinfo:
+        load_pin(pin_file)
+    assert "carbon_branch" in str(excinfo.value)
+
+
+def test_malformed_carbon_commit_rejected(tmp_path):
+    pin = load_pin()
+    pin["carbon_commit"] = "abc"
+    pin_file = tmp_path / "carbon-base.json"
+    pin_file.write_text(json.dumps(pin))
+    with pytest.raises(CarbonBaseError) as excinfo:
+        load_pin(pin_file)
+    assert "carbon_commit" in str(excinfo.value)

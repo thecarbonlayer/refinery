@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -51,6 +52,15 @@ def load_pin(pin_file: Path = PIN_FILE) -> dict:
             raise CarbonBaseError(
                 f"{pin_file}'s {key!r} must be a string, got {type(pin[key]).__name__}"
             )
+
+    if not pin["carbon_branch"]:
+        raise CarbonBaseError(f"{pin_file}'s 'carbon_branch' must not be empty")
+
+    if not re.fullmatch(r"[0-9a-f]{40}", pin["carbon_commit"]):
+        raise CarbonBaseError(
+            f"{pin_file}'s 'carbon_commit' must be a 40-character lowercase hex SHA, "
+            f"got {pin['carbon_commit']!r}"
+        )
 
     required_symbols = pin["required_symbols"]
     if not isinstance(required_symbols, list) or not required_symbols:
@@ -93,16 +103,33 @@ def require_carbon_base(pin_file: Path = PIN_FILE) -> list[str]:
     for module_name, attr in pin["required_symbols"]:
         try:
             module = importlib.import_module(module_name)
-        except ImportError:
-            missing.append(f"{module_name} (module missing)")
+        except ModuleNotFoundError as exc:
+            # exc.name is the module that was actually not found. When it
+            # matches module_name, module_name itself is absent. When it
+            # doesn't, module_name exists but one of ITS OWN imports (a
+            # dependency) failed — that must not read the same as "module
+            # missing", or a dependency problem looks like a checkout problem.
+            if exc.name == module_name:
+                missing.append(f"{module_name} (module missing)")
+            else:
+                missing.append(f"{module_name} (import failed: {type(exc).__name__})")
             continue
         except Exception as exc:
-            # A syntax-broken module, a junk module name (e.g. ""), or any other
+            # A syntax-broken module, a junk module name (e.g. ""), a plain
+            # ImportError raised by the module itself, or any other
             # import-time failure must still fold into the one loud
             # CarbonBaseError below, not crash raw mid-collection.
             missing.append(f"{module_name} (import failed: {type(exc).__name__})")
             continue
-        if not hasattr(module, attr):
+        try:
+            has_attr = hasattr(module, attr)
+        except Exception as exc:
+            # hasattr() only swallows AttributeError. A module-level
+            # __getattr__ (PEP 562) can raise anything on attribute access;
+            # that must fold into the loud error too, not crash raw.
+            missing.append(f"{module_name}.{attr} (attribute check failed: {type(exc).__name__})")
+            continue
+        if not has_attr:
             missing.append(f"{module_name}.{attr}")
     if missing:
         raise CarbonBaseError(

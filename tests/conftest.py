@@ -93,18 +93,23 @@ def pytest_configure(config):
     again here would run it a second time for no benefit.
 
     The except clause matches ``RuntimeError`` and then checks the class name
-    by string rather than importing and checking ``isinstance(exc,
-    CarbonBaseError)``: the import that raised the error is the very
-    ``loop.compat`` import in the try block, so importing ``CarbonBaseError``
-    to test with would require the module to already be importable —
-    chicken-and-egg. ``CarbonBaseError`` subclasses ``RuntimeError``, so this
-    still narrows out everything else. Any OTHER exception (a genuine bug
-    elsewhere in the import) re-raises with its real traceback instead of
-    being swallowed into a bare pytest.exit.
+    AND its defining module by string, rather than importing and checking
+    ``isinstance(exc, CarbonBaseError)``: the import that raised the error is
+    the very ``loop.compat`` import in the try block, so importing
+    ``CarbonBaseError`` to test with would require the module to already be
+    importable — chicken-and-egg. ``CarbonBaseError`` subclasses
+    ``RuntimeError``, so this still narrows out everything else. The module
+    check matters because name alone is spoofable: an unrelated
+    ``RuntimeError`` subclass defined elsewhere and also named
+    ``CarbonBaseError`` would match on name, get swallowed into
+    ``pytest.exit``, and lose its real traceback. Any OTHER exception (a
+    genuine bug elsewhere in the import, or a same-named class from a
+    different module) re-raises with its real traceback instead of being
+    swallowed.
     """
     try:
         import loop.compat  # noqa: F401
     except RuntimeError as exc:
-        if type(exc).__name__ == "CarbonBaseError":
+        if type(exc).__name__ == "CarbonBaseError" and type(exc).__module__ == "loop.compat":
             pytest.exit(f"\n{exc}", returncode=4)
         raise
