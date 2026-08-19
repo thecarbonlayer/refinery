@@ -61,8 +61,10 @@ def run_h1() -> Attempt:
         return LLMResponse(content=H1_SENTINEL)
 
     agent = _fault_agent(responder, "fake://transient")
+    result = None
     try:
-        reply = agent.send("Return the recovery receipt.")
+        result = agent.run("Return the recovery receipt.")
+        reply = result.text
     except Exception as exc:  # fail_fast is a measurable candidate, not suite infra failure
         reply = f"error: {exc}"
     finally:
@@ -73,7 +75,7 @@ def run_h1() -> Attempt:
         "pass" if ok else "fail",
         f"provider_calls={state['calls']} reply={reply!r}",
         turns=len(agent.messages),
-        metrics=agent_metrics(agent, include_cost=False),
+        metrics=agent_metrics(agent, result=result, include_cost=False),
     )
 
 
@@ -131,8 +133,10 @@ def run_h2() -> Attempt:
     policy = CONFIG.compaction
     seeded = max(10, (policy.keep_head + policy.keep_tail) * 2)
     agent.messages = [{"role": "user", "content": f"old context {i}"} for i in range(seeded)]
+    result = None
     try:
-        reply = agent.send("Continue after recovering the window.")
+        result = agent.run("Continue after recovering the window.")
+        reply = result.text
     except Exception as exc:
         reply = f"error: {exc}"
     finally:
@@ -176,7 +180,7 @@ def run_h2() -> Attempt:
         "pass" if ok else "fail",
         f"calls={state} compactions={agent.compaction_count} {detail_counts} reply={reply!r}",
         turns=len(agent.messages),
-        metrics=agent_metrics(agent, include_cost=False),
+        metrics=agent_metrics(agent, result=result, include_cost=False),
     )
 
 
@@ -210,8 +214,9 @@ def run_h3() -> Attempt:
 
     agent = _fault_agent(responder, "fake://bounded")
     raised = False
+    result = None
     try:
-        agent.send("This provider will not recover.")
+        result = agent.run("This provider will not recover.")
     except RuntimeError:
         raised = True
     finally:
@@ -225,12 +230,12 @@ def run_h3() -> Attempt:
         f"raised={raised} provider_calls={state['calls']} strategy={policy.strategy} "
         f"max_attempts={policy.max_attempts} expected_calls={expected}",
         turns=len(agent.messages),
-        metrics=agent_metrics(agent, include_cost=False),
+        metrics=agent_metrics(agent, result=result, include_cost=False),
     )
 
 
 SPECS = [
-    TaskSpec("H1", "held_in", "H", "pass", run_h1),
-    TaskSpec("H2", "held_out", "H", "pass", run_h2),
-    TaskSpec("H3", "held_in", "H", "pass", run_h3),
+    TaskSpec("H1", "held_in", "H", "pass", primitive="retry", alias="RET-1", run=run_h1),
+    TaskSpec("H2", "held_out", "H", "pass", primitive="retry", alias="RET-2", run=run_h2),
+    TaskSpec("H3", "held_in", "H", "pass", primitive="retry", alias="RET-3", run=run_h3),
 ]

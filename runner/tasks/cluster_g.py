@@ -56,11 +56,12 @@ def _plain_agent(**kwargs):
 def run_g1() -> Attempt:
     a = _plain_agent()
     try:
-        reply = a.send(
+        result = a.run(
             "Produce a plain-text incident handoff with exactly 400 numbered lines. "
             "Each line must use the form `N: system stable`, starting at 1. After line "
             f"400, put {G1_SENTINEL} on its own final line. Do not use the sentinel earlier."
         )
+        reply = result.text
         numbered = sum(
             1
             for line in reply.splitlines()
@@ -77,7 +78,7 @@ def run_g1() -> Attempt:
         detail=f"numbered_lines={numbered} sentinel_once={sentinel_once} "
         f"sentinel_last={sentinel_last} reply_chars={len(reply)}",
         turns=len(a.messages),
-        metrics=agent_metrics(a),
+        metrics=agent_metrics(a, result=result),
     )
 
 
@@ -112,9 +113,10 @@ def run_g2() -> Attempt:
                 turns=len(a.messages),
                 metrics=agent_metrics(a),
             )
-        reply = a.send(
+        result = a.run(
             "Reply with the two exact release decision codes, early first and late second."
         )
+        reply = result.text
         has_a = G2_FACT_A.lower() in reply.lower()
         has_b = G2_FACT_B.lower() in reply.lower()
         ok = has_a and has_b
@@ -126,7 +128,7 @@ def run_g2() -> Attempt:
         detail=f"compactions={compactions} early_recalled={has_a} "
         f"late_recalled={has_b} reply={reply[:240]!r}",
         turns=len(a.messages),
-        metrics=agent_metrics(a),
+        metrics=agent_metrics(a, result=result),
     )
 
 
@@ -177,10 +179,11 @@ def run_g4() -> Attempt:
                 turns=len(a.messages),
                 metrics=agent_metrics(a),
             )
-        reply = a.send(
+        result = a.run(
             "Report three things exactly as recorded: the files changed so far, the "
             "approach that was tried and rejected, and the pending next action."
         )
+        reply = result.text
         low = reply.lower()
         has_files = all(f.lower() in low for f in G4_FILES)
         has_rejected = G4_REJECTED.lower() in low
@@ -195,7 +198,7 @@ def run_g4() -> Attempt:
         f"rejected_recalled={has_rejected} next_action_recalled={has_next} "
         f"reply={reply[:240]!r}",
         turns=len(a.messages),
-        metrics=agent_metrics(a),
+        metrics=agent_metrics(a, result=result),
     )
 
 
@@ -287,7 +290,8 @@ def run_g5() -> Attempt:
                 turns=len(a.messages),
                 metrics=agent_metrics(a),
             )
-        reply = a.send("List every file you have created or modified in this session.")
+        result = a.run("List every file you have created or modified in this session.")
+        reply = result.text
         low = reply.lower()
         recalled = [f for f in G5_FILES if f.lower() in low]
         ok = len(recalled) == len(G5_FILES)
@@ -300,7 +304,7 @@ def run_g5() -> Attempt:
         f"recalled={recalled} reply={reply[:240]!r}",
         approvals=approvals,
         turns=len(a.messages),
-        metrics=agent_metrics(a),
+        metrics=agent_metrics(a, result=result),
     )
 
 
@@ -331,10 +335,11 @@ def run_g3() -> Attempt:
     tools.register(delegate_tool(model=provider.model, tools=worker_tools))
     a.tools = tools
     try:
-        reply = a.send(
+        result = a.run(
             "Delegate this exact subtask to a worker: read worker-state.txt and return its "
             "current-state value exactly. Then reply with just that value."
         )
+        reply = result.text
         delegated_results = tool_texts(a.messages)
         worker_saw_state = any(G3_SENTINEL in text for text in delegated_results)
         recalled = G3_SENTINEL.lower() in reply.lower()
@@ -347,14 +352,14 @@ def run_g3() -> Attempt:
         detail=f"delegate_called={bool(delegated_results)} worker_saw_state={worker_saw_state} "
         f"reply_recalled={recalled} reply={reply[:240]!r}",
         turns=len(a.messages),
-        metrics=agent_metrics(a),
+        metrics=agent_metrics(a, result=result),
     )
 
 
 SPECS = [
-    TaskSpec("G1", "held_in", "G", "uncertain", run_g1),
-    TaskSpec("G2", "held_out", "G", "uncertain", run_g2),
-    TaskSpec("G3", "held_in", "G", "pass", run_g3),
-    TaskSpec("G4", "held_in", "G", "uncertain", run_g4),
-    TaskSpec("G5", "held_in", "G", "uncertain", run_g5),
+    TaskSpec("G1", "held_in", "G", "uncertain", primitive="response", alias="RSP-1", run=run_g1),
+    TaskSpec("G2", "held_out", "G", "uncertain", primitive="compaction", alias="CMP-2", run=run_g2),
+    TaskSpec("G3", "held_in", "G", "pass", primitive="subagent", alias="SUB-1", run=run_g3),
+    TaskSpec("G4", "held_in", "G", "uncertain", primitive="compaction", alias="CMP-3", run=run_g4),
+    TaskSpec("G5", "held_in", "G", "uncertain", primitive="compaction", alias="CMP-4", run=run_g5),
 ]

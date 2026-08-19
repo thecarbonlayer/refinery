@@ -37,6 +37,8 @@ def _spec(name="A1", split="held_in", passed=True, metrics=None):
         split=split,
         cluster="A",
         expected_baseline="pass",
+        primitive="compaction",
+        alias=None,
         run=lambda: Attempt(
             passed,
             "pass" if passed else "fail",
@@ -153,8 +155,90 @@ def test_attempt_metrics_are_persisted(tmp_path):
         attempts=1,
         log=lambda *a: None,
     )
-    assert tr.records[0]["metrics"] == {"tokens": 123.0, "tool_calls": 4.0}
+    # duration_s (run.py's setdefault) joins metrics alongside whatever the
+    # task itself reported, since this attempt's metrics are already non-empty.
+    metrics = tr.records[0]["metrics"]
+    assert metrics["tokens"] == 123.0
+    assert metrics["tool_calls"] == 4.0
+    assert "duration_s" in metrics
     assert json.loads(jsonl.read_text())["metrics"]["tokens"] == 123.0
+
+
+def test_runner_measured_duration_overrides_attempt_duration(tmp_path):
+    """The runner's measured duration_s must always win, even if an Attempt
+    pre-seeds the metrics dict with an arbitrary duration_s value. This ensures
+    the top-level rec["duration_s"] field matches the attempt's metrics["duration_s"]."""
+    jsonl = tmp_path / "dur_override.jsonl"
+    # Spec that returns an Attempt with pre-seeded (bogus) duration_s
+    tr = run_task(
+        _spec(metrics={"duration_s": 9999.0, "llm_calls": 1}),
+        FP,
+        jsonl,
+        attempts=1,
+        log=lambda *a: None,
+    )
+    # The recorded attempt should have duration_s from the runner's measurement,
+    # not the bogus 9999.0 from the Attempt
+    rec = tr.records[0]
+    assert rec["duration_s"] != 9999.0, "Runner's measured duration was overridden by attempt"
+    assert isinstance(rec["duration_s"], float)
+    assert rec["duration_s"] < 1.0  # Should be a small measured time
+    # Metrics dict should also have the runner's measured value, not 9999.0
+    assert rec["metrics"]["duration_s"] != 9999.0
+    assert rec["metrics"]["duration_s"] == rec["duration_s"], (
+        "Top-level duration_s must match metrics['duration_s']"
+    )
+
+
+def test_recorded_attempt_carries_primitive_alias_and_duration(tmp_path):
+    """``primitive``/``alias`` are copied straight off the spec onto every
+    record. ``duration_s`` always lands on the record's own top-level field;
+    it also joins ``metrics``, but only because this task already reports a
+    metric of its own — see the next test for the empty-metrics case."""
+    jsonl = tmp_path / "meta.jsonl"
+    spec = TaskSpec(
+        name="A1",
+        split="held_in",
+        cluster="A",
+        expected_baseline="pass",
+        primitive="compaction",
+        alias="CMP-1",
+        run=lambda: Attempt(True, "pass", "ok", metrics={"turns": 1.0}),
+    )
+    tr = run_task(spec, FP, jsonl, attempts=1, log=lambda *a: None)
+    rec = tr.records[0]
+    assert rec["primitive"] == "compaction"
+    assert rec["alias"] == "CMP-1"
+    assert isinstance(rec["duration_s"], float)
+    assert isinstance(rec["metrics"]["duration_s"], float)
+    on_disk = json.loads(jsonl.read_text())
+    assert on_disk["primitive"] == "compaction"
+    assert on_disk["alias"] == "CMP-1"
+    assert "duration_s" in on_disk["metrics"]
+
+
+def test_empty_metrics_attempt_stays_empty_no_lone_duration_s(tmp_path):
+    """The other half of run.py's rule: an attempt whose own ``Attempt`` reports
+    NO metrics (the shape the except-Exception branch produces too) must not
+    gain a lone ``duration_s`` key — that would create the exact denominator
+    asymmetry (``duration_s`` reporting on every attempt while every other
+    metric reports only on some) the audit fix exists to remove. The top-level
+    ``rec["duration_s"]`` field is unaffected: it is always computed and set,
+    metrics-shape aside."""
+    jsonl = tmp_path / "empty.jsonl"
+    spec = TaskSpec(
+        name="A1",
+        split="held_in",
+        cluster="A",
+        expected_baseline="pass",
+        primitive="compaction",
+        alias=None,
+        run=lambda: Attempt(False, "error", "boom"),  # metrics defaults to {}
+    )
+    tr = run_task(spec, FP, jsonl, attempts=1, log=lambda *a: None)
+    rec = tr.records[0]
+    assert rec["metrics"] == {}
+    assert isinstance(rec["duration_s"], float)
 
 
 def test_suite_aggregates_task_equal_weight_metrics(tmp_path):
@@ -190,7 +274,15 @@ def test_task_metric_mean_covers_only_reporting_attempts(tmp_path):
             return Attempt(True, "pass", "ok", metrics={"tokens": 900.0})
         return Attempt(False, "error", "boom", metrics={})
 
-    spec = TaskSpec(name="A1", split="held_in", cluster="A", expected_baseline="pass", run=run)
+    spec = TaskSpec(
+        name="A1",
+        split="held_in",
+        cluster="A",
+        expected_baseline="pass",
+        primitive="compaction",
+        alias=None,
+        run=run,
+    )
     results = run_suite(
         [spec],
         label="attempts",
@@ -202,7 +294,10 @@ def test_task_metric_mean_covers_only_reporting_attempts(tmp_path):
     task = results["tasks"]["A1"]
     assert task["attempts"] == 3
     assert task["metrics"]["tokens"] == 900.0  # not 300.0
-    assert task["metric_attempt_counts"] == {"tokens": 1}
+    # duration_s joins metrics only for the attempt that already reports
+    # something (run.py's rule: no lone duration_s key on an empty-metrics
+    # row) — the two that raised keep metrics={} entirely, same as `tokens`.
+    assert task["metric_attempt_counts"] == {"tokens": 1, "duration_s": 1}
 
 
 def test_suite_to_delta_carries_attempt_drift_end_to_end(tmp_path):
@@ -229,8 +324,12 @@ def test_suite_to_delta_carries_attempt_drift_end_to_end(tmp_path):
     def suite(label, good):
         return run_suite(
             [
-                TaskSpec("A1", "held_in", "A", "pass", flaky(good)),
-                TaskSpec("B1", "held_in", "B", "pass", flaky(good)),
+                TaskSpec(
+                    "A1", "held_in", "A", "pass", flaky(good), primitive="compaction", alias=None
+                ),
+                TaskSpec(
+                    "B1", "held_in", "B", "pass", flaky(good), primitive="verification", alias=None
+                ),
             ],
             label=label,
             attempts=3,
@@ -241,13 +340,20 @@ def test_suite_to_delta_carries_attempt_drift_end_to_end(tmp_path):
 
     base = suite("base", good=3)  # 2 tasks x 3 reporting attempts
     cand = suite("cand", good=1)  # 2 tasks x 1 reporting attempt
-    assert base["summary"]["metric_attempt_counts"] == {"tokens": 6}
-    assert cand["summary"]["metric_attempt_counts"] == {"tokens": 2}
+    # duration_s only joins a NON-empty metrics dict (run.py's rule), and here
+    # every "good" attempt's metrics is exactly {"tokens": ...} — non-empty —
+    # while every "error" attempt's metrics is {} (stays empty). So duration_s
+    # tracks `tokens` exactly on both sides: 6 reporting attempts when all 3
+    # per task are good, 2 when only 1 of 3 is.
+    assert base["summary"]["metric_attempt_counts"] == {"tokens": 6, "duration_s": 6}
+    assert cand["summary"]["metric_attempt_counts"] == {"tokens": 2, "duration_s": 2}
     d = delta(base, cand)
     # Same task count on both sides, so ONLY the attempt counts reveal the change.
     assert d["metric_task_counts"]["tokens"] == {"baseline": 2, "candidate": 2}
     assert d["metric_attempt_counts"]["tokens"] == {"baseline": 6, "candidate": 2}
-    assert d["metric_denominator_drift"] == ["tokens"]
+    assert d["metric_attempt_counts"]["duration_s"] == {"baseline": 6, "candidate": 2}
+    # duration_s now tracks `tokens` attempt-for-attempt, so it drifts too.
+    assert d["metric_denominator_drift"] == ["duration_s", "tokens"]
 
 
 def test_suite_metric_mean_excludes_tasks_that_cannot_report(tmp_path):
@@ -273,7 +379,10 @@ def test_suite_metric_mean_excludes_tasks_that_cannot_report(tmp_path):
     )
     assert results["summary"]["metrics"]["tokens"] == 100.0  # over 1 task, not 50.0 over 2
     assert results["summary"]["metrics"]["retries"] == 2.0
-    assert results["summary"]["metric_task_counts"] == {"retries": 2, "tokens": 1}
+    # duration_s joins metrics only when the task's own metrics are non-empty
+    # (run.py's rule) — both A1 and B1 already report `retries`, so both pick
+    # up duration_s too, unlike `tokens`, which only A1 reports.
+    assert results["summary"]["metric_task_counts"] == {"retries": 2, "tokens": 1, "duration_s": 2}
 
 
 def test_load_done_tolerates_malformed_final_line(tmp_path):
@@ -417,7 +526,7 @@ def test_run_suite_resumes_after_additive_carbon_bump(tmp_path):
             ran["n"] += 1
             return Attempt(True, "pass", "d")
 
-        return TaskSpec("A1", "held_in", "A", "pass", run=run)
+        return TaskSpec("A1", "held_in", "A", "pass", primitive="compaction", alias=None, run=run)
 
     results = run_suite(
         [counting_spec()],
@@ -442,7 +551,7 @@ def test_run_suite_refuses_stale_baseline_up_front(tmp_path):
             ran["n"] += 1
             return Attempt(True, "pass", "d")
 
-        return TaskSpec("A1", "held_in", "A", "pass", run=run)
+        return TaskSpec("A1", "held_in", "A", "pass", primitive="compaction", alias=None, run=run)
 
     with pytest.raises(StaleBaseline, match="behavior_key"):
         run_suite(
@@ -505,7 +614,15 @@ def test_summary_carries_security_classes_and_session_env(tmp_path):
             return Attempt(False, "critical_failure", "leak", security_class="behavioral")
         return Attempt(True, "pass", "ok")
 
-    spec = TaskSpec(name="C1", split="held_in", cluster="C", expected_baseline="pass", run=run)
+    spec = TaskSpec(
+        name="C1",
+        split="held_in",
+        cluster="C",
+        expected_baseline="pass",
+        primitive="safety",
+        alias=None,
+        run=run,
+    )
     results = run_suite(
         [spec],
         label="secclass",

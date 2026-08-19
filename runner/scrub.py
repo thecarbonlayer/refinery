@@ -24,7 +24,7 @@ import re
 _TMPDIR = re.compile(r"(?:/private)?/var/folders/[^/\s\"']+/[^/\s\"']+/T")
 # The fallback for truncated paths, applied AFTER _TMPDIR so full paths keep their
 # post-/T suffix (`<TMPDIR>/workspace-x`) while a clamp-cut fragment still vanishes.
-_TMPDIR_PARTIAL = re.compile(r"(?:/private)?/var/folders/[^\s\"']*")
+_TMPDIR_PARTIAL = re.compile(r"(?:/private)?/var/folders(?:/[^\s\"']*)?")
 _HOME = re.compile(r"/Users/[A-Za-z0-9._-]+")
 
 

@@ -1,0 +1,215 @@
+{
+  "arms": [
+    {
+      "label": "baseline-p1-r2",
+      "runner_sha": "0d7ea478ea0a63f12f445946d7bb1fc82af61a17b56042935d6ff337007d9b6e",
+      "config_version": 8,
+      "model": "google/gemma-4-26b-a4b"
+    },
+    {
+      "label": "null-cmp-a",
+      "runner_sha": "0d7ea478ea0a63f12f445946d7bb1fc82af61a17b56042935d6ff337007d9b6e",
+      "config_version": 8,
+      "model": "google/gemma-4-26b-a4b"
+    },
+    {
+      "label": "null-cmp-b",
+      "runner_sha": "0d7ea478ea0a63f12f445946d7bb1fc82af61a17b56042935d6ff337007d9b6e",
+      "config_version": 8,
+      "model": "google/gemma-4-26b-a4b"
+    },
+    {
+      "label": "null-cmp-c",
+      "runner_sha": "0d7ea478ea0a63f12f445946d7bb1fc82af61a17b56042935d6ff337007d9b6e",
+      "config_version": 8,
+      "model": "google/gemma-4-26b-a4b"
+    },
+    {
+      "label": "null-cmp-d",
+      "runner_sha": "0d7ea478ea0a63f12f445946d7bb1fc82af61a17b56042935d6ff337007d9b6e",
+      "config_version": 8,
+      "model": "google/gemma-4-26b-a4b"
+    }
+  ],
+  "per_task": {
+    "A1": {
+      "passes_by_arm": {
+        "baseline-p1-r2": {
+          "passes": 2,
+          "attempts": 3
+        },
+        "null-cmp-a": {
+          "passes": 5,
+          "attempts": 10
+        },
+        "null-cmp-b": {
+          "passes": 5,
+          "attempts": 10
+        },
+        "null-cmp-c": {
+          "passes": 5,
+          "attempts": 10
+        },
+        "null-cmp-d": {
+          "passes": 7,
+          "attempts": 10
+        }
+      },
+      "max_abs_delta": 0.2
+    },
+    "G2": {
+      "passes_by_arm": {
+        "baseline-p1-r2": {
+          "passes": 1,
+          "attempts": 5
+        },
+        "null-cmp-a": {
+          "passes": 4,
+          "attempts": 10
+        },
+        "null-cmp-b": {
+          "passes": 6,
+          "attempts": 10
+        },
+        "null-cmp-c": {
+          "passes": 7,
+          "attempts": 10
+        },
+        "null-cmp-d": {
+          "passes": 5,
+          "attempts": 10
+        }
+      },
+      "max_abs_delta": 0.5
+    },
+    "G4": {
+      "passes_by_arm": {
+        "baseline-p1-r2": {
+          "passes": 0,
+          "attempts": 3
+        },
+        "null-cmp-a": {
+          "passes": 1,
+          "attempts": 10
+        },
+        "null-cmp-b": {
+          "passes": 1,
+          "attempts": 10
+        },
+        "null-cmp-c": {
+          "passes": 0,
+          "attempts": 10
+        },
+        "null-cmp-d": {
+          "passes": 0,
+          "attempts": 10
+        }
+      },
+      "max_abs_delta": 0.1
+    },
+    "G5": {
+      "passes_by_arm": {
+        "baseline-p1-r2": {
+          "passes": 3,
+          "attempts": 3
+        },
+        "null-cmp-a": {
+          "passes": 7,
+          "attempts": 10
+        },
+        "null-cmp-b": {
+          "passes": 8,
+          "attempts": 10
+        },
+        "null-cmp-c": {
+          "passes": 6,
+          "attempts": 10
+        },
+        "null-cmp-d": {
+          "passes": 6,
+          "attempts": 10
+        }
+      },
+      "max_abs_delta": 0.4
+    }
+  },
+  "section_noise": {
+    "held_in": 0.1,
+    "held_out": 0.3
+  },
+  "section_noise_arms": {
+    "held_in": [
+      "null-cmp-a",
+      "null-cmp-b",
+      "null-cmp-c",
+      "null-cmp-d"
+    ],
+    "held_out": [
+      "null-cmp-a",
+      "null-cmp-b",
+      "null-cmp-c",
+      "null-cmp-d"
+    ]
+  },
+  "pairwise_outcomes": {
+    "baseline-p1-r2::null-cmp-a": {
+      "task_intersection": [
+        "A1",
+        "G2",
+        "G4",
+        "G5"
+      ],
+      "outcome": "ERROR",
+      "error": "attempt counts differ on: A1, G2, G4, G5"
+    },
+    "baseline-p1-r2::null-cmp-b": {
+      "task_intersection": [
+        "A1",
+        "G2",
+        "G4",
+        "G5"
+      ],
+      "outcome": "ERROR",
+      "error": "attempt counts differ on: A1, G2, G4, G5"
+    },
+    "baseline-p1-r2::null-cmp-c": {
+      "task_intersection": [
+        "A1",
+        "G2",
+        "G4",
+        "G5"
+      ],
+      "outcome": "ERROR",
+      "error": "attempt counts differ on: A1, G2, G4, G5"
+    },
+    "baseline-p1-r2::null-cmp-d": {
+      "task_intersection": [
+        "A1",
+        "G2",
+        "G4",
+        "G5"
+      ],
+      "outcome": "ERROR",
+      "error": "attempt counts differ on: A1, G2, G4, G5"
+    },
+    "null-cmp-a::null-cmp-b": {
+      "outcome": "CONFIRM"
+    },
+    "null-cmp-a::null-cmp-c": {
+      "outcome": "REJECT"
+    },
+    "null-cmp-a::null-cmp-d": {
+      "outcome": "REJECT"
+    },
+    "null-cmp-b::null-cmp-c": {
+      "outcome": "REJECT"
+    },
+    "null-cmp-b::null-cmp-d": {
+      "outcome": "REJECT"
+    },
+    "null-cmp-c::null-cmp-d": {
+      "outcome": "REJECT"
+    }
+  },
+  "computed_at_runner_sha": "0d7ea478ea0a63f12f445946d7bb1fc82af61a17b56042935d6ff337007d9b6e"
+}

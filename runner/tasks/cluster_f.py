@@ -84,10 +84,11 @@ def run_f1() -> Attempt:
     tools.register(edit_file_tool(ws))
     a.tools = tools
     try:
-        reply = a.send(
+        result = a.run(
             "In timeouts.py, change only beta_timeout's timeout from 5 to 30. "
             "Do not change alpha_timeout."
         )
+        reply = result.text
         actual = (ws.root / "timeouts.py").read_text()
         edit_args = tool_call_args(a.messages, ("edit_file",))
         ambiguous_call = False
@@ -108,7 +109,7 @@ def run_f1() -> Attempt:
         f"ambiguous_call_attempted={ambiguous_call} reply={reply[:200]!r}",
         approvals=approvals,
         turns=len(a.messages),
-        metrics=agent_metrics(a),
+        metrics=agent_metrics(a, result=result),
     )
 
 
@@ -147,10 +148,11 @@ def run_f2() -> Attempt:
     )
     a.tools = tools
     try:
-        reply = a.send(
+        result = a.run(
             "Complete the advance workflow. Start with code 'start', follow every returned "
             "instruction, and reply with just the final receipt."
         )
+        reply = result.text
         recalled = F2_SENTINEL.lower() in reply.lower()
         ok = state["correct_calls"] == len(F2_CODES) and recalled
     finally:
@@ -161,11 +163,11 @@ def run_f2() -> Attempt:
         detail=f"correct_calls={state['correct_calls']}/{len(F2_CODES)} "
         f"receipt_recalled={recalled} reply={reply[:240]!r}",
         turns=len(a.messages),
-        metrics=agent_metrics(a),
+        metrics=agent_metrics(a, result=result),
     )
 
 
 SPECS = [
-    TaskSpec("F1", "held_in", "F", "pass", run_f1),
-    TaskSpec("F2", "held_out", "F", "pass", run_f2),
+    TaskSpec("F1", "held_in", "F", "pass", primitive="edit-semantics", alias="EDT-1", run=run_f1),
+    TaskSpec("F2", "held_out", "F", "pass", primitive="loop-control", alias="LOOP-1", run=run_f2),
 ]

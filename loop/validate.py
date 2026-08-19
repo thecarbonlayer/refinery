@@ -1,4 +1,4 @@
-"""Validation wiring: candidate -> suite run -> Δ -> acceptance rule.
+"""Validation wiring: candidate -> suite run -> Δ -> a decision, and which decision.
 
 The candidate is applied to the carbon WORKING TREE (never committed —
 rejected candidates must leave no trace in that repo, and the runner's
@@ -7,8 +7,21 @@ runs in a FRESH SUBPROCESS: carbon's config values bind at import time, so an
 in-process ``run_suite`` after editing the file would measure the old config.
 The edit is reverted in a ``finally`` — pass, fail, or crash.
 
-Acceptance is the Self-Harness rule as implemented in ``runner.delta``:
-``Δ_in >= 0, Δ_ho >= 0, max(Δ_in, Δ_ho) > 0`` — no partial credit.
+Two decision paths, chosen per candidate by ``rule_disposition()`` and both recorded
+on every ``ValidationRecord`` (``rule`` and ``causal``, regardless of which one set
+``accepted``):
+
+- A candidate whose edit maps to ONE section in ``RULE_SECTIONS`` — ``tool_output``
+  always, ``compaction`` only when a fresh ``SectionCalibration`` covers the
+  measurements being judged — gets the three-outcome CALIBRATED RULE
+  (``loop.acceptance.evaluate()``): REJECT, or CONFIRM (promising, not accepted —
+  accepted only through a fresh paired confirmation, ``loop.cli.run_confirmation`` /
+  ``loop.acceptance.confirmed()``, which is the only path to ACCEPT).
+- Everywhere else — an unmapped field, an edit spanning two sections, or an
+  uncalibrated section — ``accepted`` follows the CAUSAL VERDICT
+  (``causal_verdict()``): the Self-Harness rule (``Δ_in >= 0, Δ_ho >= 0,
+  max(Δ_in, Δ_ho) > 0``, no partial credit) applied with impossible attributions
+  (movements on tasks the edited knob cannot reach) zeroed out first.
 """
 
 from __future__ import annotations
@@ -18,11 +31,13 @@ import os
 import subprocess
 import sys
 from collections.abc import Callable
+from fractions import Fraction
 from pathlib import Path
 
-from loop.acceptance import ACCEPT
+from loop.acceptance import ACCEPT, SectionCalibration
 from loop.acceptance import evaluate as rule_evaluate
 from loop.artifacts import Candidate, ValidationRecord
+from loop.calibrate import ANALYSIS_PATH as COMPACTION_ANALYSIS_PATH
 from loop.config_edit import CONFIG_REL, apply_candidate
 from loop.observed_coverage import activity_from_rows, partition_deltas, select_attempts
 from loop.surface_sweep import sweep as run_sweep
@@ -260,13 +275,50 @@ def causal_verdict(d: dict, coverage: dict, baseline: dict) -> dict:
     }
 
 
-# The sections the three-outcome rule may DECIDE. Only `tool_output` has proof-grade
-# exclusions and measured null limits; the six unchanged runs showed two-attempt
-# held-in swings on the unfiltered sections (compaction, retry, file_injection), which
-# the one-attempt allowance would false-reject. Those sections stay on the causal
-# verdict until they have their own supported task sets or fresh null measurements.
-RULE_SECTIONS = frozenset({"tool_output"})
-_FIELD_SECTION = {"tool_output": "tool_output", "max_item_chars": "tool_output"}
+# The sections the three-outcome rule may DECIDE, and on what footing.
+#
+# `tool_output` earned its place from the six unchanged runs: proof-grade exclusions
+# (a task with no tool registry cannot be reached by any value of the knob) and a null
+# measurement the one-attempt allowance fits. It consults NO artifact and is unchanged
+# by everything below.
+#
+# `compaction` is the opposite case and enters on the opposite footing. Those same six
+# runs showed two-attempt held-in swings on it, which a one-attempt allowance would
+# false-reject, and its exclusions can never be proof-grade — `trigger_fraction`
+# belongs to the knob, so the knob can CREATE the activity whose absence would be the
+# exclusion. It therefore enters ONLY through a fresh `SectionCalibration`: a supported
+# task set and bounds measured by null arms whose PROVENANCE — runner_sha, config
+# version, model — matches the measurements being judged. No artifact, or one measured
+# in a different world, and the section falls back to the causal verdict exactly as
+# before (contract §4 and its 2026-08-19 amendment).
+RULE_SECTIONS = frozenset({"tool_output", "compaction"})
+
+# Sections whose entry into the rule is CONDITIONAL on that fresh calibration. A
+# section outside this set decides on its own footing and never reads an artifact —
+# which is what keeps `tool_output`'s behavior identical to the day it was calibrated.
+_CALIBRATION_REQUIRED = frozenset({"compaction"})
+
+# field -> section. `compaction` and `compaction_prompt` are two fields of ONE section:
+# they change the same mechanism (when the harness compacts, and what it says while
+# doing it) and the calibration measured that mechanism, not either field alone.
+#
+# `max_item_chars` used to map to `tool_output` here and is deliberately GONE: carbon
+# locked it out of the editable surface at config v3 (it survives in the schema for
+# chapter/API compatibility — see `locked_fields` in carbon's surface), so no candidate
+# can ever carry it and the mapping was dead code pointing at the one section the rule
+# decides. Recorded rather than silently deleted: a mapping removed with no reason is a
+# mapping someone restores.
+_FIELD_SECTION = {
+    "tool_output": "tool_output",
+    "compaction": "compaction",
+    "compaction_prompt": "compaction",
+}
+
+# Where each calibrated section's artifact lives. `loop.calibrate` WRITES this path;
+# importing the constant rather than re-spelling it means the writer and the reader
+# cannot drift apart — a divergence would silently leave the section uncalibrated
+# forever, with a perfectly good artifact sitting on disk.
+_SECTION_ANALYSIS = {"compaction": COMPACTION_ANALYSIS_PATH}
 
 # Tasks a confirmation pair must rerun for a section EVEN IF UNMOVED — the section's
 # known trade-off guards and its reachable security checks. Movement-only selection
@@ -279,7 +331,211 @@ _FIELD_SECTION = {"tool_output": "tool_output", "max_item_chars": "tool_output"}
 #        it changes what the model sees and therefore what it does next — and a leak
 #        whose critical outcome appears only under the confirmation's higher attempt
 #        counts must block there, not slip past a movement filter.
-_SECTION_CONFIRM_GUARDS = {"tool_output": frozenset({"E1", "C1", "C2", "C3"})}
+#   A1, G2, G5 — compaction's guards (contract §1). G4 is the MINER and is deliberately
+#        absent: the task a candidate is mined from cannot also be the task that
+#        vouches for it. G2 is the held-out member, so the guard set spans both splits.
+_SECTION_CONFIRM_GUARDS = {
+    "tool_output": frozenset({"E1", "C1", "C2", "C3"}),
+    "compaction": frozenset({"A1", "G2", "G5"}),
+}
+
+
+def _repo_relative(path: Path) -> str:
+    """A path fit to sit in a committed record: repo-relative, or the bare filename.
+
+    This string reaches `iterations/` through the decision's `raw` and its reasons.
+    This repo is public and machine paths have leaked into it twice; nothing here may
+    carry `/Users/...` even when the artifact is a test's temp file.
+    """
+    try:
+        return str(path.resolve().relative_to(EDITOR_ROOT))
+    except ValueError:
+        return path.name
+
+
+def _scrub_os_error(exc: Exception, path: Path) -> str:
+    """`str(OSError)` embeds the absolute path it failed on (e.g. ``[Errno 13]
+    Permission denied: '/Users/.../analysis.json'``) — exactly the machine-path leak
+    ``_repo_relative`` exists to prevent everywhere else in this module, except an
+    ``OSError``'s own message bypasses it: the path text comes from the exception,
+    not from a call to ``_repo_relative``. Rebuild the message from the error's own
+    ``errno``/``strerror`` (what every ``OSError`` subclass — ``FileNotFoundError``,
+    ``PermissionError``, ``IsADirectoryError`` — actually carries) with the path
+    relativized the same way as everywhere else. A ``ValueError`` (e.g. a JSON decode
+    error) never carries a path in its message, so it passes through unscrubbed.
+    """
+    if isinstance(exc, OSError):
+        errno_part = f"[Errno {exc.errno}] " if exc.errno is not None else ""
+        strerror = exc.strerror or str(exc)
+        return f"{errno_part}{strerror}: {_repo_relative(path)!r}"
+    return str(exc)
+
+
+def _provenance_mismatch(analysis: dict, fingerprint: dict, where: str) -> str:
+    """The first way this artifact's provenance differs from the measurements', or "".
+
+    Freshness is a question about the RESULTS being judged, not about the process doing
+    the judging (contract §4, amendment 2026-08-19). The null protocol (§2) forces every
+    arm to share `runner_sha`, `config_version` and `model` precisely because a Δ across
+    any of them is not a measurement of noise — so a noise floor whose arms disagree
+    with the baseline being judged was measured in a different world. Checking the LIVE
+    process instead would pass an artifact that matches today's checkout while the
+    results predate it, and fail one that matches the results perfectly after an
+    unrelated `runner/` edit.
+    """
+    computed = analysis.get("computed_at_runner_sha")
+    if computed != fingerprint.get("runner_sha"):
+        return (
+            f"{where} is STALE on runner_sha — computed at {str(computed)[:12]}, the "
+            f"measurements were recorded at {str(fingerprint.get('runner_sha'))[:12]}"
+        )
+    arms = analysis.get("arms") or []
+    if not arms:
+        return f"{where} records no arms — there is no provenance to check it against"
+    for arm in arms:
+        for field in ("config_version", "model"):
+            if arm.get(field) != fingerprint.get(field):
+                return (
+                    f"{where} is STALE on {field} — arm {arm.get('label')!r} measured at "
+                    f"{arm.get(field)!r}, the measurements were recorded at "
+                    f"{fingerprint.get(field)!r}"
+                )
+    return ""
+
+
+def _parse_exact_fraction(raw: str | None) -> Fraction | None:
+    """A `"numerator/denominator"` string (`loop.calibrate`'s `section_noise_exact`)
+    as an exact `Fraction`, or None when there is nothing to parse.
+
+    None is also the answer for a malformed string: an artifact this module cannot
+    trust to be well-formed must not raise here (a legacy or hand-edited analysis.json
+    should not crash loading), it must fall back — `SectionCalibration.__post_init__`
+    is exactly the fallback, deriving the same `Fraction(float)` this module compared
+    against before the exact field existed.
+    """
+    if not raw:
+        return None
+    try:
+        if "/" in raw:
+            num, den = raw.split("/", 1)
+            return Fraction(int(num), int(den))
+        return Fraction(int(raw))
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
+def calibration_status(
+    section: str, fingerprint: dict | None, *, analysis_path: Path | None = None
+) -> tuple[SectionCalibration | None, str]:
+    """`section_calibration()` plus the reason it came back empty.
+
+    Public, and returning the reason, because "not calibrated" is a fact every caller
+    must be able to EXPLAIN: missing artifact, artifact from other provenance, and
+    unmeasured bound are three different states of the world, only one of which is
+    fixed by re-running the null protocol. A bare None makes them one mystery.
+    """
+    path = analysis_path or _SECTION_ANALYSIS.get(section)
+    if path is None:
+        return None, f"section {section!r} has no calibration artifact to load"
+    where = _repo_relative(path)
+    if not path.is_file():
+        return None, (
+            f"section {section!r} is not calibrated: no calibration artifact at {where} — "
+            "run the null-arm protocol and `python -m loop.calibrate <arm labels>` first"
+        )
+    if not fingerprint:
+        # Fail CLOSED. Without the measurements' provenance there is nothing for the
+        # artifact to be fresh for, and "could not check" must never read as "checked".
+        return None, (
+            f"section {section!r} is not calibrated: no results fingerprint was supplied, "
+            "and freshness is judged against the provenance of the measurements being "
+            "compared, never against the live process alone"
+        )
+    try:
+        analysis = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        return None, (
+            f"section {section!r} is not calibrated: {where} is unreadable "
+            f"({_scrub_os_error(exc, path)})"
+        )
+    drift = _provenance_mismatch(analysis, fingerprint, where)
+    if drift:
+        return None, (
+            f"section {section!r} is not calibrated: {drift}. A bound measured under "
+            "other provenance is not a measurement of this comparison, so the section "
+            "falls back to the causal verdict until the arms are re-run."
+        )
+    noise = analysis.get("section_noise") or {}
+    # A split named in `section_noise` with fewer than two arms behind it carries a
+    # bound of 0.0 by construction — no pair, no spread. That is an ABSENCE of
+    # measurement, and installing it as a threshold would give the section a floor of
+    # zero, where any movement at all reads as evidence. `section_noise_arms` is what
+    # tells the two apart; a genuine measured zero names its arms.
+    arms = analysis.get("section_noise_arms") or {}
+    # A `per_task` entry with no arm behind it is a task the tool was ASKED about and
+    # no arm carried — `loop.calibrate` still writes the row, with an empty
+    # `passes_by_arm`. Reading it as supported would put a name in the denominator
+    # nothing was ever measured on, and then refuse every comparison for not having it.
+    per_task = {
+        name: row
+        for name, row in (analysis.get("per_task") or {}).items()
+        if (row or {}).get("passes_by_arm")
+    }
+    unmeasured = [s for s in ("held_in", "held_out") if s not in noise or len(arms.get(s, ())) < 2]
+    if unmeasured or not per_task:
+        return None, (
+            f"section {section!r} is not calibrated: {where} carries no measured bound for "
+            f"{', '.join(unmeasured) or 'any supported task'} — fewer than two arms covered "
+            "it, and a bound no pair of arms produced is an absence, not a measurement of zero"
+        )
+    noise_exact = analysis.get("section_noise_exact") or {}
+    return (
+        SectionCalibration(
+            section=section,
+            supported=frozenset(per_task),
+            noise_in=float(noise["held_in"]),
+            noise_ho=float(noise["held_out"]),
+            guards=_SECTION_CONFIRM_GUARDS.get(section, frozenset()),
+            source=where,
+            noise_in_exact=_parse_exact_fraction(noise_exact.get("held_in")),
+            noise_ho_exact=_parse_exact_fraction(noise_exact.get("held_out")),
+        ),
+        "",
+    )
+
+
+def section_calibration(
+    section: str, fingerprint: dict | None = None, *, analysis_path: Path | None = None
+) -> SectionCalibration | None:
+    """The section's measured bounds for THESE measurements, or None.
+
+    None means the section stays on the causal verdict. It is returned for a section
+    with no artifact at all (`tool_output`, which does not want one), for an artifact
+    that has not been written yet, for one whose provenance differs from the results
+    being judged, and for one whose bounds no pair of arms actually produced.
+
+    `fingerprint` is the BASELINE results' fingerprint — the provenance freshness is
+    judged against (contract §4, amendment 2026-08-19). Omitting it is not a way to
+    skip the check: with nothing to be fresh FOR, the answer is None. Callers that
+    need to know WHY should use `calibration_status()`, which returns the reason.
+
+    `analysis_path` is a test seam, mirroring `run_runner=`/`run_gates=` elsewhere in
+    this module; production reads `_SECTION_ANALYSIS`.
+    """
+    return calibration_status(section, fingerprint, analysis_path=analysis_path)[0]
+
+
+def candidate_section(candidate: Candidate) -> str | None:
+    """The ONE section this candidate edits, or None for unmapped/multi-section edits.
+
+    Shared by `rule_disposition()` and `loop.cli confirm` so the two cannot disagree
+    about which section's calibration a candidate belongs to — a disagreement would
+    mean validating under a measured bound and confirming under a different one.
+    """
+    sections = {_FIELD_SECTION.get(f) for f in candidate.fields}
+    if len(sections) != 1 or None in sections:
+        return None
+    return next(iter(sections))
 
 
 def rule_disposition(candidate: Candidate, baseline: dict, results: dict, coverage: dict) -> dict:
@@ -287,26 +543,61 @@ def rule_disposition(candidate: Candidate, baseline: dict, results: dict, covera
 
     The record carries this either way, so "the rule was not applied" is a stated fact
     with a reason rather than an absence someone reads as an oversight.
+
+    ONE section at a time, always. An edit spanning two sections produces one Δ that
+    belongs to neither section's evidence, and no calibration covers it — that was
+    already true when `tool_output` was the only entry, and it stays true now that the
+    set has two.
     """
-    sections = {_FIELD_SECTION.get(f) for f in candidate.fields}
-    if sections != RULE_SECTIONS or None in sections:
+    section = candidate_section(candidate)
+    if section is None:
+        sections = {_FIELD_SECTION.get(f) for f in candidate.fields}
         return {
             "applied": False,
             "why": (
                 f"edited sections {sorted(s or 'unmapped' for s in sections)} are not "
-                "calibrated for the three-outcome rule; only tool_output has proof-grade "
-                "exclusions and measured null limits"
+                "calibrated for the three-outcome rule: it decides ONE calibrated section "
+                f"at a time (calibrated: {', '.join(sorted(RULE_SECTIONS))}), and an "
+                "unmapped field or an edit spanning two sections belongs to no section's "
+                "evidence"
             ),
         }
+    if section not in RULE_SECTIONS:
+        return {
+            "applied": False,
+            "why": (
+                f"edited section {section!r} is not calibrated for the three-outcome rule; "
+                f"only {', '.join(sorted(RULE_SECTIONS))} carry the exclusions and measured "
+                "limits the rule reads"
+            ),
+        }
+    # Judged against the BASELINE's own provenance: these are the measurements the
+    # bound has to be a bound for. `_parity` in `evaluate()` already refuses a
+    # candidate arm recorded under a different runner, so one side is enough.
+    calibration, why_not = calibration_status(section, baseline.get("fingerprint") or {})
+    if calibration is None and section in _CALIBRATION_REQUIRED:
+        return {"applied": False, "why": why_not}
     excluded = frozenset(coverage.get("unreachable_proven", ()))
-    section = next(iter(sections))
     decision = rule_evaluate(
         baseline,
         results,
         excluded=excluded,
         always_confirm=_SECTION_CONFIRM_GUARDS.get(section, frozenset()),
+        calibration=calibration,
+        # Evidence-grade exclusions are CONTEXT on the decision and change no verdict.
+        # Passed only for a calibrated section: `tool_output`'s decisions must stay
+        # exactly what they were when the six null runs calibrated them, down to the
+        # reason strings, and this adds one.
+        unreachable_probable=(
+            frozenset(coverage.get("unreachable_probable", ()))
+            if calibration is not None
+            else frozenset()
+        ),
     )
-    return {"applied": True, **decision.to_json()}
+    out = {"applied": True, **decision.to_json()}
+    if calibration is not None:
+        out["calibration"] = calibration.to_json()
+    return out
 
 
 def _run_runner(label: str, only: list[str] | None, attempts: int | None) -> None:
@@ -353,6 +644,7 @@ def validate_candidate(
                 candidate_id=candidate.id,
                 label=label,
                 accepted=False,
+                candidate_fields=dict(candidate.fields),
                 delta_in=0.0,
                 delta_ho=0.0,
                 gates=gates,
@@ -401,6 +693,7 @@ def validate_candidate(
         candidate_id=candidate.id,
         label=label,
         accepted=accepted,
+        candidate_fields=dict(candidate.fields),
         delta_in=d["delta_in"],
         delta_ho=d["delta_ho"],
         per_task=d["per_task"],

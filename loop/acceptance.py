@@ -45,6 +45,23 @@ pass-rate deltas is exact (`Fraction` of the integer counts); floats appear only
 report and in the Fisher p-values, which are exact ratios of `math.comb` integers with
 one final division.
 
+A SECTION CALIBRATION replaces that derived allowance with a MEASURED one, for one
+editable section at a time (contract §4). `one_attempt` is a bound on what a single
+attempt can move a whole split's mean — a structural stand-in for null variation,
+correct for `tool_output` because six unchanged runs said so. For a section with its
+own supported task set, null arms measure the real thing directly: the largest spread
+the SUPPORTED-SET split means showed with nothing changed between arms. Passing a
+``SectionCalibration`` swaps both halves of the gain/noise judgment — the quantity
+(supported-set mean instead of whole-split mean) and the bound (measured instead of
+derived) — and nothing else. Every whole-suite protection keeps reading the WHOLE
+suite: a leak on an unsupported task is still a leak, and a collapse there still
+vetoes. Without a calibration this module behaves exactly as it did before the
+mechanism existed, byte for byte, including its reason strings — except the
+confirmation collapse veto (contract amendment): ``confirmed()`` now runs the
+catastrophic per-task check unconditionally rather than only under a calibration,
+closing a hole where an uncalibrated confirmation pair could hide a full-pass-to-zero
+collapse behind a split mean that stayed inside its allowance.
+
 Lives in `loop/`, not `runner/`: `runner_sha` is the verifier's identity and a
 governance rule must not invalidate baselines when it changes.
 """
@@ -119,6 +136,67 @@ ACCEPT = "ACCEPT"
 # floating-point guarantee at arbitrary scale, which is why it is recorded here rather
 # than asserted at runtime.
 FISHER_ALPHA = 0.05
+
+
+@dataclass(frozen=True)
+class SectionCalibration:
+    """Measured null variation for ONE editable section (contract §4).
+
+    Every number in here comes out of a calibration artifact produced by
+    ``loop.calibrate`` from arms with NOTHING changed between them —
+    ``loop.validate.section_calibration()`` is the only constructor the pipeline
+    uses, and it refuses an artifact computed at a different ``runner_sha``. No
+    threshold in this repo is written by hand, which is the whole point: the rule
+    that decides what counts as movement must not be able to invent its own floor.
+
+    - ``supported``: the tasks the bounds were measured on. Gain and regression are
+      judged on the mean over THESE tasks, per split, and nothing else.
+    - ``noise_in`` / ``noise_ho``: the largest supported-set split-mean |Δ| the null
+      arms produced — the measured analog of ``one_attempt`` — as a float, for
+      display and for a caller that only wants an approximate number.
+    - ``noise_in_exact`` / ``noise_ho_exact``: the SAME bound as an exact ``Fraction``.
+      Bounds round-trip through JSON as floats, and most denominators (10 included)
+      are not exact in binary — ``Fraction(a_float)`` recovers that float's own exact
+      binary value, not the true rational the float already rounded away from, so a
+      threshold rebuilt only from ``noise_in``/``noise_ho`` can misjudge a movement
+      that lands EXACTLY on the true bound. When the artifact carries a
+      ``section_noise_exact`` string (``loop.calibrate``, since this fix), the loader
+      passes the exact ``Fraction`` it names here; every comparison in this module
+      reads these fields, never ``Fraction(noise_in)``. Left ``None``, ``__post_init__``
+      falls back to ``Fraction(noise_in)`` / ``Fraction(noise_ho)`` — the same
+      (potentially lossy) value this module always compared against — so a
+      calibration built without the exact fields, or an artifact from before they
+      existed, still works exactly as it did.
+    - ``guards``: tasks a confirmation must rerun even unmoved (added to
+      ``always_confirm``), the section's known trade-off and security checks.
+    - ``source``: where the artifact came from, repo-relative — this string lands in
+      a committed record, so it must never carry a machine path.
+    """
+
+    section: str
+    supported: frozenset[str]
+    noise_in: float
+    noise_ho: float
+    guards: frozenset[str]
+    source: str
+    noise_in_exact: Fraction | None = None
+    noise_ho_exact: Fraction | None = None
+
+    def __post_init__(self) -> None:
+        if self.noise_in_exact is None:
+            object.__setattr__(self, "noise_in_exact", Fraction(self.noise_in))
+        if self.noise_ho_exact is None:
+            object.__setattr__(self, "noise_ho_exact", Fraction(self.noise_ho))
+
+    def to_json(self) -> dict:
+        return {
+            "section": self.section,
+            "supported": sorted(self.supported),
+            "noise_in": self.noise_in,
+            "noise_ho": self.noise_ho,
+            "guards": sorted(self.guards),
+            "source": self.source,
+        }
 
 
 @dataclass(frozen=True)
@@ -321,12 +399,67 @@ def _split_deltas(
     return per, mean("held_in"), mean("held_out")
 
 
+def _supported_means(
+    per: dict[str, Fraction], splits: dict[str, str], supported: frozenset[str]
+) -> tuple[Fraction, Fraction]:
+    """The SUPPORTED-SET split means — the exact quantity a section's bounds were
+    measured on (``loop.calibrate._supported_split_mean``, same denominator, same
+    exact arithmetic). A split with no supported task present means 0, not a
+    division by zero: the section simply has no evidence on that split here.
+    """
+
+    def mean(split: str) -> Fraction:
+        vals = [v for n, v in per.items() if splits[n] == split and n in supported]
+        return sum(vals) / len(vals) if vals else Fraction(0)
+
+    return mean("held_in"), mean("held_out")
+
+
+def _require_supported(where: str, calibration: SectionCalibration, *results: dict) -> None:
+    """Every supported task must be present in every arm, or refuse.
+
+    The bound was measured on a mean over a NAMED set of tasks. Computing the mean
+    over whatever subset happens to be present divides by a different denominator and
+    compares the result to a threshold that was never about it — a candidate missing
+    one held-in task of three would be judged on 1/2 of a sum against a bound built
+    from 1/3 of one. Nothing in the record would say so: the number simply moves.
+    A short denominator is a broken comparison, not a smaller one.
+    """
+    present = set.intersection(*(set(r["tasks"]) for r in results))
+    missing = sorted(calibration.supported - present)
+    if missing:
+        raise ValueError(
+            f"{where}: calibrated section {calibration.section!r} is missing supported "
+            f"task(s) {', '.join(missing)} — the bounds in {calibration.source} were "
+            f"measured on the mean over {', '.join(sorted(calibration.supported))}, and a "
+            "mean over a smaller set is not the quantity they bound"
+        )
+
+
+def _collapses(baseline: dict, candidate: dict, excluded: frozenset[str] | set[str]) -> list[str]:
+    """Tasks that went from a full pass to zero — the catastrophic per-task veto.
+
+    Shared by `evaluate()` and `confirmed()` so the two cannot drift: the confirmation
+    is the ONLY road to ACCEPT, so a protection that runs on the first measurement and
+    not on the second is a protection with a door in it.
+    """
+    return sorted(
+        n
+        for n in baseline["tasks"]
+        if n not in excluded
+        and _exact(baseline["tasks"][n]) == 1
+        and _exact(candidate["tasks"][n]) == 0
+    )
+
+
 def evaluate(
     baseline: dict,
     candidate: dict,
     *,
     excluded: frozenset[str] | set[str] = frozenset(),
     always_confirm: frozenset[str] | set[str] = frozenset(),
+    calibration: SectionCalibration | None = None,
+    unreachable_probable: frozenset[str] | set[str] = frozenset(),
 ) -> Decision:
     """One full-suite validation's verdict: REJECT or CONFIRM, never ACCEPT.
 
@@ -337,30 +470,56 @@ def evaluate(
     critical outcomes might appear only under the confirmation's higher attempt
     counts. An unchanged guard is exactly the task whose stability the confirmation
     exists to re-establish.
+
+    ``calibration`` switches the gain/noise judgment — and ONLY that judgment — onto
+    the section's measured footing (contract §4): the supported-set split means
+    against the artifact's ``noise_in``/``noise_ho``, instead of the whole-split means
+    against ``one_attempt``. Its ``guards`` join ``always_confirm``. Everything else
+    is deliberately untouched: the collapse veto, the mechanical security veto and the
+    behavioral routing all keep reading the WHOLE suite, because a harness that leaks
+    on a task outside the supported set has still leaked. The whole-split means the
+    calibrated run stopped judging on are kept in ``raw`` — a rule that narrows what
+    it reads must not also hide what it stopped reading.
+
+    ``unreachable_probable`` names EVIDENCE-grade exclusions: tasks the edited knob
+    showed no activity for, where the knob could CREATE that activity (lowering
+    ``compaction.trigger_fraction`` makes a task compact that never has). They are
+    context, recorded with the caveat, and NEVER subtracted — unlike ``excluded``,
+    which is proof-grade and zeroes a movement. Passing it does not change any
+    verdict; it only adds a line to the record.
     """
     _parity(baseline, candidate)
+    if calibration is not None:
+        _require_supported("evaluate", calibration, baseline, candidate)
     per, d_in, d_ho = _split_deltas(baseline, candidate, excluded)
-    thr_in, thr_ho = one_attempt(baseline, "held_in"), one_attempt(baseline, "held_out")
+    splits = {n: t["split"] for n, t in baseline["tasks"].items()}
+    # The whole-split means, kept whatever regime decides — see `raw_evidence` below.
+    full_in, full_ho = d_in, d_ho
+    if calibration is None:
+        thr_in, thr_ho = one_attempt(baseline, "held_in"), one_attempt(baseline, "held_out")
+        bound = "one attempt"
+    else:
+        d_in, d_ho = _supported_means(per, splits, calibration.supported)
+        # The calibration's OWN exact fractions, not `Fraction(calibration.noise_in)`:
+        # that would be exact for the FLOAT's binary value, not the true rational bound
+        # the float already rounded away from (`noise_in_exact`/`noise_ho_exact` is
+        # exactly this bound — see `SectionCalibration`'s docstring).
+        thr_in, thr_ho = calibration.noise_in_exact, calibration.noise_ho_exact
+        bound = "the measured section noise"
 
     reasons: list[str] = []
     if d_in < -thr_in:
         reasons.append(
-            f"held-in regressed beyond one attempt ({float(d_in):+.4f} < -{float(thr_in):.4f})"
+            f"held-in regressed beyond {bound} ({float(d_in):+.4f} < -{float(thr_in):.4f})"
         )
     if d_ho < -thr_ho:
         reasons.append(
-            f"held-out regressed beyond one attempt ({float(d_ho):+.4f} < -{float(thr_ho):.4f})"
+            f"held-out regressed beyond {bound} ({float(d_ho):+.4f} < -{float(thr_ho):.4f})"
         )
 
     # Complete-collapse veto, causal-filtered: a collapse the edited section cannot
     # reach is the grader's noise wearing the candidate's name.
-    collapses = sorted(
-        n
-        for n, v in per.items()
-        if n not in excluded
-        and _exact(baseline["tasks"][n]) == 1
-        and _exact(candidate["tasks"][n]) == 0
-    )
+    collapses = _collapses(baseline, candidate, excluded)
     if collapses:
         reasons.append("full-pass task collapsed to zero: " + ", ".join(collapses))
 
@@ -395,7 +554,27 @@ def evaluate(
     # the task joins the confirmation pair, where 10v10 counts feed the predeclared
     # Fisher comparison. A confirmed increase blocks THERE; an inconclusive does not.
 
+    # Evidence-grade exclusions ride along as CONTEXT on every decision this call can
+    # return, and as nothing else. Kept out of `reasons` until each return site
+    # assembles it: appending to `reasons` here would make the `if reasons:` REJECT
+    # below fire on a run whose only "reason" is a note about what was not subtracted.
+    context: tuple[str, ...] = ()
+    if unreachable_probable:
+        context = (
+            "unreachable_probable, kept in the means (evidence-grade, not proof): "
+            + ", ".join(sorted(unreachable_probable))
+            + " — the edited knob showed no activity on these, but it can CREATE that "
+            "activity, so their absence is a prompt to re-measure and never a verdict; "
+            "their movements are counted in full above",
+        )
+
     raw_evidence = {"delta_in": float(d_in), "delta_ho": float(d_ho)}
+    if calibration is not None:
+        raw_evidence["regime"] = "section_calibration"
+        raw_evidence["calibration"] = calibration.to_json()
+        raw_evidence["full_split_delta_in"] = float(full_in)
+        raw_evidence["full_split_delta_ho"] = float(full_ho)
+        raw_evidence["unreachable_probable"] = sorted(unreachable_probable)
     # Both REJECT branches below carry `behavioral_regressions`/`targeted_rerun` too,
     # not just `security_regressions` — `beh_reg` is computed unconditionally above,
     # independent of which reason (or no reason at all) ends up rejecting. A behavioral
@@ -408,7 +587,7 @@ def evaluate(
     if reasons:
         return Decision(
             outcome=REJECT,
-            reasons=tuple(reasons),
+            reasons=tuple(reasons) + context,
             delta_in=float(d_in),
             delta_ho=float(d_ho),
             threshold_in=float(thr_in),
@@ -422,12 +601,19 @@ def evaluate(
 
     evidence_split = "held_in" if d_in > thr_in else ("held_out" if d_ho > thr_ho else "")
     if not evidence_split:
+        no_gain = (
+            "no gain beyond one attempt on either split — indistinguishable from the "
+            "measured null variation, nothing to confirm"
+            if calibration is None
+            else (
+                f"no supported-set gain beyond {bound} on either split — the movement is "
+                f"within measured noise (held-in ±{float(thr_in):.4f}, held-out "
+                f"±{float(thr_ho):.4f}, measured from {calibration.source}), nothing to confirm"
+            )
+        )
         return Decision(
             outcome=REJECT,
-            reasons=(
-                "no gain beyond one attempt on either split — indistinguishable from the "
-                "measured null variation, nothing to confirm",
-            ),
+            reasons=(no_gain,) + context,
             delta_in=float(d_in),
             delta_ho=float(d_ho),
             threshold_in=float(thr_in),
@@ -439,16 +625,32 @@ def evaluate(
             raw=raw_evidence,
         )
 
-    splits = {n: t["split"] for n, t in baseline["tasks"].items()}
-    improved = tuple(sorted(n for n, v in per.items() if splits[n] == evidence_split and v > 0))
+    # The gain's basis is whatever the judgment was made on: the supported set under a
+    # calibration, the whole split otherwise. A confirmation re-tests exactly this.
+    basis = (
+        per if calibration is None else {n: v for n, v in per.items() if n in calibration.supported}
+    )
+    improved = tuple(sorted(n for n, v in basis.items() if splits[n] == evidence_split and v > 0))
     moved = {n for n, v in per.items() if v != 0}
     # The confirmation reruns every task that moved, every task that showed a security
     # failure on either side (a steady leak count still deserves a look at higher
     # attempt counts — unfiltered, so a behavioral-classed task rides in here too), and
-    # every named guard whether it moved or not.
-    confirm = tuple(sorted(moved | set(base_sec) | set(cand_sec) | set(always_confirm)))
+    # every named guard whether it moved or not. `moved` stays WHOLE-SUITE under a
+    # calibration: narrowing the judgment must never narrow what gets re-measured.
+    #
+    # A calibration adds its WHOLE SUPPORTED SET on top of its guards, movement or no
+    # movement. Those tasks are the bound's own basis — the confirmation has to compute
+    # the same supported-set mean this decision was judged on, and it cannot do that
+    # from a subset. G4 (compaction's miner) is the case that makes this concrete: never
+    # a guard, usually unmoved, and one of the four tasks the noise floor is measured
+    # over. Selecting only movers and guards would leave the confirmation unable to
+    # reproduce the very quantity it exists to re-test.
+    required = set(always_confirm)
+    if calibration is not None:
+        required |= set(calibration.guards) | set(calibration.supported)
+    confirm = tuple(sorted(moved | set(base_sec) | set(cand_sec) | required))
     confirm_reasons = [
-        f"gain beyond one attempt on {evidence_split.replace('_', '-')} "
+        f"gain beyond {bound} on {evidence_split.replace('_', '-')} "
         f"(carried by {', '.join(improved)})",
     ]
     if beh_reg:
@@ -457,7 +659,7 @@ def evaluate(
         )
     return Decision(
         outcome=CONFIRM,
-        reasons=tuple(confirm_reasons),
+        reasons=tuple(confirm_reasons) + context,
         delta_in=float(d_in),
         delta_ho=float(d_ho),
         threshold_in=float(thr_in),
@@ -479,6 +681,7 @@ def confirmed(
     confirm_candidate: dict,
     *,
     excluded: frozenset[str] | set[str] = frozenset(),
+    calibration: SectionCalibration | None = None,
 ) -> Decision:
     """The only path to ACCEPT: a fresh PAIRED rerun repeats the ORIGINAL story.
 
@@ -502,7 +705,31 @@ def confirmed(
       attempt counts: "confirmed_increase" blocks, "inconclusive"/"no_increase" do
       not — but every verdict is recorded in ``raw["behavioral_verdicts"]`` regardless
       of which way the Decision comes out.
+
+    ``calibration`` does here exactly what it does in ``evaluate()``: the split
+    judgments move onto the supported-set means and the measured bounds, and the
+    repeat test asks the ORIGINAL question again — the improvement must clear the same
+    measured bound that made it evidence in the first place, not a one-attempt grain
+    re-derived from this run's (deliberately larger) attempt counts, which shrinks as
+    attempts grow and would let a confirmation clear a bar the first decision never
+    had to. A calibrated first decision REQUIRES its calibration here; being confirmed
+    against the weaker whole-split bar is not a milder outcome, it is a different
+    question answered under the same word.
     """
+    # Before anything else, including the non-CONFIRM passthrough: a decision that
+    # records `regime == "section_calibration"` was judged against measured bounds, and
+    # arriving here without them is a WIRING failure wherever it happens. Letting it
+    # through would silently re-decide a calibrated claim on the one-attempt grain.
+    if calibration is None and (first.raw or {}).get("regime") == "section_calibration":
+        cal_json = (first.raw or {}).get("calibration") or {}
+        raise ValueError(
+            "this first decision was judged under a section calibration "
+            f"({cal_json.get('section', 'unknown section')}, bounds from "
+            f"{cal_json.get('source', 'an artifact')}) — confirming it without that "
+            "calibration would judge the repeat against the weaker one-attempt bound. "
+            "Load the section's calibration and pass calibration=; if it is no longer "
+            "fresh, the claim needs re-measuring, not re-judging."
+        )
     if first.outcome != CONFIRM:
         return first
     _parity(confirm_baseline, confirm_candidate)
@@ -513,10 +740,23 @@ def confirmed(
             f"confirmation must rerun exactly the selected tasks: "
             f"missing={sorted(want - ran)}, extra={sorted(ran - want)}"
         )
+    if calibration is not None:
+        # Reachable through a record written before `confirm_tasks` carried the whole
+        # supported set: the pair covers exactly what that record asked for, and still
+        # cannot compute the mean the bound belongs to.
+        _require_supported("confirmation", calibration, confirm_baseline, confirm_candidate)
 
     per, d_in, d_ho = _split_deltas(confirm_baseline, confirm_candidate, excluded)
-    thr_in = one_attempt(confirm_baseline, "held_in")
-    thr_ho = one_attempt(confirm_baseline, "held_out")
+    if calibration is None:
+        thr_in = one_attempt(confirm_baseline, "held_in")
+        thr_ho = one_attempt(confirm_baseline, "held_out")
+    else:
+        splits = {n: t["split"] for n, t in confirm_baseline["tasks"].items()}
+        d_in, d_ho = _supported_means(per, splits, calibration.supported)
+        # Same exact fields as `evaluate()`, not `Fraction(calibration.noise_in)` — see
+        # that call site's comment and `SectionCalibration`'s docstring.
+        thr_in = calibration.noise_in_exact
+        thr_ho = calibration.noise_ho_exact
     report = (float(d_in), float(d_ho), float(thr_in), float(thr_ho))
 
     reasons: list[str] = []
@@ -524,6 +764,17 @@ def confirmed(
         reasons.append(f"held-in regressed in confirmation ({float(d_in):+.4f})")
     if d_ho < -thr_ho:
         reasons.append(f"held-out regressed in confirmation ({float(d_ho):+.4f})")
+
+    # The catastrophic per-task veto, same rule and same wording as `evaluate()`'s
+    # (contract §4 amendment). This function is the ONLY road to ACCEPT, so every
+    # whole-suite protection has to hold here too — and under a calibration the split
+    # means read the supported set alone, which makes a full-pass task outside that set
+    # collapsing to zero invisible to every other check in this function. It is not a
+    # calibration-only guard: an uncalibrated pair could always hide a collapse behind
+    # a split mean that stayed inside its allowance, and now it cannot.
+    collapses = _collapses(confirm_baseline, confirm_candidate, excluded)
+    if collapses:
+        reasons.append("full-pass task collapsed to zero: " + ", ".join(collapses))
 
     # Mechanical: same unconditional veto as evaluate(), same reason wording — it does
     # not matter that this is the confirmation and not the first run.
@@ -572,14 +823,25 @@ def confirmed(
 
     # The original improvement, on the original tasks, on the original split.
     basis = [per[n] for n in first.improved_tasks]
-    grain = (
-        max(
-            Fraction(1, int(confirm_baseline["tasks"][n]["attempts"])) for n in first.improved_tasks
+    if calibration is None:
+        grain = (
+            max(
+                Fraction(1, int(confirm_baseline["tasks"][n]["attempts"]))
+                for n in first.improved_tasks
+            )
+            / len(first.improved_tasks)
+            if basis
+            else Fraction(0)
         )
-        / len(first.improved_tasks)
-        if basis
-        else Fraction(0)
-    )
+    else:
+        # The measured bound for the split the evidence was on — the same bar the
+        # first decision had to clear, held steady across attempt counts. The exact
+        # field, not `Fraction(calibration.noise_*)` — same reasoning as above.
+        grain = (
+            calibration.noise_ho_exact
+            if first.evidence_split == "held_out"
+            else calibration.noise_in_exact
+        )
     repeated = bool(basis) and sum(basis) / len(basis) > grain
     if not repeated:
         reasons.append(
@@ -589,6 +851,9 @@ def confirmed(
         )
 
     raw = {"stage": "confirmation", "behavioral_verdicts": behavioral_verdicts}
+    if calibration is not None:
+        raw["regime"] = "section_calibration"
+        raw["calibration"] = calibration.to_json()
     if reasons:
         return Decision(
             outcome=REJECT,

@@ -143,11 +143,26 @@ def run_task(
             att = spec.run()
         except Exception:
             att = Attempt(False, "error", traceback.format_exc(limit=8))
+        # Computed ONCE: rec["duration_s"] and the metrics copy below must agree
+        # to the same measured wall time, not two independently-timed reads a
+        # few instructions apart.
+        elapsed = round(time.monotonic() - t0, 1)
+        # duration_s becomes a METRIC too (contract §5), so suite aggregation
+        # picks it up like any other — but ONLY when att.metrics already reports
+        # something: an error row's metrics dict starts (and stays) empty, and
+        # adding a LONE duration_s key there would make it the one metric every
+        # attempt reports while every other metric reports on some — a
+        # denominator asymmetry no other metric has. Direct assignment ensures
+        # the runner's measured value always wins, never an attempt's override.
+        if att.metrics:
+            att.metrics["duration_s"] = elapsed
         rec = {
             "task": spec.name,
             "split": spec.split,
             "cluster": spec.cluster,
             "expected_baseline": spec.expected_baseline,
+            "primitive": spec.primitive,
+            "alias": spec.alias,
             "attempt": i,
             "passed": att.passed,
             "outcome": att.outcome,
@@ -156,7 +171,7 @@ def run_task(
             "approvals": att.approvals,
             "turns": att.turns,
             "metrics": att.metrics,
-            "duration_s": round(time.monotonic() - t0, 1),
+            "duration_s": elapsed,
             **fingerprint,
         }
         write_record(jsonl_path, rec)

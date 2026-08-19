@@ -150,6 +150,8 @@ def run_suite(
             "split": spec.split,
             "cluster": spec.cluster,
             "expected_baseline": spec.expected_baseline,
+            "primitive": spec.primitive,
+            "alias": spec.alias,
             "attempts": len(tr.records),
             "passes": sum(1 for r in tr.records if r["passed"]),
             "pass_fraction": round(tr.pass_fraction, 4),

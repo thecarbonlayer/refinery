@@ -303,3 +303,559 @@ def test_the_real_gate_refuses_to_recurse_into_pytest():
 
     with pytest.raises(RuntimeError, match="must not run inside pytest"):
         run_harness_gates()
+
+
+# --- section calibration: the loader and the rule's section gate (contract §4) ----
+
+
+def _analysis(
+    tmp_path,
+    *,
+    stamped_sha,
+    name="analysis.json",
+    config_version=None,
+    model=None,
+    supported_extra=frozenset(),
+):
+    """A calibration artifact of contract §3's shape, MEASURED by `loop.calibrate`
+    from four fabricated null arms — nothing here is a hand-written threshold.
+
+    The arms' fingerprint is what freshness is judged against (contract §4, amendment
+    2026-08-19): it defaults to the provenance `FP` carries, so an artifact built with
+    no overrides is fresh for results stamped `FP`. Override any of the three fields to
+    build one measured under a different verifier, config version, or model.
+    """
+    from loop.calibrate import SUPPORTED, calibrate
+
+    results_dir = tmp_path / f"results-{name}"
+    results_dir.mkdir()
+    fp = {
+        "runner_sha": stamped_sha,
+        "config_version": FP["config_version"] if config_version is None else config_version,
+        "model": FP["model"] if model is None else model,
+    }
+    arms = {
+        "null-cmp-a": {"A1": 7, "G4": 8, "G5": 9, "G2": 6},
+        "null-cmp-b": {"A1": 7, "G4": 8, "G5": 9, "G2": 6},
+        "null-cmp-c": {"A1": 8, "G4": 8, "G5": 9, "G2": 7},
+        "null-cmp-d": {"A1": 7, "G4": 8, "G5": 9, "G2": 6},
+    }
+    for label, passes in arms.items():
+        (results_dir / f"{label}.json").write_text(
+            json.dumps(
+                {
+                    "fingerprint": fp,
+                    "filter": sorted(passes),
+                    "tasks": {
+                        n: {
+                            "split": "held_out" if n == "G2" else "held_in",
+                            "attempts": 10,
+                            "passes": p,
+                            "pass_fraction": round(p / 10, 4),
+                        }
+                        for n, p in passes.items()
+                    },
+                }
+            )
+        )
+    path = tmp_path / name
+    path.write_text(
+        json.dumps(calibrate(sorted(arms), results_dir, SUPPORTED | frozenset(supported_extra)))
+    )
+    return path
+
+
+# Supported set (A1/G4/G5 held-in, G2 held-out) plus ballast the bound was never
+# measured on. X1 moves in the candidate and is the evidence-grade exclusion.
+_CMP = {
+    "A1": ("held_in", 10, 8),
+    "G4": ("held_in", 10, 8),
+    "G5": ("held_in", 10, 8),
+    "G2": ("held_out", 20, 10),
+    "X1": ("held_in", 20, 10),
+    "X2": ("held_out", 4, 2),
+}
+
+
+def _cmp_results(moved=None):
+    tasks = dict(_CMP)
+    for name, passes in (moved or {}).items():
+        split, attempts, _ = tasks[name]
+        tasks[name] = (split, attempts, passes)
+    return {
+        "fingerprint": dict(FP),
+        "tasks": {
+            n: {
+                "split": s,
+                "attempts": a,
+                "passes": p,
+                "pass_fraction": round(p / a, 4),
+                "outcomes": ["pass"] * p + ["fail"] * (a - p),
+            }
+            for n, (s, a, p) in tasks.items()
+        },
+    }
+
+
+_COVERAGE = {"unreachable_proven": {}, "unreachable_probable": {"X1": -0.05}}
+
+
+def _cmp_candidate(fields):
+    return Candidate(
+        id="cmp",
+        cluster_id="CL-1",
+        proposer="Fable",
+        proposer_detail="test",
+        fields={f: {"old": 1, "new": 2} for f in fields},
+        rationale="r",
+        expected_effect="e",
+        regression_risk="g",
+    )
+
+
+def test_an_absent_calibration_artifact_leaves_the_section_uncalibrated(tmp_path):
+    from loop.validate import section_calibration
+
+    assert section_calibration("compaction", analysis_path=tmp_path / "nothing.json") is None
+
+
+def test_a_calibration_measured_by_a_different_verifier_is_not_a_calibration(tmp_path):
+    """Stale = uncalibrated. `runner_sha` is the verifier's content identity: a bound
+    measured by a different verifier is not a measurement of this one."""
+    from loop.validate import section_calibration
+
+    stale = _analysis(tmp_path, stamped_sha="0" * 64)
+    assert json.loads(stale.read_text())["computed_at_runner_sha"] == "0" * 64
+    assert section_calibration("compaction", FP, analysis_path=stale) is None
+
+
+def test_a_fresh_calibration_loads_exactly_what_the_artifact_measured(tmp_path):
+    from loop.validate import _SECTION_CONFIRM_GUARDS, section_calibration
+
+    path = _analysis(tmp_path, stamped_sha=FP["runner_sha"])
+    cal = section_calibration("compaction", FP, analysis_path=path)
+    analysis = json.loads(path.read_text())
+    assert cal is not None
+    assert cal.section == "compaction"
+    assert cal.supported == frozenset(analysis["per_task"])
+    assert cal.noise_in == analysis["section_noise"]["held_in"]
+    assert cal.noise_ho == analysis["section_noise"]["held_out"]
+    assert cal.guards == _SECTION_CONFIRM_GUARDS["compaction"] == frozenset({"A1", "G2", "G5"})
+
+
+def test_compaction_enters_the_rule_only_through_a_fresh_calibration(tmp_path, monkeypatch):
+    """The gate the whole phase turns on, in its three states."""
+    import loop.validate as validate_mod
+    from loop.validate import rule_disposition
+
+    base, cand = _cmp_results(), _cmp_results({"G2": 14, "X1": 9})
+    candidate = _cmp_candidate(["compaction"])
+
+    monkeypatch.setitem(validate_mod._SECTION_ANALYSIS, "compaction", tmp_path / "absent.json")
+    missing = rule_disposition(candidate, base, cand, _COVERAGE)
+    assert missing["applied"] is False
+    assert "not calibrated" in missing["why"]
+
+    monkeypatch.setitem(
+        validate_mod._SECTION_ANALYSIS,
+        "compaction",
+        _analysis(tmp_path, stamped_sha="0" * 64, name="stale.json"),
+    )
+    stale = rule_disposition(candidate, base, cand, _COVERAGE)
+    assert stale["applied"] is False
+    assert "not calibrated" in stale["why"] and "stale" in stale["why"].lower()
+
+    monkeypatch.setitem(
+        validate_mod._SECTION_ANALYSIS,
+        "compaction",
+        _analysis(tmp_path, stamped_sha=FP["runner_sha"], name="fresh.json"),
+    )
+    fresh = rule_disposition(candidate, base, cand, _COVERAGE)
+    assert fresh["applied"] is True
+    assert fresh["outcome"] == "CONFIRM"
+    assert fresh["improved_tasks"] == ["G2"]
+    assert fresh["calibration"]["section"] == "compaction"
+    assert set(fresh["calibration"]["guards"]) <= set(fresh["confirm_tasks"])
+    # The evidence-grade exclusion is context, never a subtraction.
+    assert fresh["raw"]["unreachable_probable"] == ["X1"]
+    assert fresh["raw"]["full_split_delta_in"] < 0
+
+
+def test_compaction_prompt_reaches_the_rule_through_the_same_section(tmp_path, monkeypatch):
+    import loop.validate as validate_mod
+    from loop.validate import _FIELD_SECTION, rule_disposition
+
+    assert _FIELD_SECTION["compaction_prompt"] == _FIELD_SECTION["compaction"] == "compaction"
+    monkeypatch.setitem(
+        validate_mod._SECTION_ANALYSIS,
+        "compaction",
+        _analysis(tmp_path, stamped_sha=FP["runner_sha"]),
+    )
+    out = rule_disposition(
+        _cmp_candidate(["compaction_prompt"]), _cmp_results(), _cmp_results({"G2": 14}), _COVERAGE
+    )
+    assert out["applied"] is True and out["calibration"]["section"] == "compaction"
+
+
+def test_an_edit_spanning_two_sections_gets_no_rule_even_when_both_are_calibrated(
+    tmp_path, monkeypatch
+):
+    """Two sections' evidence in one measurement belongs to neither section."""
+    import loop.validate as validate_mod
+    from loop.validate import rule_disposition
+
+    monkeypatch.setitem(
+        validate_mod._SECTION_ANALYSIS,
+        "compaction",
+        _analysis(tmp_path, stamped_sha=FP["runner_sha"]),
+    )
+    out = rule_disposition(
+        _cmp_candidate(["compaction", "tool_output"]),
+        _cmp_results(),
+        _cmp_results({"G2": 14}),
+        _COVERAGE,
+    )
+    assert out["applied"] is False
+    assert "compaction" in out["why"] and "tool_output" in out["why"]
+
+
+def test_tool_output_decides_without_consulting_any_calibration_artifact(tmp_path, monkeypatch):
+    """The cardinal constraint of this change, pinned: the calibrated regime must be
+    unreachable from tool_output. No artifact exists for it, none is consulted, and
+    its Decision carries none of the calibrated regime's fields."""
+    import loop.validate as validate_mod
+    from loop.validate import rule_disposition, section_calibration
+
+    assert section_calibration("tool_output") is None
+    monkeypatch.setitem(validate_mod._SECTION_ANALYSIS, "compaction", tmp_path / "absent.json")
+    out = rule_disposition(
+        _cmp_candidate(["tool_output"]), _cmp_results(), _cmp_results({"G2": 14}), _COVERAGE
+    )
+    assert out["applied"] is True
+    assert "calibration" not in out
+    assert set(out["raw"]) == {"delta_in", "delta_ho"}
+
+
+def test_the_dead_max_item_chars_mapping_is_gone_and_says_why(tmp_path):
+    """carbon locked `max_item_chars` out of the editable surface (config v3), so the
+    field can never appear in a candidate — its `tool_output` mapping was dead code
+    pointing at the one calibrated section. The removal keeps a comment: a mapping
+    deleted with no reason recorded is a mapping someone restores."""
+    from pathlib import Path
+
+    import loop.validate as validate_mod
+    from loop.validate import _FIELD_SECTION
+
+    assert "max_item_chars" not in _FIELD_SECTION
+    assert "max_item_chars" in Path(validate_mod.__file__).read_text(), (
+        "the removal must leave a comment saying why"
+    )
+
+
+def test_module_docstring_names_the_two_actual_decision_paths():
+    """The docstring used to describe the pre-three-outcome world (a single
+    Self-Harness rule). It must now name both paths a candidate can actually take:
+    the calibrated rule for a section in `RULE_SECTIONS`, and the causal verdict
+    everywhere else."""
+    import loop.validate as validate_mod
+
+    doc = validate_mod.__doc__
+    assert "causal verdict" in doc.lower()
+    assert "calibrated" in doc.lower() and "rule" in doc.lower()
+    assert "CONFIRM" in doc and "REJECT" in doc
+
+
+# --- freshness against the measurements' own provenance (§4 amendment) ------------
+
+
+def test_freshness_is_judged_against_the_measurements_not_the_live_process(tmp_path):
+    """Three ways an artifact can fail to be a bound for THESE measurements, and each
+    one names the field that mismatched.
+
+    `runner_sha` alone was the old test, and it is the weakest of the three: a noise
+    floor measured under a different MODEL, or a different carbon config version, is
+    not a floor for this comparison either — those are exactly the two things the null
+    protocol (§2) makes every arm share, so an artifact whose arms disagree with the
+    results being judged is measuring a different world.
+    """
+    from loop.validate import calibration_status
+
+    fresh, why = calibration_status(
+        "compaction", FP, analysis_path=_analysis(tmp_path, stamped_sha=FP["runner_sha"])
+    )
+    assert fresh is not None and why == ""
+
+    for kwargs, field in (
+        ({"stamped_sha": "0" * 64, "name": "sha.json"}, "runner_sha"),
+        ({"stamped_sha": FP["runner_sha"], "name": "cfg.json", "config_version": 99}, "config_"),
+        ({"stamped_sha": FP["runner_sha"], "name": "mdl.json", "model": "other"}, "model"),
+    ):
+        cal, reason = calibration_status(
+            "compaction", FP, analysis_path=_analysis(tmp_path, **kwargs)
+        )
+        assert cal is None, f"{field} mismatch must not be judged fresh"
+        assert field in reason and "not calibrated" in reason
+
+
+def test_an_unreadable_calibration_artifact_scrubs_the_machine_path(tmp_path):
+    """`str(OSError)` embeds the absolute path it failed on (e.g. `[Errno 21] Is a
+    directory: '/private/var/.../analysis.json'`) — a machine path landing in a
+    recorded reason is exactly the leak AGENTS.md calls out, and this reason reaches
+    `rule_disposition()`'s `why` and from there a committed iteration record. A
+    directory in place of the file reproduces an unreadable path portably (no
+    permission-bit dance, no root-bypasses-chmod surprise)."""
+    import os
+
+    from loop.validate import calibration_status
+
+    if os.getuid() == 0:
+        pytest.skip("root bypasses the permission bits this fixture relies on")
+    bogus = tmp_path / "some" / "nested" / "analysis.json"
+    bogus.parent.mkdir(parents=True)
+    bogus.write_text("{}")
+    bogus.chmod(0o000)
+    fp = {"runner_sha": "r1", "config_version": 1, "model": "m"}
+    try:
+        cal, why = calibration_status("compaction", fp, analysis_path=bogus)
+    finally:
+        bogus.chmod(0o644)  # tmp_path cleanup needs to be able to remove it
+
+    assert cal is None
+    assert "unreadable" in why
+    assert "analysis.json" in why
+    assert str(tmp_path) not in why
+    for leak in ("/Users/", "/home/", "/private/var", "/tmp"):
+        assert leak not in why, f"{leak!r} leaked into the recorded reason: {why!r}"
+
+
+def test_no_fingerprint_means_uncalibrated_never_unchecked(tmp_path):
+    """Fail closed. A caller with no measurements in hand cannot be told a bound is
+    fresh — there is nothing for it to be fresh FOR."""
+    from loop.validate import calibration_status
+
+    path = _analysis(tmp_path, stamped_sha=FP["runner_sha"])
+    cal, why = calibration_status("compaction", None, analysis_path=path)
+    assert cal is None and "fingerprint" in why
+
+
+def test_rule_disposition_judges_freshness_against_the_baseline_it_was_handed(
+    tmp_path, monkeypatch
+):
+    import loop.validate as validate_mod
+    from loop.validate import rule_disposition
+
+    monkeypatch.setitem(
+        validate_mod._SECTION_ANALYSIS,
+        "compaction",
+        _analysis(tmp_path, stamped_sha=FP["runner_sha"]),
+    )
+    other = dict(FP, model="a-model-the-arms-never-ran")
+    base = {**_cmp_results(), "fingerprint": other}
+    cand = {**_cmp_results({"G2": 14}), "fingerprint": other}
+    out = rule_disposition(_cmp_candidate(["compaction"]), base, cand, _COVERAGE)
+    assert out["applied"] is False
+    assert "model" in out["why"]
+
+
+def test_a_supported_task_no_arm_measured_is_not_in_the_supported_set(tmp_path):
+    """`loop.calibrate` writes a `per_task` entry for every task it was ASKED about,
+    with an empty `passes_by_arm` when no arm carried it. Reading that as a supported
+    task would put a name in the denominator that nothing was ever measured on — and
+    then refuse every comparison for missing it."""
+    from loop.validate import section_calibration
+
+    path = _analysis(tmp_path, stamped_sha=FP["runner_sha"], supported_extra={"NEVER_RAN"})
+    analysis = json.loads(path.read_text())
+    assert analysis["per_task"]["NEVER_RAN"]["passes_by_arm"] == {}
+
+    cal = section_calibration("compaction", FP, analysis_path=path)
+    assert cal is not None
+    assert "NEVER_RAN" not in cal.supported
+    assert cal.supported == {"A1", "G2", "G4", "G5"}
+
+
+# --- the confirm CLI passes the calibration through (contract §5 amendment) -------
+
+
+def _calibrated_first_record(it_dir, candidate_id, cal):
+    """A validation record whose rule verdict is a CALIBRATED first CONFIRM, exactly
+    as `rule_disposition` writes one — this is what `loop.cli confirm` reads back."""
+    from loop.acceptance import evaluate
+
+    decision = evaluate(
+        _cmp_results(), _cmp_results({"G2": 14}), calibration=cal, always_confirm=cal.guards
+    )
+    assert decision.outcome == "CONFIRM" and decision.raw["regime"] == "section_calibration"
+    (it_dir / f"validation-{candidate_id}.json").write_text(
+        json.dumps({"candidate_id": candidate_id, "rule": {"applied": True, **decision.to_json()}})
+    )
+    return decision
+
+
+def test_confirm_cli_judges_a_calibrated_claim_against_its_measured_bound(
+    tmp_path, monkeypatch, fake_carbon
+):
+    """Contract §5 amendment. Without the wiring the CLI hands `confirmed()` no
+    calibration, which now REFUSES a calibrated first decision — so the same run that
+    would silently have been judged against the weaker one-attempt bar instead fails
+    loudly with nothing written."""
+    import loop.cli as cli_mod
+    import loop.validate as validate_mod
+    from loop.cli import run_confirmation
+
+    artifact = _analysis(tmp_path, stamped_sha=FP["runner_sha"])
+    cal = validate_mod.section_calibration("compaction", FP, analysis_path=artifact)
+    it_dir = tmp_path / "iter-cmp"
+    it_dir.mkdir()
+    candidate = _cmp_candidate(["compaction"])
+    _calibrated_first_record(it_dir, candidate.id, cal)
+
+    monkeypatch.setattr(cli_mod, "apply_candidate", lambda *a, **k: {"version": 9})
+    monkeypatch.setattr(cli_mod, "require_clean_tree", lambda *a, **k: None)
+    monkeypatch.setattr(cli_mod, "revert_config", lambda *a, **k: None)
+
+    def arms(gain: int):
+        def run(label, only, attempts):
+            passes = {"A1": 40, "G4": 40, "G5": 40, "G2": 25 if label == "b" else gain}
+            return {
+                "fingerprint": dict(FP),
+                "tasks": {
+                    n: {
+                        "split": "held_out" if n == "G2" else "held_in",
+                        "attempts": 50,
+                        "passes": passes[n],
+                        "pass_fraction": round(passes[n] / 50, 4),
+                        "outcomes": ["pass"] * passes[n] + ["fail"] * (50 - passes[n]),
+                    }
+                    for n in only
+                },
+            }
+
+        return run
+
+    # Unwired (no artifact reachable): the calibrated claim cannot be judged at all.
+    monkeypatch.setitem(validate_mod._SECTION_ANALYSIS, "compaction", tmp_path / "absent.json")
+    with pytest.raises(SystemExit, match="confirmation could not be measured"):
+        run_confirmation(
+            candidate,
+            it_dir,
+            "b",
+            "c",
+            50,
+            carbon_root=fake_carbon,
+            run_runner=arms(34),
+            log=lambda *_: None,
+        )
+    # `run_confirmation` itself never writes a file on ANY path, success or refusal
+    # alike — only `main()`'s `confirm` branch does, after a successful return. A
+    # glob check here would be true unconditionally and pin nothing; the property
+    # that matters (main()'s writer only fires when run_confirmation actually
+    # returns) is exercised directly in
+    # `test_main_confirm_writes_the_record_only_when_run_confirmation_succeeds`.
+
+    # Wired: the repeat is judged against the MEASURED bound, not a one-attempt grain.
+    monkeypatch.setitem(validate_mod._SECTION_ANALYSIS, "compaction", artifact)
+    weak = run_confirmation(
+        candidate,
+        it_dir,
+        "b",
+        "c",
+        50,
+        carbon_root=fake_carbon,
+        run_runner=arms(28),
+        log=lambda *_: None,
+    )
+    assert 0 < 28 / 50 - 25 / 50 < cal.noise_ho
+    assert weak.confirmation["outcome"] == "REJECT", "0.06 is inside the measured noise"
+
+    strong = run_confirmation(
+        candidate,
+        it_dir,
+        "b",
+        "c",
+        50,
+        carbon_root=fake_carbon,
+        run_runner=arms(34),
+        log=lambda *_: None,
+    )
+    assert strong.confirmation["outcome"] == "ACCEPT"
+    assert strong.confirmation["raw"]["regime"] == "section_calibration"
+
+
+def test_main_confirm_writes_the_record_only_when_run_confirmation_succeeds(tmp_path, monkeypatch):
+    """The actual no-artifact-on-refusal property, exercised for real this time.
+
+    `run_confirmation` never writes anything itself (see the comment two tests up) —
+    the ONE write site is `main()`'s `confirm` branch, which calls
+    `write_confirmation_record` only after `run_confirmation` returns. Driving
+    `main()` with `run_confirmation` faked (the module-level name `main()` calls by,
+    looked up at call time — unlike a default-argument seam, monkeypatching it here
+    genuinely takes effect) pins the wiring itself: a `SystemExit` from
+    `run_confirmation` must leave the write call unreached, and a normal return must
+    reach it.
+    """
+    import sys
+
+    import loop.cli as cli_mod
+    from loop.artifacts import ConfirmationRecord
+
+    it_dir = tmp_path / "iter-01"
+    it_dir.mkdir()
+    (it_dir / "candidates.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": "cand-x",
+                    "cluster_id": "CL-1",
+                    "proposer": "Fable",
+                    "proposer_detail": "test",
+                    "fields": {"max_tokens": {"old": 1, "new": 2}},
+                    "rationale": "r",
+                    "expected_effect": "e",
+                    "regression_risk": "g",
+                }
+            ]
+        )
+    )
+    monkeypatch.setattr(cli_mod, "ITERATIONS_DIR", tmp_path)
+    argv = [
+        "loop",
+        "confirm",
+        "--iteration",
+        "iter-01",
+        "--candidate",
+        "cand-x",
+        "--baseline-label",
+        "b",
+        "--candidate-label",
+        "c",
+        "--attempts",
+        "10",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    def refuse(*a, **k):
+        raise SystemExit("confirmation could not be measured: boom")
+
+    monkeypatch.setattr(cli_mod, "run_confirmation", refuse)
+    with pytest.raises(SystemExit):
+        cli_mod.main()
+    assert list(it_dir.glob("confirmation-*.json")) == []
+
+    def succeed(*a, **k):
+        return ConfirmationRecord(
+            candidate_id="cand-x",
+            baseline_label="b",
+            candidate_label="c",
+            attempts_per_task_per_arm=10,
+            confirm_set=("E4",),
+            first_decision={},
+            confirmation={"outcome": "ACCEPT"},
+            per_task={},
+            finding="f",
+        )
+
+    monkeypatch.setattr(cli_mod, "run_confirmation", succeed)
+    cli_mod.main()
+    written = list(it_dir.glob("confirmation-*.json"))
+    assert len(written) == 1

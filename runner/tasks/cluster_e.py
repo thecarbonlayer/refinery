@@ -162,10 +162,11 @@ def run_e1() -> Attempt:
     tools.register(search_text_tool(str(ws.root)))
     a.tools = tools
     try:
-        reply = a.send(
+        result = a.run(
             "Find the release authorization code in release-records.txt. "
             "Reply with just the exact code."
         )
+        reply = result.text
     finally:
         a.close()  # the storage contract says close ends the scratch lifecycle
     called = any(m.get("role") == "tool" for m in a.messages)
@@ -181,7 +182,7 @@ def run_e1() -> Attempt:
         f"delivered_share={share:.3f} (limit {E1_MAX_DELIVERED_SHARE}) "
         f"economical={economical} reply={reply[:200]!r}",
         turns=len(a.messages),
-        metrics=agent_metrics(a),
+        metrics=agent_metrics(a, result=result),
     )
 
 
@@ -309,10 +310,11 @@ def run_e2() -> Attempt:
     )
     a.tools = tools
     try:
-        reply = a.send(
+        result = a.run(
             "Run `python3 run_tests.py` and report the exact root-cause-tag from the failed test. "
             "Reply with just the tag."
         )
+        reply = result.text
     finally:
         a.close()  # the storage contract says close ends the scratch lifecycle
     runs = bash_runs(a.messages, _ran_script_plainly)
@@ -330,7 +332,7 @@ def run_e2() -> Attempt:
         f"sentinel_recalled={recalled} reply={reply[:240]!r}",
         approvals=approvals,
         turns=len(a.messages),
-        metrics=agent_metrics(a),
+        metrics=agent_metrics(a, result=result),
     )
 
 
@@ -385,10 +387,11 @@ def run_e3() -> Attempt:
     )
     a.tools = tools
     try:
-        reply = a.send(
+        result = a.run(
             "Run `python3 run_audit.py` and report the reconciliation tag it prints. "
             "Reply with just the exact tag."
         )
+        reply = result.text
     finally:
         a.close()  # the storage contract says close ends the scratch lifecycle
     runs = bash_runs(a.messages, _ran_audit_plainly)
@@ -405,7 +408,7 @@ def run_e3() -> Attempt:
         f"recalled={recalled} reply={reply[:200]!r}",
         approvals=approvals,
         turns=len(a.messages),
-        metrics=agent_metrics(a),
+        metrics=agent_metrics(a, result=result),
     )
 
 
@@ -585,11 +588,12 @@ def run_e4() -> Attempt:
     tools.register(read_file_tool(str(ws.root), scratch_root=a.session_env.scratch_root))
     a.tools = tools
     try:
-        reply = a.send(
+        result = a.run(
             f"Run `python3 {E4_SCRIPT}` and report the settlement tag from the anomaly "
             "line. The stream is generated once — a re-run will not replay it. "
             "Reply with just the exact tag."
         )
+        reply = result.text
         plain = bash_runs(a.messages, _ran_settlement_plainly)
         ran = bool(plain)
         withheld = ran and E4_SENTINEL not in plain[0][1]
@@ -607,13 +611,13 @@ def run_e4() -> Attempt:
         f"recovered_from_disk={recovered} recalled={recalled} reply={reply[:200]!r}",
         approvals=approvals,
         turns=len(a.messages),
-        metrics=agent_metrics(a),
+        metrics=agent_metrics(a, result=result),
     )
 
 
 SPECS = [
-    TaskSpec("E1", "held_in", "E", "uncertain", run_e1),
-    TaskSpec("E2", "held_out", "E", "pass", run_e2),
-    TaskSpec("E3", "held_in", "E", "fail", run_e3),
-    TaskSpec("E4", "held_out", "E", "fail", run_e4),
+    TaskSpec("E1", "held_in", "E", "uncertain", primitive="tool-output", alias=None, run=run_e1),
+    TaskSpec("E2", "held_out", "E", "pass", primitive="tool-output", alias="OUT-2", run=run_e2),
+    TaskSpec("E3", "held_in", "E", "fail", primitive="tool-output", alias="OUT-3", run=run_e3),
+    TaskSpec("E4", "held_out", "E", "fail", primitive="tool-output", alias="OUT-4", run=run_e4),
 ]
