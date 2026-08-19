@@ -12,12 +12,20 @@ raise.
 from __future__ import annotations
 
 import json
+import time
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
 
 from loop.acceptance import CONFIRM, REJECT
-from loop.calibrate import calibrate
+from loop.calibrate import (
+    COVERAGE_LEVEL,
+    calibrate,
+    calibrate_model,
+    null_gain_quantile,
+    null_task_quantile,
+)
 
 
 def _arm(
@@ -359,3 +367,428 @@ def test_main_requires_at_least_one_label(monkeypatch):
 
     with pytest.raises(SystemExit):
         calibrate_mod.main([])
+
+
+# ---------------------------------------------------------------------------
+# Round 2 (contracts/phase2b-calibration-contract.md): `calibrate_model()`,
+# the null-MODEL artifact, and the exact-enumeration primitives it is built
+# on. `_arm`/`_write` above are reused unchanged -- they already support a
+# custom `fingerprint` dict (round-2's provenance needs `gemma_sha`, the
+# runner's own field, mapped to `carbon_sha`) and the `filtered` marker
+# (round-2's `_check_supported_set` reads exactly this "filter" key to tell a
+# `--only` subset arm apart from a full-suite one).
+# ---------------------------------------------------------------------------
+
+_MODEL_SUPPORTED = frozenset({"A1", "G2", "G4", "G5"})
+
+
+def test_null_rate_is_pooled_exact_unreduced_fraction_string(tmp_path):
+    """Pooled over ALL arms (contract §1) as a LITERAL "passes/attempts"
+    string -- the denominator is the pooled attempt count itself (contract
+    §3's ">= 49 held-in, >= 55 for G2"), never reduced the way
+    `section_noise_exact` reduces a bound, or that count would be hidden."""
+    supported = frozenset({"A1"})
+    arm_full = _arm("full-a", {"A1": (6, 10, "held_in")})
+    arm_a = _arm("cmp-a", {"A1": (5, 10, "held_in")}, filtered=True)
+    arm_b = _arm("cmp-b", {"A1": (5, 10, "held_in")}, filtered=True)
+    arm_c = _arm("cmp-c", {"A1": (5, 10, "held_in")}, filtered=True)
+    for label, r in (("full-a", arm_full), ("cmp-a", arm_a), ("cmp-b", arm_b), ("cmp-c", arm_c)):
+        _write(tmp_path, label, r)
+
+    result = calibrate_model(["full-a", "cmp-a", "cmp-b", "cmp-c"], tmp_path, supported)
+
+    assert result["null_model"]["A1"]["null_rate"] == "21/40"
+    assert result["null_model"]["A1"]["per_arm"] == {
+        "full-a": [6, 10],
+        "cmp-a": [5, 10],
+        "cmp-b": [5, 10],
+        "cmp-c": [5, 10],
+    }
+    assert result["coverage_level"] == "0.975"
+
+
+def test_provenance_refusal_on_carbon_sha_mismatch(tmp_path):
+    """`carbon_sha` (contract §1) is sourced from the fingerprint's
+    `gemma_sha` -- carbon is the section under test, not the verifier, and
+    two arms measuring DIFFERENT carbon revisions are not a null pair."""
+    fp1 = {
+        "runner_sha": "rsha1",
+        "config_version": 7,
+        "model": "carbon-model",
+        "gemma_sha": "aaaa",
+        "dirty_sha": None,
+    }
+    fp2 = {**fp1, "gemma_sha": "bbbb"}
+    arm0 = _arm("full-a", {"A1": (2, 3, "held_in")}, fingerprint=fp1)
+    arm1 = _arm("cmp-a", {"A1": (5, 10, "held_in")}, fingerprint=fp2, filtered=True)
+    _write(tmp_path, "full-a", arm0)
+    _write(tmp_path, "cmp-a", arm1)
+    with pytest.raises(ValueError, match="carbon_sha"):
+        calibrate_model(["full-a", "cmp-a"], tmp_path, frozenset({"A1"}))
+
+
+def test_provenance_refusal_reuses_the_fingerprint_field_check(tmp_path):
+    """The round-1 4 fields still refuse under `calibrate_model` -- it EXTENDS
+    `_check_fingerprints`'s check, it does not reimplement a narrower one."""
+    fp1 = {
+        "runner_sha": "rsha1",
+        "config_version": 7,
+        "model": "carbon-model",
+        "gemma_sha": "aaaa",
+        "dirty_sha": None,
+    }
+    fp2 = {**fp1, "runner_sha": "rsha2"}
+    arm0 = _arm("full-a", {"A1": (2, 3, "held_in")}, fingerprint=fp1)
+    arm1 = _arm("cmp-a", {"A1": (5, 10, "held_in")}, fingerprint=fp2, filtered=True)
+    _write(tmp_path, "full-a", arm0)
+    _write(tmp_path, "cmp-a", arm1)
+    with pytest.raises(ValueError, match="runner_sha"):
+        calibrate_model(["full-a", "cmp-a"], tmp_path, frozenset({"A1"}))
+
+
+def test_duplicate_label_refused_naming_the_label_for_calibrate_model(tmp_path):
+    """`_check_labels` is shared with `calibrate()` -- the refusal, and its
+    wording, must not diverge between the two entry points."""
+    arm0 = _arm("full-a", {"A1": (2, 3, "held_in")})
+    _write(tmp_path, "full-a", arm0)
+    with pytest.raises(ValueError, match="full-a"):
+        calibrate_model(["full-a", "full-a"], tmp_path, frozenset({"A1"}))
+
+
+def test_fifth_task_in_a_subset_run_is_refused(tmp_path):
+    """Contract §1's pin: {A1, G2, G4, G5} exactly. A `--only` subset arm
+    (``filter`` present) carrying a task outside that set breaks the
+    protocol's promise that only the supported set was measured there."""
+    full = _arm(
+        "full-a",
+        {
+            "A1": (2, 3, "held_in"),
+            "G2": (3, 5, "held_out"),
+            "G4": (1, 3, "held_in"),
+            "G5": (2, 3, "held_in"),
+        },
+    )
+    bad_subset = _arm(
+        "cmp-bad",
+        {
+            "A1": (5, 10, "held_in"),
+            "G2": (5, 10, "held_out"),
+            "G4": (2, 10, "held_in"),
+            "G5": (6, 10, "held_in"),
+            "EXTRA": (3, 10, "held_in"),
+        },
+        filtered=True,
+    )
+    _write(tmp_path, "full-a", full)
+    _write(tmp_path, "cmp-bad", bad_subset)
+    with pytest.raises(ValueError, match="EXTRA"):
+        calibrate_model(["full-a", "cmp-bad"], tmp_path, _MODEL_SUPPORTED)
+
+
+def test_arm_missing_a_supported_task_is_refused(tmp_path):
+    """Every arm must cover every supported task -- the pool needs a full
+    denominator on each, never a partial one standing in for the whole."""
+    incomplete = _arm(
+        "full-a",
+        {"A1": (2, 3, "held_in"), "G2": (3, 5, "held_out"), "G4": (1, 3, "held_in")},
+    )  # missing G5
+    _write(tmp_path, "full-a", incomplete)
+    with pytest.raises(ValueError, match="G5"):
+        calibrate_model(["full-a"], tmp_path, _MODEL_SUPPORTED)
+
+
+def test_fitness_grain_fails_for_a_fabricated_tight_model(tmp_path):
+    """A degenerate (always-0) pooled rate collapses the null distribution of
+    (mean_b - mean_a) to a point mass at 0 -- its 97.5% quantile is 0, which
+    can never exceed a positive grain (contract §4.1). This is the round-1
+    failure mode made structural: a threshold that gates nothing."""
+    arm_a = _arm("full-a", {"A1": (0, 3, "held_in")})
+    arm_b = _arm("full-b", {"A1": (0, 3, "held_in")})
+    _write(tmp_path, "full-a", arm_a)
+    _write(tmp_path, "full-b", arm_b)
+
+    result = calibrate_model(["full-a", "full-b"], tmp_path, frozenset({"A1"}))
+
+    grain = result["fitness"]["grain"]
+    assert grain["held_in"]["quantile"] == "0/1"
+    assert grain["held_in"]["grain"] == "1/3"
+    assert grain["held_in"]["pass"] is False
+    assert grain["pass"] is False
+    assert result["fitness"]["fit"] is False
+
+
+def test_fitness_goodness_fails_for_an_outlier_arm(tmp_path):
+    """One arm at 0/10 pooled against three arms at 9/10 disagrees with the
+    single-rate null model badly enough (contract §4.2) that its exact
+    two-sided binomial tail sits far below 0.01 -- the other arms' own tails
+    stay well clear, so only the outlier is flagged, per task+arm."""
+    full = _arm("full-a", {"A1": (9, 10, "held_in")})
+    good_a = _arm("cmp-a", {"A1": (9, 10, "held_in")}, filtered=True)
+    good_b = _arm("cmp-b", {"A1": (9, 10, "held_in")}, filtered=True)
+    outlier = _arm("cmp-c", {"A1": (0, 10, "held_in")}, filtered=True)
+    for label, r in (
+        ("full-a", full),
+        ("cmp-a", good_a),
+        ("cmp-b", good_b),
+        ("cmp-c", outlier),
+    ):
+        _write(tmp_path, label, r)
+
+    result = calibrate_model(["full-a", "cmp-a", "cmp-b", "cmp-c"], tmp_path, frozenset({"A1"}))
+
+    goodness = result["fitness"]["goodness"]
+    per_arm = goodness["per_task"]["A1"]["per_arm"]
+    assert per_arm["cmp-c"]["pass"] is False
+    assert Fraction(*(int(x) for x in per_arm["cmp-c"]["tail_p"].split("/"))) < Fraction(1, 100)
+    assert per_arm["full-a"]["pass"] is True
+    assert per_arm["cmp-a"]["pass"] is True
+    assert per_arm["cmp-b"]["pass"] is True
+    assert goodness["pass"] is False
+    # grain still passes here (a real spread, not a degenerate point mass) --
+    # `fit` is false specifically because of goodness, not because grain also
+    # failed, proving the two checks are independently recorded.
+    assert result["fitness"]["grain"]["pass"] is True
+    assert result["fitness"]["fit"] is False
+
+
+def test_fit_false_does_not_raise_and_is_recorded_not_enforced(tmp_path):
+    """`calibrate_model` computes and records `fit`; it never refuses to
+    RETURN an unfit artifact -- installing/loading it is the loader's job
+    (contract §4: "the artifact is written with fit: false"), not this
+    function's."""
+    arm_a = _arm("full-a", {"A1": (0, 3, "held_in")})
+    arm_b = _arm("full-b", {"A1": (0, 3, "held_in")})
+    _write(tmp_path, "full-a", arm_a)
+    _write(tmp_path, "full-b", arm_b)
+
+    result = calibrate_model(["full-a", "full-b"], tmp_path, frozenset({"A1"}))  # must not raise
+
+    assert result["fitness"]["fit"] is False
+    assert "null_model" in result and "provenance" in result
+
+
+def test_realistic_seven_arm_protocol_is_fit(tmp_path):
+    """The full contract §3 shape -- 3 full-suite arms (3/5 attempts) + 4
+    `--only` subset arms (10 attempts) -- pools to exactly the counts §3
+    promises (49 held-in, 55 for G2) and, with a real (non-degenerate)
+    spread, clears every fitness check."""
+    full_a = _arm(
+        "r2-null-full-a",
+        {
+            "A1": (2, 3, "held_in"),
+            "G2": (3, 5, "held_out"),
+            "G4": (1, 3, "held_in"),
+            "G5": (2, 3, "held_in"),
+        },
+    )
+    full_b = _arm(
+        "r2-null-full-b",
+        {
+            "A1": (2, 3, "held_in"),
+            "G2": (2, 5, "held_out"),
+            "G4": (1, 3, "held_in"),
+            "G5": (2, 3, "held_in"),
+        },
+    )
+    full_c = _arm(
+        "r2-null-full-c",
+        {
+            "A1": (1, 3, "held_in"),
+            "G2": (3, 5, "held_out"),
+            "G4": (0, 3, "held_in"),
+            "G5": (3, 3, "held_in"),
+        },
+    )
+    cmp_a = _arm(
+        "r2-null-cmp-a",
+        {
+            "A1": (5, 10, "held_in"),
+            "G2": (5, 10, "held_out"),
+            "G4": (2, 10, "held_in"),
+            "G5": (6, 10, "held_in"),
+        },
+        filtered=True,
+    )
+    cmp_b = _arm(
+        "r2-null-cmp-b",
+        {
+            "A1": (6, 10, "held_in"),
+            "G2": (6, 10, "held_out"),
+            "G4": (1, 10, "held_in"),
+            "G5": (7, 10, "held_in"),
+        },
+        filtered=True,
+    )
+    cmp_c = _arm(
+        "r2-null-cmp-c",
+        {
+            "A1": (5, 10, "held_in"),
+            "G2": (4, 10, "held_out"),
+            "G4": (2, 10, "held_in"),
+            "G5": (6, 10, "held_in"),
+        },
+        filtered=True,
+    )
+    cmp_d = _arm(
+        "r2-null-cmp-d",
+        {
+            "A1": (6, 10, "held_in"),
+            "G2": (7, 10, "held_out"),
+            "G4": (1, 10, "held_in"),
+            "G5": (5, 10, "held_in"),
+        },
+        filtered=True,
+    )
+    arms = {
+        "r2-null-full-a": full_a,
+        "r2-null-full-b": full_b,
+        "r2-null-full-c": full_c,
+        "r2-null-cmp-a": cmp_a,
+        "r2-null-cmp-b": cmp_b,
+        "r2-null-cmp-c": cmp_c,
+        "r2-null-cmp-d": cmp_d,
+    }
+    for label, r in arms.items():
+        _write(tmp_path, label, r)
+
+    labels = list(arms)
+    result = calibrate_model(labels, tmp_path, _MODEL_SUPPORTED)
+
+    assert result["null_model"]["A1"]["null_rate"] == "27/49"
+    assert result["null_model"]["G2"]["null_rate"] == "30/55"
+    assert result["null_model"]["G4"]["null_rate"] == "8/49"
+    assert result["null_model"]["G5"]["null_rate"] == "31/49"
+    assert len(result["provenance"]) == 7
+    assert result["fitness"]["fit"] is True
+    assert result["fitness"]["power"]["per_task"].keys() == _MODEL_SUPPORTED
+    assert result["computed_at_runner_sha"] == "rsha1"
+
+
+def test_main_model_flag_writes_model_json(tmp_path, monkeypatch):
+    import loop.calibrate as calibrate_mod
+
+    supported = frozenset({"A1"})
+    arm_full = _arm("full-a", {"A1": (6, 10, "held_in")})
+    arm_a = _arm("cmp-a", {"A1": (5, 10, "held_in")}, filtered=True)
+    _write(tmp_path, "full-a", arm_full)
+    _write(tmp_path, "cmp-a", arm_a)
+
+    out_path = tmp_path / "out" / "model-r2.json"
+    monkeypatch.setattr(calibrate_mod, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(calibrate_mod, "SUPPORTED", supported)
+    monkeypatch.setattr(calibrate_mod, "MODEL_PATH", out_path)
+
+    calibrate_mod.main(["--model", "full-a", "cmp-a"])
+
+    written = json.loads(out_path.read_text())
+    assert written["null_model"]["A1"]["null_rate"] == "11/20"
+    assert written["coverage_level"] == "0.975"
+
+
+def test_main_model_flag_requires_at_least_one_label():
+    import loop.calibrate as calibrate_mod
+
+    with pytest.raises(SystemExit):
+        calibrate_mod.main(["--model"])
+
+
+def test_main_without_model_flag_still_writes_round_one_analysis(tmp_path, monkeypatch):
+    """`main()`'s existing (no-flag) behavior stays byte-identical -- adding
+    `--model` must not change what `python -m loop.calibrate <labels>` does."""
+    import loop.calibrate as calibrate_mod
+
+    supported = frozenset({"A1"})
+    arm_a = _arm("null-cmp-a", {"A1": (8, 10, "held_in")})
+    arm_b = _arm("null-cmp-b", {"A1": (6, 10, "held_in")})
+    _write(tmp_path, "null-cmp-a", arm_a)
+    _write(tmp_path, "null-cmp-b", arm_b)
+
+    out_path = tmp_path / "out" / "analysis.json"
+    monkeypatch.setattr(calibrate_mod, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(calibrate_mod, "SUPPORTED", supported)
+    monkeypatch.setattr(calibrate_mod, "ANALYSIS_PATH", out_path)
+
+    calibrate_mod.main(["null-cmp-a", "null-cmp-b"])
+
+    written = json.loads(out_path.read_text())
+    assert written["per_task"]["A1"]["max_abs_delta"] == pytest.approx(0.2)
+
+
+# ---------------------------------------------------------------------------
+# `null_gain_quantile` / `null_task_quantile` -- the exact-enumeration
+# primitives, exported for `loop.acceptance` (Task 3) to import directly.
+# ---------------------------------------------------------------------------
+
+
+def test_null_gain_quantile_worked_example():
+    """A hand-checkable case: three held-in-shaped tasks, 3v3 attempts each,
+    at rates {A1: 1/2, G4: 1/10, G5: 13/20} -- pinned in the task report."""
+    rates = {"A1": Fraction(1, 2), "G4": Fraction(1, 10), "G5": Fraction(13, 20)}
+    attempts = {"A1": 3, "G4": 3, "G5": 3}
+
+    q = null_gain_quantile(rates, attempts, attempts, COVERAGE_LEVEL)
+
+    assert q == Fraction(4, 9)
+
+
+def test_null_gain_quantile_stays_within_plus_minus_one():
+    """D = mean_b - mean_a is a difference of two means in [0, 1] -- it can
+    never leave [-1, 1], whatever the rates or attempt counts. (Catches the
+    exact bug this module shipped with once: dividing a pooled RAW pass-count
+    difference by task count instead of averaging each task's own fraction
+    first, which let a 3-task quantile land outside [-1, 1].)"""
+    rates = {"A1": Fraction(1, 2), "G4": Fraction(1, 10), "G5": Fraction(13, 20)}
+    attempts = {"A1": 3, "G4": 3, "G5": 3}
+
+    q = null_gain_quantile(rates, attempts, attempts, COVERAGE_LEVEL)
+
+    assert Fraction(-1) <= q <= Fraction(1)
+
+
+def test_null_gain_quantile_requires_matching_task_keys():
+    with pytest.raises(ValueError, match="attempts_a"):
+        null_gain_quantile({"A1": Fraction(1, 2)}, {"A1": 3, "G4": 3}, {"A1": 3}, COVERAGE_LEVEL)
+
+
+def test_null_gain_quantile_rejects_a_level_above_one():
+    with pytest.raises(ValueError, match="level"):
+        null_gain_quantile({"A1": Fraction(1, 2)}, {"A1": 3}, {"A1": 3}, Fraction(3, 2))
+
+
+def test_null_task_quantile_matches_the_single_task_gain_quantile():
+    """The carrier/guard construction (contract §2) is a specialization of
+    the multi-task one, not a separately-derived formula."""
+    rate = Fraction(21, 49)
+
+    single = null_task_quantile(rate, 10, 10, COVERAGE_LEVEL)
+    via_gain = null_gain_quantile({"A1": rate}, {"A1": 10}, {"A1": 10}, COVERAGE_LEVEL)
+
+    assert single == via_gain
+
+
+def test_null_gain_quantile_is_deterministic_and_exact_type():
+    """No sampling: the same inputs always produce the exact same `Fraction`,
+    not merely an approximately-equal float."""
+    rates = {"A1": Fraction(21, 49), "G4": Fraction(5, 49)}
+    attempts = {"A1": 3, "G4": 3}
+
+    first = null_gain_quantile(rates, attempts, attempts, COVERAGE_LEVEL)
+    second = null_gain_quantile(rates, attempts, attempts, COVERAGE_LEVEL)
+
+    assert isinstance(first, Fraction)
+    assert first == second
+
+
+def test_null_gain_quantile_is_fast_at_three_tasks_ten_attempts():
+    """Watch-runtime guard: three tasks at ten attempts each (the subset
+    arms' own shape, contract §3) must enumerate well under 2 seconds --
+    the size this module's own fitness checks and a real confirmation gate
+    actually run at."""
+    rates = {"A1": Fraction(21, 49), "G4": Fraction(5, 49), "G5": Fraction(30, 49)}
+    attempts = {"A1": 10, "G4": 10, "G5": 10}
+
+    start = time.perf_counter()
+    null_gain_quantile(rates, attempts, attempts, COVERAGE_LEVEL)
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 2.0
