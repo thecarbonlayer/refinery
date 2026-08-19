@@ -114,3 +114,14 @@ def test_rows_are_scrubbed_at_generation_time(tmp_path):
     # Non-string/structure fields must survive untouched — a scrubber that rewrote
     # keys or coerced values would pass the string check above and still be broken.
     assert out["passed"] is False and out["attempt"] == 0 and out["metrics"] == {}
+
+
+def test_truncated_at_exactly_var_folders_is_scrubbed():
+    """A detail clamp once cut a path at the directory name itself — no trailing slash.
+
+    The partial pattern must catch the boundary case.
+    """
+    from runner.scrub import scrub_text
+
+    assert scrub_text("CWD: /private/var/folders'") == "CWD: <TMPDIR>'"
+    assert scrub_text("CWD: /var/folders") == "CWD: <TMPDIR>"
