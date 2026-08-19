@@ -54,6 +54,10 @@ Never move suite code into carbon. Never let carbon's config reach into `runner/
 - **Siblings on disk.** refinery and carbon sit under one root; the dependency path and
   the checkout constant both assume it. Change them together.
 - **Offline tests stay offline.** `uv run pytest` makes no model calls. Keep it that way.
+- **The sibling carbon must be the pinned base.** `carbon-base.json` names it;
+  `loop/compat.py` enforces it loudly at startup (pytest exits early with
+  remediation). A fresh clone of both `main`s is not an operable pair until
+  the promotion lands.
 
 ## The acceptance rule
 

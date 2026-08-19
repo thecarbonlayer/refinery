@@ -80,3 +80,15 @@ def _isolated_scratch_root():
     finally:
         mp.undo()
         shutil.rmtree(root, ignore_errors=True)
+
+
+def pytest_configure(config):
+    """Fail the whole run early — remediation, not an ImportError spray — when
+    the sibling carbon checkout is not the pinned base (see carbon-base.json)."""
+    try:
+        from loop.compat import require_carbon_base
+
+        for warning in require_carbon_base():
+            print(f"carbon-base warning: {warning}")
+    except Exception as exc:
+        pytest.exit(f"\n{exc}", returncode=4)

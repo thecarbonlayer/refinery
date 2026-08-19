@@ -12,6 +12,14 @@ suite (`runner/tasks/`) against a live Carbon agent driven by the
 states for the aggregate acceptance rule
 `Δ_in ≥ 0, Δ_ho ≥ 0, max(Δ_in, Δ_ho) > 0`.
 
+## Carbon base
+
+This repo is built against the carbon base named in
+[`carbon-base.json`](carbon-base.json) — today the `self-improvement`
+branch. Startup (and pytest) checks the sibling checkout and fails with
+remediation if it is missing required symbols. `main` + `main` becomes the
+documented pair when the prepared promotion lands.
+
 There is one additional promotion veto: a candidate that moves any task from a
 1.0 baseline pass fraction to 0.0 is rejected even if another task's gain hides
 the collapse inside the split average. Smaller per-task regressions remain
