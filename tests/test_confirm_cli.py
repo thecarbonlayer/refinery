@@ -300,6 +300,173 @@ def test_arm_mismatch_fails_loudly_with_no_artifact_written(fake_carbon, it_dir)
     assert list(it_dir.glob("confirmation-*.json")) == []
 
 
+# --- freshness: a confirmation arm must not resume old results -------------------
+
+
+def test_run_confirmation_refuses_when_the_baseline_label_already_has_results(
+    fake_carbon, it_dir, tmp_path
+):
+    """`runner.cli run` RESUMES existing results for a label it already has a file
+    for (that's the whole point of a label — a rerun with the same one continues
+    it), which is exactly wrong for a confirmation: a fresh paired rerun that silently
+    reused a stale baseline arm would judge the candidate against evidence that was
+    never actually re-measured. The refusal must fire before either arm runs."""
+    _write_validation_record(it_dir, CANDIDATE.id, FIRST_CONFIRM)
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    (results_dir / "confirm-base.json").write_text("{}")
+    ran: list[str] = []
+
+    with pytest.raises(
+        SystemExit, match="confirm-base.*already has recorded results.*must be fresh"
+    ):
+        run_confirmation(
+            CANDIDATE,
+            it_dir,
+            baseline_label="confirm-base",
+            candidate_label="confirm-cand",
+            attempts=10,
+            carbon_root=fake_carbon,
+            run_runner=lambda label, *_: ran.append(label),
+            results_dir=results_dir,
+            log=lambda *_: None,
+        )
+    assert ran == [], "no arm may run once either label is stale"
+
+
+def test_run_confirmation_refuses_when_the_candidate_label_already_has_results(
+    fake_carbon, it_dir, tmp_path
+):
+    _write_validation_record(it_dir, CANDIDATE.id, FIRST_CONFIRM)
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    (results_dir / "confirm-cand.json").write_text("{}")
+    ran: list[str] = []
+
+    with pytest.raises(SystemExit, match="confirm-cand.*already has recorded results"):
+        run_confirmation(
+            CANDIDATE,
+            it_dir,
+            baseline_label="confirm-base",
+            candidate_label="confirm-cand",
+            attempts=10,
+            carbon_root=fake_carbon,
+            run_runner=lambda label, *_: ran.append(label),
+            results_dir=results_dir,
+            log=lambda *_: None,
+        )
+    assert ran == []
+
+
+def test_run_confirmation_proceeds_when_neither_label_has_prior_results(
+    fake_carbon, it_dir, tmp_path
+):
+    """The freshness check must not be a blanket refusal — labels that genuinely
+    have no prior results must run exactly as before."""
+    _write_validation_record(it_dir, CANDIDATE.id, FIRST_CONFIRM)
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    base_arm = _arm({"E4": (0, 10, "held_out"), "G5": (4, 10, "held_in")})
+    cand_arm = _arm({"E4": (10, 10, "held_out"), "G5": (8, 10, "held_in")})
+
+    def fake_runner(label, only, attempts):
+        return base_arm if label == "confirm-base" else cand_arm
+
+    record = run_confirmation(
+        CANDIDATE,
+        it_dir,
+        baseline_label="confirm-base",
+        candidate_label="confirm-cand",
+        attempts=10,
+        carbon_root=fake_carbon,
+        run_runner=fake_runner,
+        results_dir=results_dir,
+        log=lambda *_: None,
+    )
+    assert record.confirmation["outcome"] == ACCEPT
+
+
+# --- candidate identity: the record must be for THIS candidate's edit ------------
+
+
+def test_run_confirmation_refuses_when_the_candidates_fields_have_drifted(fake_carbon, it_dir):
+    """The first decision is matched to the candidate by id alone today — a
+    candidate object reusing an id but carrying DIFFERENT field edits (a stale
+    in-memory object, a candidates.json that changed underfoot) would silently
+    confirm evidence for an edit that was never actually validated. Once
+    `ValidationRecord` records the fields it validated, a mismatch must refuse."""
+    rec = {
+        "candidate_id": CANDIDATE.id,
+        "candidate_fields": {"max_tokens": {"old": OLD_MT, "new": OLD_MT + 999}},
+        "rule": {"applied": True, **FIRST_CONFIRM.to_json()},
+    }
+    (it_dir / f"validation-{CANDIDATE.id}.json").write_text(json.dumps(rec))
+    ran: list[str] = []
+
+    with pytest.raises(SystemExit, match="drift"):
+        run_confirmation(
+            CANDIDATE,  # fields={"max_tokens": {"old": OLD_MT, "new": NEW_MT}} -- differs
+            it_dir,
+            baseline_label="confirm-base",
+            candidate_label="confirm-cand",
+            attempts=10,
+            carbon_root=fake_carbon,
+            run_runner=lambda label, *_: ran.append(label),
+            log=lambda *_: None,
+        )
+    assert ran == []
+
+
+def test_run_confirmation_proceeds_when_the_candidates_fields_match(fake_carbon, it_dir):
+    rec = {
+        "candidate_id": CANDIDATE.id,
+        "candidate_fields": dict(CANDIDATE.fields),
+        "rule": {"applied": True, **FIRST_CONFIRM.to_json()},
+    }
+    (it_dir / f"validation-{CANDIDATE.id}.json").write_text(json.dumps(rec))
+    base_arm = _arm({"E4": (0, 10, "held_out"), "G5": (4, 10, "held_in")})
+    cand_arm = _arm({"E4": (10, 10, "held_out"), "G5": (8, 10, "held_in")})
+
+    def fake_runner(label, only, attempts):
+        return base_arm if label == "confirm-base" else cand_arm
+
+    record = run_confirmation(
+        CANDIDATE,
+        it_dir,
+        baseline_label="confirm-base",
+        candidate_label="confirm-cand",
+        attempts=10,
+        carbon_root=fake_carbon,
+        run_runner=fake_runner,
+        log=lambda *_: None,
+    )
+    assert record.confirmation["outcome"] == ACCEPT
+
+
+def test_run_confirmation_proceeds_when_the_record_predates_candidate_fields(fake_carbon, it_dir):
+    """A historical record written before this fix has no `candidate_fields` key at
+    all -- it must still load and confirm exactly as it always did, matched by id
+    alone, since there is nothing to compare."""
+    _write_validation_record(it_dir, CANDIDATE.id, FIRST_CONFIRM)  # no candidate_fields key
+    base_arm = _arm({"E4": (0, 10, "held_out"), "G5": (4, 10, "held_in")})
+    cand_arm = _arm({"E4": (10, 10, "held_out"), "G5": (8, 10, "held_in")})
+
+    def fake_runner(label, only, attempts):
+        return base_arm if label == "confirm-base" else cand_arm
+
+    record = run_confirmation(
+        CANDIDATE,
+        it_dir,
+        baseline_label="confirm-base",
+        candidate_label="confirm-cand",
+        attempts=10,
+        carbon_root=fake_carbon,
+        run_runner=fake_runner,
+        log=lambda *_: None,
+    )
+    assert record.confirmation["outcome"] == ACCEPT
+
+
 # --- the refusal case: no first CONFIRM -------------------------------------------
 
 

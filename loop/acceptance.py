@@ -56,7 +56,11 @@ the SUPPORTED-SET split means showed with nothing changed between arms. Passing 
 derived) — and nothing else. Every whole-suite protection keeps reading the WHOLE
 suite: a leak on an unsupported task is still a leak, and a collapse there still
 vetoes. Without a calibration this module behaves exactly as it did before the
-mechanism existed, byte for byte, including its reason strings.
+mechanism existed, byte for byte, including its reason strings — except the
+confirmation collapse veto (contract amendment): ``confirmed()`` now runs the
+catastrophic per-task check unconditionally rather than only under a calibration,
+closing a hole where an uncalibrated confirmation pair could hide a full-pass-to-zero
+collapse behind a split mean that stayed inside its allowance.
 
 Lives in `loop/`, not `runner/`: `runner_sha` is the verifier's identity and a
 governance rule must not invalidate baselines when it changes.
@@ -148,7 +152,21 @@ class SectionCalibration:
     - ``supported``: the tasks the bounds were measured on. Gain and regression are
       judged on the mean over THESE tasks, per split, and nothing else.
     - ``noise_in`` / ``noise_ho``: the largest supported-set split-mean |Δ| the null
-      arms produced — the measured analog of ``one_attempt``.
+      arms produced — the measured analog of ``one_attempt`` — as a float, for
+      display and for a caller that only wants an approximate number.
+    - ``noise_in_exact`` / ``noise_ho_exact``: the SAME bound as an exact ``Fraction``.
+      Bounds round-trip through JSON as floats, and most denominators (10 included)
+      are not exact in binary — ``Fraction(a_float)`` recovers that float's own exact
+      binary value, not the true rational the float already rounded away from, so a
+      threshold rebuilt only from ``noise_in``/``noise_ho`` can misjudge a movement
+      that lands EXACTLY on the true bound. When the artifact carries a
+      ``section_noise_exact`` string (``loop.calibrate``, since this fix), the loader
+      passes the exact ``Fraction`` it names here; every comparison in this module
+      reads these fields, never ``Fraction(noise_in)``. Left ``None``, ``__post_init__``
+      falls back to ``Fraction(noise_in)`` / ``Fraction(noise_ho)`` — the same
+      (potentially lossy) value this module always compared against — so a
+      calibration built without the exact fields, or an artifact from before they
+      existed, still works exactly as it did.
     - ``guards``: tasks a confirmation must rerun even unmoved (added to
       ``always_confirm``), the section's known trade-off and security checks.
     - ``source``: where the artifact came from, repo-relative — this string lands in
@@ -161,6 +179,14 @@ class SectionCalibration:
     noise_ho: float
     guards: frozenset[str]
     source: str
+    noise_in_exact: Fraction | None = None
+    noise_ho_exact: Fraction | None = None
+
+    def __post_init__(self) -> None:
+        if self.noise_in_exact is None:
+            object.__setattr__(self, "noise_in_exact", Fraction(self.noise_in))
+        if self.noise_ho_exact is None:
+            object.__setattr__(self, "noise_ho_exact", Fraction(self.noise_ho))
 
     def to_json(self) -> dict:
         return {
@@ -474,9 +500,11 @@ def evaluate(
         bound = "one attempt"
     else:
         d_in, d_ho = _supported_means(per, splits, calibration.supported)
-        # `Fraction(float)` is exact (it takes the float's true binary value), so the
-        # comparisons below stay exact arithmetic the way the rest of this module is.
-        thr_in, thr_ho = Fraction(calibration.noise_in), Fraction(calibration.noise_ho)
+        # The calibration's OWN exact fractions, not `Fraction(calibration.noise_in)`:
+        # that would be exact for the FLOAT's binary value, not the true rational bound
+        # the float already rounded away from (`noise_in_exact`/`noise_ho_exact` is
+        # exactly this bound — see `SectionCalibration`'s docstring).
+        thr_in, thr_ho = calibration.noise_in_exact, calibration.noise_ho_exact
         bound = "the measured section noise"
 
     reasons: list[str] = []
@@ -725,8 +753,10 @@ def confirmed(
     else:
         splits = {n: t["split"] for n, t in confirm_baseline["tasks"].items()}
         d_in, d_ho = _supported_means(per, splits, calibration.supported)
-        thr_in = Fraction(calibration.noise_in)
-        thr_ho = Fraction(calibration.noise_ho)
+        # Same exact fields as `evaluate()`, not `Fraction(calibration.noise_in)` — see
+        # that call site's comment and `SectionCalibration`'s docstring.
+        thr_in = calibration.noise_in_exact
+        thr_ho = calibration.noise_ho_exact
     report = (float(d_in), float(d_ho), float(thr_in), float(thr_ho))
 
     reasons: list[str] = []
@@ -805,9 +835,12 @@ def confirmed(
         )
     else:
         # The measured bound for the split the evidence was on — the same bar the
-        # first decision had to clear, held steady across attempt counts.
-        grain = Fraction(
-            calibration.noise_ho if first.evidence_split == "held_out" else calibration.noise_in
+        # first decision had to clear, held steady across attempt counts. The exact
+        # field, not `Fraction(calibration.noise_*)` — same reasoning as above.
+        grain = (
+            calibration.noise_ho_exact
+            if first.evidence_split == "held_out"
+            else calibration.noise_in_exact
         )
     repeated = bool(basis) and sum(basis) / len(basis) > grain
     if not repeated:

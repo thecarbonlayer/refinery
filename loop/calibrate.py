@@ -42,10 +42,13 @@ ANALYSIS_PATH = EDITOR_ROOT / "iterations" / "calibration-compaction" / "analysi
 # always takes `supported` explicitly, so tests never need to touch this.
 SUPPORTED = frozenset({"A1", "G2", "G4", "G5"})
 
-# The three fields the null-run protocol requires every arm to share (contract
-# §2): a Δ across runner versions, config versions, or models is not a
-# measurement of noise, it is a measurement of the thing that changed.
-_FINGERPRINT_FIELDS = ("runner_sha", "config_version", "model")
+# The four fields the null-run protocol requires every arm to share (contract
+# §2): a Δ across runner versions, config versions, models, or uncommitted carbon
+# states is not a measurement of noise, it is a measurement of the thing that
+# changed. `dirty_sha` is None for a clean tree -- None==None across arms is a
+# consistent (both clean) digest, not a mismatch; only a genuine difference (two
+# arms dirty in different, unrelated ways, or one dirty and one clean) refuses.
+_FINGERPRINT_FIELDS = ("runner_sha", "config_version", "model", "dirty_sha")
 
 
 def _exact_pass_fraction(task: dict) -> Fraction:
@@ -137,7 +140,7 @@ def _supported_split_mean(results: dict, split: str, supported: frozenset[str]) 
 
 def _section_noise(
     arm_results: dict[str, dict], labels: list[str], supported: frozenset[str]
-) -> tuple[dict[str, float], dict[str, list[str]]]:
+) -> tuple[dict[str, float], dict[str, str], dict[str, list[str]]]:
     """Per split, the max pairwise |Δ supported-set mean| -- the measured analog of
     `one_attempt`, from arms that actually cover the WHOLE supported set for that
     split at a SHARED attempt count.
@@ -149,6 +152,16 @@ def _section_noise(
     the arm) attempt count for this split's supported tasks, and use the LARGEST
     such group; `section_noise_arms` names exactly which arms fed the bound, so an
     excluded arm is never silently dropped.
+
+    Returns the bound three ways: `noise` (float, for display/backward-compat),
+    `noise_exact` (the SAME bound as an exact `"numerator/denominator"` string), and
+    `noise_arms`. The float is a rounded VIEW of the bound, not the bound itself --
+    `evaluate()`/`confirmed()` compare a measurement against this threshold with exact
+    `Fraction` arithmetic everywhere else, and a threshold rebuilt by re-fractioning
+    the float would compare against the float's binary value, not the true rational
+    spread the arms actually measured (most denominators, including as plain a one as
+    10, are not exact in binary). `noise_exact` is what lets a caller skip that lossy
+    round trip.
     """
     task_split: dict[str, str] = {}
     for label in labels:
@@ -157,6 +170,7 @@ def _section_noise(
                 task_split.setdefault(name, t["split"])
 
     noise: dict[str, float] = {}
+    noise_exact: dict[str, str] = {}
     noise_arms: dict[str, list[str]] = {}
     for split in sorted(set(task_split.values())):
         split_tasks = {name for name, sp in task_split.items() if sp == split}
@@ -172,14 +186,17 @@ def _section_noise(
             groups.setdefault(attempts, []).append(label)
         if not groups:
             noise[split] = 0.0
+            noise_exact[split] = "0/1"
             noise_arms[split] = []
             continue
         best = max(groups, key=lambda a: (len(groups[a]), a))
         chosen = groups[best]
         means = [_supported_split_mean(arm_results[label], split, supported) for label in chosen]
-        noise[split] = float(_max_pairwise_abs_delta(means))
+        bound = _max_pairwise_abs_delta(means)
+        noise[split] = float(bound)
+        noise_exact[split] = f"{bound.numerator}/{bound.denominator}"
         noise_arms[split] = chosen
-    return noise, noise_arms
+    return noise, noise_exact, noise_arms
 
 
 def _restrict(results: dict, names: set[str]) -> dict:
@@ -224,13 +241,22 @@ def calibrate(labels: list[str], results_dir: Path, supported: frozenset[str]) -
     """
     if not labels:
         raise ValueError("calibrate: at least one arm label is required")
+    dupes = sorted({label for label in labels if labels.count(label) > 1})
+    if dupes:
+        raise ValueError(
+            f"calibrate: duplicate arm label(s): {', '.join(dupes)} -- the same "
+            "physical result cannot stand in for two independent null arms"
+        )
     arm_results = {label: _load_arm(results_dir, label) for label in labels}
     shared_fp = _check_fingerprints(arm_results, labels)
-    section_noise, section_noise_arms = _section_noise(arm_results, labels, supported)
+    section_noise, section_noise_exact, section_noise_arms = _section_noise(
+        arm_results, labels, supported
+    )
     return {
         "arms": _build_arms(arm_results, labels),
         "per_task": _per_task(arm_results, labels, supported),
         "section_noise": section_noise,
+        "section_noise_exact": section_noise_exact,
         "section_noise_arms": section_noise_arms,
         "pairwise_outcomes": _pairwise_outcomes(arm_results, labels),
         "computed_at_runner_sha": shared_fp["runner_sha"],

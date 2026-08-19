@@ -891,7 +891,114 @@ def test_section_calibration_carries_only_values_the_artifact_measured(tmp_path)
     assert cal.noise_in == analysis["section_noise"]["held_in"]
     assert cal.noise_ho == analysis["section_noise"]["held_out"]
     assert cal.guards == frozenset({"A1", "G2", "G5"})
-    assert cal.source.endswith("analysis.json") and "/Users/" not in cal.source
+    assert cal.source.endswith("analysis.json")
+    # `/Users/` alone only catches macOS home paths -- the same machine leak reaches
+    # `iterations/` from a Linux CI box (`/home/`), a macOS temp dir resolved to its
+    # real path (`/private/var/...`), or the bare OS temp root (`/tmp`) just as easily.
+    for leak in ("/Users/", "/home/", "/private/var", "/tmp"):
+        assert leak not in cal.source, f"{leak!r} leaked into a committed record: {cal.source!r}"
+
+
+def test_section_calibration_derives_exact_fractions_from_the_float_when_none_given(tmp_path):
+    """Backward compatibility: a `SectionCalibration` built with only the float
+    fields (no `noise_in_exact`/`noise_ho_exact` — the shape every construction used
+    before this fix, and what an artifact with no `section_noise_exact` still
+    produces) must still carry an exact value, derived the same way `evaluate()`
+    always has: `Fraction(float)`, exact for the float's OWN binary value even though
+    that value may not equal the true rational bound.
+    """
+    from fractions import Fraction
+
+    from loop.acceptance import SectionCalibration
+
+    cal = SectionCalibration(
+        section="compaction",
+        supported=frozenset({"A1"}),
+        noise_in=0.3,
+        noise_ho=0.0,
+        guards=frozenset(),
+        source="analysis.json",
+    )
+    assert cal.noise_in_exact == Fraction(0.3)
+    assert cal.noise_ho_exact == Fraction(0.0)
+
+
+def test_section_calibration_prefers_an_explicit_exact_fraction_over_the_float(tmp_path):
+    from fractions import Fraction
+
+    from loop.acceptance import SectionCalibration
+
+    cal = SectionCalibration(
+        section="compaction",
+        supported=frozenset({"A1"}),
+        noise_in=0.3,  # the lossy float view
+        noise_ho=0.0,
+        guards=frozenset(),
+        source="analysis.json",
+        noise_in_exact=Fraction(3, 10),  # the true rational bound
+        noise_ho_exact=Fraction(0),
+    )
+    assert cal.noise_in_exact == Fraction(3, 10)
+    assert cal.noise_in_exact != Fraction(cal.noise_in), (
+        "fixture precondition: float(3/10) must not itself equal 3/10, or this test "
+        "cannot tell the exact field from the float fallback"
+    )
+
+
+def test_a_delta_exactly_at_a_measured_bound_of_3_10_is_not_judged_beyond_it(tmp_path):
+    """Boundary exactness (contract §4/§5): bounds round-trip through JSON as floats,
+    and `Fraction(float)` faithfully reconstructs the FLOAT's binary value, not the
+    true rational the float already lost rounding to. 3/10 is not exact in binary —
+    the nearest float64 is provably BELOW 3/10 — so a threshold rebuilt only from that
+    float is slightly too weak, and a movement of EXACTLY 3/10 clears it even though
+    it never actually exceeded the measured bound. `calibrate()` now additionally
+    writes `section_noise_exact` ("3/10"), and the loader must prefer it: a delta
+    exactly AT the true bound must land as within-noise (REJECT, "no gain"), not as a
+    CONFIRM.
+    """
+    import json
+    from fractions import Fraction
+
+    from loop.acceptance import REJECT, evaluate
+    from loop.validate import calibration_status
+
+    # fixture precondition: float(3/10) really does understate the true bound, so a
+    # comparison built from ONLY the float would let 3/10 clear it (`>` true) instead
+    # of landing exactly on it (`>` false) -- the failure mode this fix closes.
+    assert Fraction(float(Fraction(3, 10))) < Fraction(3, 10)
+
+    fp = {"runner_sha": "r1", "config_version": 1, "model": "m", "dirty_sha": None}
+    analysis = {
+        "computed_at_runner_sha": "r1",
+        "arms": [{"label": "a", **{k: fp[k] for k in ("runner_sha", "config_version", "model")}}],
+        "per_task": {"A1": {"passes_by_arm": {"a": {"passes": 0, "attempts": 10}}}},
+        "section_noise": {"held_in": 0.3, "held_out": 0.0},
+        "section_noise_exact": {"held_in": "3/10", "held_out": "0/1"},
+        "section_noise_arms": {"held_in": ["a", "b"], "held_out": ["a", "b"]},
+    }
+    path = tmp_path / "analysis.json"
+    path.write_text(json.dumps(analysis))
+    cal, why = calibration_status("compaction", fp, analysis_path=path)
+    assert cal is not None, why
+    assert cal.noise_in_exact == Fraction(3, 10)
+
+    def _results(passes: int) -> dict:
+        return {
+            "fingerprint": dict(fp),
+            "tasks": {
+                "A1": {
+                    "split": "held_in",
+                    "attempts": 10,
+                    "passes": passes,
+                    "pass_fraction": round(passes / 10, 4),
+                }
+            },
+        }
+
+    baseline, candidate = _results(0), _results(3)  # delta is EXACTLY 3/10
+    decision = evaluate(baseline, candidate, calibration=cal)
+    assert decision.outcome == REJECT
+    assert any("within measured noise" in r for r in decision.reasons), decision.reasons
 
 
 def test_a_supported_set_gain_above_the_measured_bound_confirms_naming_the_task(tmp_path):
@@ -1229,3 +1336,16 @@ def test_a_calibration_from_other_provenance_never_reaches_a_judgment(tmp_path):
     assert stale is None
     cal, why = calibration_status("compaction", judged, analysis_path=tmp_path / "analysis.json")
     assert cal is None and "model" in why
+
+
+def test_module_docstring_amends_the_byte_for_byte_claim():
+    """The module docstring's uncalibrated-compatibility claim ("byte for byte")
+    predates the confirmation collapse veto becoming unconditional
+    (`test_the_confirmation_collapse_veto_is_not_gated_on_a_calibration` pins the
+    behavior) -- the claim itself must name that one exception rather than continue
+    to promise a byte-for-byte match this module no longer keeps."""
+    import loop.acceptance as acceptance_mod
+
+    doc = acceptance_mod.__doc__
+    assert "byte for byte" in doc
+    assert "confirmation collapse veto" in doc

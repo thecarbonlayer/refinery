@@ -19,11 +19,13 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from loop.acceptance import CONFIRM, Decision, confirmed
+from loop.acceptance import ACCEPT, CONFIRM, Decision, confirmed
 from loop.artifacts import (
+    STAGE_PAIRED_CONFIRMATION,
     Candidate,
     Cluster,
     ConfirmationRecord,
+    ValidationRecord,
     load_candidates,
     load_clusters,
     write_confirmation_record,
@@ -67,6 +69,46 @@ def pick_cluster(clusters: list[Cluster], cluster_id: str) -> Cluster:
     return by_id[cluster_id]
 
 
+def _load_validation_json(it_dir: Path, candidate_id: str) -> dict:
+    """The raw validation record dict for ``candidate_id``, or a loud refusal.
+
+    Shared by ``load_first_decision`` (which reads ``rule``) and
+    ``_check_candidate_identity`` (which reads ``candidate_fields``) so both refuse
+    identically on a missing record instead of maintaining two copies of that check.
+    """
+    rec_path = it_dir / f"validation-{candidate_id}.json"
+    if not rec_path.is_file():
+        raise SystemExit(f"no validation record {rec_path} — run `validate` first")
+    return json.loads(rec_path.read_text())
+
+
+def _check_candidate_identity(it_dir: Path, candidate: Candidate) -> None:
+    """The validation record must have been produced by validating THIS candidate's
+    edit, not merely one that happens to share its id.
+
+    ``ValidationRecord.candidate_fields`` (added additively — ``None`` on a record
+    written before this existed, and on load for one that still is) carries the
+    ``{field: {old, new}}`` the record was actually validated against. When present,
+    a mismatch against the candidate's CURRENT fields means the candidates.json
+    changed underfoot, or a stale in-memory object is reusing an id — either way, a
+    confirmation run now would judge a different edit than the one whose first
+    decision this is, silently. Refuse loudly instead, naming the drift. A record
+    with no ``candidate_fields`` at all has nothing to compare and is not refused —
+    matching by id was the only check that ever existed for those, and this fix must
+    not retroactively invalidate every record written before it.
+    """
+    raw = _load_validation_json(it_dir, candidate.id)
+    recorded = raw.get("candidate_fields")
+    if recorded is None:
+        return
+    if recorded != candidate.fields:
+        raise SystemExit(
+            f"candidate {candidate.id!r}'s fields drifted from the validated record — "
+            f"validated {recorded!r}, now {dict(candidate.fields)!r}: a confirmation "
+            "would judge a different edit than the one whose first decision this is"
+        )
+
+
 def load_first_decision(it_dir: Path, candidate_id: str) -> Decision:
     """The candidate's first CONFIRM verdict, read back off its validation record.
 
@@ -77,9 +119,7 @@ def load_first_decision(it_dir: Path, candidate_id: str) -> Decision:
     refusals) rather than fabricating a decision or silently no-oping.
     """
     rec_path = it_dir / f"validation-{candidate_id}.json"
-    if not rec_path.is_file():
-        raise SystemExit(f"no validation record {rec_path} — run `validate` first")
-    rule = json.loads(rec_path.read_text()).get("rule", {})
+    rule = _load_validation_json(it_dir, candidate_id).get("rule", {})
     if not rule.get("applied") or rule.get("outcome") != CONFIRM:
         raise SystemExit(
             f"{rec_path} carries no first CONFIRM decision (rule.applied="
@@ -166,6 +206,7 @@ def run_confirmation(
     attempts: int,
     carbon_root: Path = CARBON_ROOT,
     run_runner: Callable[[str, list[str], int], dict] = _run_confirm_arm,
+    results_dir: Path = RESULTS_DIR,
     log=print,
 ) -> ConfirmationRecord:
     """Fresh paired confirmation: a baseline arm (config unedited) against a candidate
@@ -173,6 +214,15 @@ def run_confirmation(
     at ``attempts`` each, judged by ``acceptance.confirmed()``. The only path from a
     CONFIRM to an ACCEPT (contract §5) — shared infrastructure, not section-specific.
     """
+    for label in (baseline_label, candidate_label):
+        if (results_dir / f"{label}.json").is_file():
+            raise SystemExit(
+                f"{label!r} already has recorded results — confirmation arms must "
+                "be fresh: `runner.cli run` RESUMES an existing label instead of "
+                "re-measuring it, which would silently judge the candidate against "
+                "evidence that was never actually re-run for this confirmation"
+            )
+    _check_candidate_identity(it_dir, candidate)
     first = load_first_decision(it_dir, candidate.id)
     confirm_set = tuple(first.confirm_tasks)
     only = list(confirm_set)
@@ -229,6 +279,62 @@ def run_confirmation(
         per_task=_per_task_counts(confirm_set, baseline_results, candidate_results),
         finding=_finding(candidate, first, decision),
     )
+
+
+def _pr_eligible_record(
+    it_dir: Path, candidate: Candidate, record: ValidationRecord
+) -> ValidationRecord:
+    """PR eligibility (contract §5 amendment): the validation record's own
+    ``accepted``, OR — for a rule-section candidate whose FIRST decision was
+    CONFIRM — a fresh paired confirmation for the SAME candidate whose own outcome
+    is ACCEPT.
+
+    ``validate_candidate`` only ever sets ``accepted=True`` for a rule outcome of
+    ACCEPT, which ``evaluate()`` (the first-pass judgment) never returns — so a
+    CONFIRM candidate's validation record carries ``accepted=False`` forever, even
+    after a real confirmation ACCEPT is recorded separately (``loop.cli confirm``
+    writes ``ConfirmationRecord``s, never touches the validation record). Without
+    this, such a candidate could win a genuine confirmed ACCEPT and still never
+    reach a PR.
+
+    Refuses loudly, naming what's missing, for every CONFIRM candidate that is not
+    demonstrably eligible — rather than silently falling through to ``open_pr``'s
+    generic "was not accepted", which is right for a candidate that was plainly
+    REJECTED and never had anything to confirm, but unhelpful for one still waiting
+    on, or that failed, its confirmation. A candidate whose rule was never CONFIRM
+    (a plain REJECT, or ``rule == {}``) is returned UNCHANGED — ``open_pr``'s own
+    ``if not record.accepted`` refusal fires exactly as it always has; nothing here
+    weakens it, this function only ever ADDS a narrowly-verified path around it.
+    """
+    if record.accepted:
+        return record
+    rule = record.rule or {}
+    if not (rule.get("applied") and rule.get("outcome") == CONFIRM):
+        return record
+    conf_path = it_dir / f"confirmation-{candidate.id}.json"
+    if not conf_path.is_file():
+        raise SystemExit(
+            f"candidate {candidate.id!r}'s rule outcome is CONFIRM but no confirmation "
+            f"record exists at {conf_path} — run `confirm` first"
+        )
+    confirmation = ConfirmationRecord.from_json(json.loads(conf_path.read_text()))
+    if confirmation.candidate_id != candidate.id:
+        raise SystemExit(
+            f"{conf_path} was recorded for candidate {confirmation.candidate_id!r}, not "
+            f"{candidate.id!r} — refusing to promote a mismatched confirmation"
+        )
+    if confirmation.stage != STAGE_PAIRED_CONFIRMATION:
+        raise SystemExit(
+            f"{conf_path} carries stage {confirmation.stage!r}, not "
+            f"{STAGE_PAIRED_CONFIRMATION!r} — not a recognized confirmation"
+        )
+    outcome = confirmation.confirmation.get("outcome")
+    if outcome != ACCEPT:
+        raise SystemExit(
+            f"candidate {candidate.id!r}'s confirmation outcome is {outcome!r}, not "
+            f"{ACCEPT!r} — no PR"
+        )
+    return dataclasses.replace(record, accepted=True)
 
 
 def main() -> None:
@@ -311,7 +417,6 @@ def main() -> None:
         return
 
     # pr
-    from loop.artifacts import ValidationRecord
     from loop.prpipe import open_pr
 
     cand = pick_candidate(candidates, args.candidate)
@@ -327,6 +432,7 @@ def main() -> None:
     # the durable artifact and may legitimately carry more than the dataclass takes.
     fields = {f.name for f in dataclasses.fields(ValidationRecord)}
     record = ValidationRecord(**{k: v for k, v in rec_raw.items() if k in fields})
+    record = _pr_eligible_record(it_dir, cand, record)
     baseline_results = json.loads(Path(args.baseline).read_text())
     if baseline_results.get("fingerprint") != record.baseline_fingerprint:
         raise SystemExit(

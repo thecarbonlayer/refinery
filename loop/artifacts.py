@@ -137,6 +137,13 @@ class ValidationRecord:
     accepted: bool
     delta_in: float
     delta_ho: float
+    # The candidate's own {field: {old, new}} edit, as validated -- additive (None on
+    # a record written, or loaded, before this existed). Lets a later confirmation
+    # verify it is confirming the SAME edit the first decision was about, not merely
+    # a candidate that happens to share the same id (`loop.cli._check_candidate_
+    # identity`). None is a legitimate value, never coerced to `{}`: an absent field
+    # means "nothing to compare", which is a different fact than "compared and empty".
+    candidate_fields: dict | None = None
     per_task: dict[str, float] = field(default_factory=dict)
     aggregate_accepted: bool | None = None
     regressions: dict[str, float] = field(default_factory=dict)
@@ -202,6 +209,7 @@ class ValidationRecord:
             "label": self.label,
             "accepted": self.accepted,
             "disposition": self.disposition,
+            "candidate_fields": self.candidate_fields,
             "delta_in": self.delta_in,
             "delta_ho": self.delta_ho,
             "per_task": self.per_task,

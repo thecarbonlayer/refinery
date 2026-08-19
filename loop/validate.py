@@ -1,4 +1,4 @@
-"""Validation wiring: candidate -> suite run -> Δ -> acceptance rule.
+"""Validation wiring: candidate -> suite run -> Δ -> a decision, and which decision.
 
 The candidate is applied to the carbon WORKING TREE (never committed —
 rejected candidates must leave no trace in that repo, and the runner's
@@ -7,8 +7,21 @@ runs in a FRESH SUBPROCESS: carbon's config values bind at import time, so an
 in-process ``run_suite`` after editing the file would measure the old config.
 The edit is reverted in a ``finally`` — pass, fail, or crash.
 
-Acceptance is the Self-Harness rule as implemented in ``runner.delta``:
-``Δ_in >= 0, Δ_ho >= 0, max(Δ_in, Δ_ho) > 0`` — no partial credit.
+Two decision paths, chosen per candidate by ``rule_disposition()`` and both recorded
+on every ``ValidationRecord`` (``rule`` and ``causal``, regardless of which one set
+``accepted``):
+
+- A candidate whose edit maps to ONE section in ``RULE_SECTIONS`` — ``tool_output``
+  always, ``compaction`` only when a fresh ``SectionCalibration`` covers the
+  measurements being judged — gets the three-outcome CALIBRATED RULE
+  (``loop.acceptance.evaluate()``): REJECT, or CONFIRM (promising, not accepted —
+  accepted only through a fresh paired confirmation, ``loop.cli.run_confirmation`` /
+  ``loop.acceptance.confirmed()``, which is the only path to ACCEPT).
+- Everywhere else — an unmapped field, an edit spanning two sections, or an
+  uncalibrated section — ``accepted`` follows the CAUSAL VERDICT
+  (``causal_verdict()``): the Self-Harness rule (``Δ_in >= 0, Δ_ho >= 0,
+  max(Δ_in, Δ_ho) > 0``, no partial credit) applied with impossible attributions
+  (movements on tasks the edited knob cannot reach) zeroed out first.
 """
 
 from __future__ import annotations
@@ -18,6 +31,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Callable
+from fractions import Fraction
 from pathlib import Path
 
 from loop.acceptance import ACCEPT, SectionCalibration
@@ -339,6 +353,24 @@ def _repo_relative(path: Path) -> str:
         return path.name
 
 
+def _scrub_os_error(exc: Exception, path: Path) -> str:
+    """`str(OSError)` embeds the absolute path it failed on (e.g. ``[Errno 13]
+    Permission denied: '/Users/.../analysis.json'``) — exactly the machine-path leak
+    ``_repo_relative`` exists to prevent everywhere else in this module, except an
+    ``OSError``'s own message bypasses it: the path text comes from the exception,
+    not from a call to ``_repo_relative``. Rebuild the message from the error's own
+    ``errno``/``strerror`` (what every ``OSError`` subclass — ``FileNotFoundError``,
+    ``PermissionError``, ``IsADirectoryError`` — actually carries) with the path
+    relativized the same way as everywhere else. A ``ValueError`` (e.g. a JSON decode
+    error) never carries a path in its message, so it passes through unscrubbed.
+    """
+    if isinstance(exc, OSError):
+        errno_part = f"[Errno {exc.errno}] " if exc.errno is not None else ""
+        strerror = exc.strerror or str(exc)
+        return f"{errno_part}{strerror}: {_repo_relative(path)!r}"
+    return str(exc)
+
+
 def _provenance_mismatch(analysis: dict, fingerprint: dict, where: str) -> str:
     """The first way this artifact's provenance differs from the measurements', or "".
 
@@ -371,6 +403,27 @@ def _provenance_mismatch(analysis: dict, fingerprint: dict, where: str) -> str:
     return ""
 
 
+def _parse_exact_fraction(raw: str | None) -> Fraction | None:
+    """A `"numerator/denominator"` string (`loop.calibrate`'s `section_noise_exact`)
+    as an exact `Fraction`, or None when there is nothing to parse.
+
+    None is also the answer for a malformed string: an artifact this module cannot
+    trust to be well-formed must not raise here (a legacy or hand-edited analysis.json
+    should not crash loading), it must fall back — `SectionCalibration.__post_init__`
+    is exactly the fallback, deriving the same `Fraction(float)` this module compared
+    against before the exact field existed.
+    """
+    if not raw:
+        return None
+    try:
+        if "/" in raw:
+            num, den = raw.split("/", 1)
+            return Fraction(int(num), int(den))
+        return Fraction(int(raw))
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
 def calibration_status(
     section: str, fingerprint: dict | None, *, analysis_path: Path | None = None
 ) -> tuple[SectionCalibration | None, str]:
@@ -401,7 +454,10 @@ def calibration_status(
     try:
         analysis = json.loads(path.read_text())
     except (OSError, ValueError) as exc:
-        return None, f"section {section!r} is not calibrated: {where} is unreadable ({exc})"
+        return None, (
+            f"section {section!r} is not calibrated: {where} is unreadable "
+            f"({_scrub_os_error(exc, path)})"
+        )
     drift = _provenance_mismatch(analysis, fingerprint, where)
     if drift:
         return None, (
@@ -432,6 +488,7 @@ def calibration_status(
             f"{', '.join(unmeasured) or 'any supported task'} — fewer than two arms covered "
             "it, and a bound no pair of arms produced is an absence, not a measurement of zero"
         )
+    noise_exact = analysis.get("section_noise_exact") or {}
     return (
         SectionCalibration(
             section=section,
@@ -440,6 +497,8 @@ def calibration_status(
             noise_ho=float(noise["held_out"]),
             guards=_SECTION_CONFIRM_GUARDS.get(section, frozenset()),
             source=where,
+            noise_in_exact=_parse_exact_fraction(noise_exact.get("held_in")),
+            noise_ho_exact=_parse_exact_fraction(noise_exact.get("held_out")),
         ),
         "",
     )
@@ -585,6 +644,7 @@ def validate_candidate(
                 candidate_id=candidate.id,
                 label=label,
                 accepted=False,
+                candidate_fields=dict(candidate.fields),
                 delta_in=0.0,
                 delta_ho=0.0,
                 gates=gates,
@@ -633,6 +693,7 @@ def validate_candidate(
         candidate_id=candidate.id,
         label=label,
         accepted=accepted,
+        candidate_fields=dict(candidate.fields),
         delta_in=d["delta_in"],
         delta_ho=d["delta_ho"],
         per_task=d["per_task"],

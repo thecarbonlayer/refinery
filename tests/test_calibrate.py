@@ -80,6 +80,59 @@ def test_config_version_mismatch_is_also_refused_naming_the_field(tmp_path):
         calibrate(["arm0", "arm1"], tmp_path, frozenset({"A1"}))
 
 
+def test_dirty_sha_mismatch_across_arms_is_refused(tmp_path):
+    """Two arms can share `runner_sha`/`config_version`/`model` and still be
+    measuring DIFFERENT carbon states if the working tree was dirty and edited
+    between them -- `dirty_sha` is what tells those apart (contract §2), and
+    omitting it from the digest let two such arms read as identical null arms."""
+    arm0 = _arm(
+        "arm0",
+        {"A1": (2, 3, "held_in")},
+        fingerprint={
+            "runner_sha": "rsha1",
+            "config_version": 7,
+            "model": "carbon-model",
+            "dirty_sha": "d" * 40,
+        },
+    )
+    arm1 = _arm(
+        "arm1",
+        {"A1": (2, 3, "held_in")},
+        fingerprint={
+            "runner_sha": "rsha1",
+            "config_version": 7,
+            "model": "carbon-model",
+            "dirty_sha": "e" * 40,
+        },
+    )
+    _write(tmp_path, "arm0", arm0)
+    _write(tmp_path, "arm1", arm1)
+    with pytest.raises(ValueError, match="dirty_sha"):
+        calibrate(["arm0", "arm1"], tmp_path, frozenset({"A1"}))
+
+
+def test_dirty_sha_none_on_both_arms_is_consistent_not_a_mismatch(tmp_path):
+    """A clean tree on both arms (`dirty_sha` absent -> None on both) must not be
+    refused -- None==None IS consistent; only a genuine difference is a mismatch."""
+    arm0 = _arm("arm0", {"A1": (2, 3, "held_in")})
+    arm1 = _arm("arm1", {"A1": (2, 3, "held_in")})
+    _write(tmp_path, "arm0", arm0)
+    _write(tmp_path, "arm1", arm1)
+    result = calibrate(["arm0", "arm1"], tmp_path, frozenset({"A1"}))
+    assert result["arms"][0]["dirty_sha"] is None
+    assert result["arms"][1]["dirty_sha"] is None
+
+
+def test_duplicate_arm_labels_are_refused_naming_the_label(tmp_path):
+    """Supplying the same label twice would satisfy the two-arm shape from one
+    physical result -- a pairwise spread of zero built from one arm compared with
+    itself, not two independent null measurements."""
+    arm0 = _arm("arm0", {"A1": (2, 3, "held_in")})
+    _write(tmp_path, "arm0", arm0)
+    with pytest.raises(ValueError, match="arm0"):
+        calibrate(["arm0", "arm0"], tmp_path, frozenset({"A1"}))
+
+
 def test_per_task_max_pairwise_delta_and_counts(tmp_path):
     """An 8/10 -> 6/10 move on one task is the textbook example: |Δ| = 0.2."""
     supported = frozenset({"A1", "G2"})
@@ -119,6 +172,51 @@ def test_section_noise_is_max_pairwise_supported_set_mean_delta(tmp_path):
     assert result["section_noise"]["held_out"] == pytest.approx(0.2)
     assert set(result["section_noise_arms"]["held_in"]) == {"null-cmp-a", "null-cmp-b"}
     assert set(result["section_noise_arms"]["held_out"]) == {"null-cmp-a", "null-cmp-b"}
+
+
+def test_section_noise_exact_carries_the_true_rational_bound(tmp_path):
+    """`section_noise` rounds the bound to a float for display; `section_noise_exact`
+    must carry the SAME bound as an exact fraction string, unrounded -- 3/10 is not
+    exact in binary (the nearest float64 is slightly BELOW it), so a consumer that
+    only had the float and rebuilt a `Fraction` from it would get a threshold that is
+    not actually 3/10."""
+    from fractions import Fraction
+
+    supported = frozenset({"A1"})
+    arm_a = _arm("null-cmp-a", {"A1": (8, 10, "held_in")})
+    arm_b = _arm("null-cmp-b", {"A1": (5, 10, "held_in")})
+    _write(tmp_path, "null-cmp-a", arm_a)
+    _write(tmp_path, "null-cmp-b", arm_b)
+
+    result = calibrate(["null-cmp-a", "null-cmp-b"], tmp_path, supported)
+
+    assert result["section_noise"]["held_in"] == pytest.approx(0.3)
+    exact = result["section_noise_exact"]["held_in"]
+    num, den = exact.split("/")
+    assert Fraction(int(num), int(den)) == Fraction(3, 10)
+    # the float round-trip of THIS specific bound is provably not the true value --
+    # pinning that the fixture actually exercises the gap the exact field closes.
+    assert Fraction(result["section_noise"]["held_in"]) != Fraction(3, 10)
+
+
+def test_section_noise_exact_is_zero_over_one_when_no_group_covers_the_split(tmp_path):
+    """The `not groups` branch (no arm has a UNIFORM attempt count across the whole
+    supported set for this split) writes a bound of 0.0 by construction --
+    `section_noise_exact` must say the same thing exactly, not leave the split out or
+    emit a different shape."""
+    supported = frozenset({"A1", "G2"})
+    # every arm mixes attempt counts within the split -- no arm ever contributes to a
+    # group, so `groups` stays empty and the `not groups` branch fires.
+    arm_a = _arm("null-cmp-a", {"A1": (8, 10, "held_in"), "G2": (3, 5, "held_in")})
+    arm_b = _arm("null-cmp-b", {"A1": (5, 10, "held_in"), "G2": (2, 5, "held_in")})
+    _write(tmp_path, "null-cmp-a", arm_a)
+    _write(tmp_path, "null-cmp-b", arm_b)
+
+    result = calibrate(["null-cmp-a", "null-cmp-b"], tmp_path, supported)
+
+    assert result["section_noise_arms"]["held_in"] == []
+    assert result["section_noise"]["held_in"] == 0.0
+    assert result["section_noise_exact"]["held_in"] == "0/1"
 
 
 def test_section_noise_excludes_an_arm_whose_attempts_dont_match_the_others(tmp_path):

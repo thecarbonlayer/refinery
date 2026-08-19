@@ -552,6 +552,19 @@ def test_the_dead_max_item_chars_mapping_is_gone_and_says_why(tmp_path):
     )
 
 
+def test_module_docstring_names_the_two_actual_decision_paths():
+    """The docstring used to describe the pre-three-outcome world (a single
+    Self-Harness rule). It must now name both paths a candidate can actually take:
+    the calibrated rule for a section in `RULE_SECTIONS`, and the causal verdict
+    everywhere else."""
+    import loop.validate as validate_mod
+
+    doc = validate_mod.__doc__
+    assert "causal verdict" in doc.lower()
+    assert "calibrated" in doc.lower() and "rule" in doc.lower()
+    assert "CONFIRM" in doc and "REJECT" in doc
+
+
 # --- freshness against the measurements' own provenance (§4 amendment) ------------
 
 
@@ -582,6 +595,37 @@ def test_freshness_is_judged_against_the_measurements_not_the_live_process(tmp_p
         )
         assert cal is None, f"{field} mismatch must not be judged fresh"
         assert field in reason and "not calibrated" in reason
+
+
+def test_an_unreadable_calibration_artifact_scrubs_the_machine_path(tmp_path):
+    """`str(OSError)` embeds the absolute path it failed on (e.g. `[Errno 21] Is a
+    directory: '/private/var/.../analysis.json'`) — a machine path landing in a
+    recorded reason is exactly the leak AGENTS.md calls out, and this reason reaches
+    `rule_disposition()`'s `why` and from there a committed iteration record. A
+    directory in place of the file reproduces an unreadable path portably (no
+    permission-bit dance, no root-bypasses-chmod surprise)."""
+    import os
+
+    from loop.validate import calibration_status
+
+    if os.getuid() == 0:
+        pytest.skip("root bypasses the permission bits this fixture relies on")
+    bogus = tmp_path / "some" / "nested" / "analysis.json"
+    bogus.parent.mkdir(parents=True)
+    bogus.write_text("{}")
+    bogus.chmod(0o000)
+    fp = {"runner_sha": "r1", "config_version": 1, "model": "m"}
+    try:
+        cal, why = calibration_status("compaction", fp, analysis_path=bogus)
+    finally:
+        bogus.chmod(0o644)  # tmp_path cleanup needs to be able to remove it
+
+    assert cal is None
+    assert "unreadable" in why
+    assert "analysis.json" in why
+    assert str(tmp_path) not in why
+    for leak in ("/Users/", "/home/", "/private/var", "/tmp"):
+        assert leak not in why, f"{leak!r} leaked into the recorded reason: {why!r}"
 
 
 def test_no_fingerprint_means_uncalibrated_never_unchecked(tmp_path):
@@ -702,7 +746,12 @@ def test_confirm_cli_judges_a_calibrated_claim_against_its_measured_bound(
             run_runner=arms(34),
             log=lambda *_: None,
         )
-    assert not list(it_dir.glob("confirmation-*.json"))
+    # `run_confirmation` itself never writes a file on ANY path, success or refusal
+    # alike — only `main()`'s `confirm` branch does, after a successful return. A
+    # glob check here would be true unconditionally and pin nothing; the property
+    # that matters (main()'s writer only fires when run_confirmation actually
+    # returns) is exercised directly in
+    # `test_main_confirm_writes_the_record_only_when_run_confirmation_succeeds`.
 
     # Wired: the repeat is judged against the MEASURED bound, not a one-attempt grain.
     monkeypatch.setitem(validate_mod._SECTION_ANALYSIS, "compaction", artifact)
@@ -731,3 +780,82 @@ def test_confirm_cli_judges_a_calibrated_claim_against_its_measured_bound(
     )
     assert strong.confirmation["outcome"] == "ACCEPT"
     assert strong.confirmation["raw"]["regime"] == "section_calibration"
+
+
+def test_main_confirm_writes_the_record_only_when_run_confirmation_succeeds(tmp_path, monkeypatch):
+    """The actual no-artifact-on-refusal property, exercised for real this time.
+
+    `run_confirmation` never writes anything itself (see the comment two tests up) —
+    the ONE write site is `main()`'s `confirm` branch, which calls
+    `write_confirmation_record` only after `run_confirmation` returns. Driving
+    `main()` with `run_confirmation` faked (the module-level name `main()` calls by,
+    looked up at call time — unlike a default-argument seam, monkeypatching it here
+    genuinely takes effect) pins the wiring itself: a `SystemExit` from
+    `run_confirmation` must leave the write call unreached, and a normal return must
+    reach it.
+    """
+    import sys
+
+    import loop.cli as cli_mod
+    from loop.artifacts import ConfirmationRecord
+
+    it_dir = tmp_path / "iter-01"
+    it_dir.mkdir()
+    (it_dir / "candidates.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": "cand-x",
+                    "cluster_id": "CL-1",
+                    "proposer": "Fable",
+                    "proposer_detail": "test",
+                    "fields": {"max_tokens": {"old": 1, "new": 2}},
+                    "rationale": "r",
+                    "expected_effect": "e",
+                    "regression_risk": "g",
+                }
+            ]
+        )
+    )
+    monkeypatch.setattr(cli_mod, "ITERATIONS_DIR", tmp_path)
+    argv = [
+        "loop",
+        "confirm",
+        "--iteration",
+        "iter-01",
+        "--candidate",
+        "cand-x",
+        "--baseline-label",
+        "b",
+        "--candidate-label",
+        "c",
+        "--attempts",
+        "10",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    def refuse(*a, **k):
+        raise SystemExit("confirmation could not be measured: boom")
+
+    monkeypatch.setattr(cli_mod, "run_confirmation", refuse)
+    with pytest.raises(SystemExit):
+        cli_mod.main()
+    assert list(it_dir.glob("confirmation-*.json")) == []
+
+    def succeed(*a, **k):
+        return ConfirmationRecord(
+            candidate_id="cand-x",
+            baseline_label="b",
+            candidate_label="c",
+            attempts_per_task_per_arm=10,
+            confirm_set=("E4",),
+            first_decision={},
+            confirmation={"outcome": "ACCEPT"},
+            per_task={},
+            finding="f",
+        )
+
+    monkeypatch.setattr(cli_mod, "run_confirmation", succeed)
+    cli_mod.main()
+    written = list(it_dir.glob("confirmation-*.json"))
+    assert len(written) == 1
