@@ -9,3 +9,10 @@ What IS code: applying a candidate to the editable surface (``config_edit.py``),
 validating it against the task suite via the runner (``validate.py``), and
 turning an accepted edit into a reviewable pull request (``prpipe.py``).
 """
+
+import sys as _sys
+
+from loop.compat import require_carbon_base as _require_carbon_base
+
+for _warning in _require_carbon_base():
+    print(f"carbon-base warning: {_warning}", file=_sys.stderr)
