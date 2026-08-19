@@ -371,31 +371,68 @@ def calibrate(labels: list[str], results_dir: Path, supported: frozenset[str]) -
 # ---------------------------------------------------------------------------
 
 
-@cache
 def _binom_pmf(n: int, p: Fraction) -> tuple[Fraction, ...]:
     """P(X = k) for X ~ Binomial(n, p), k = 0..n -- exact `Fraction`, `math.comb`
-    only, memoized. The same (n, p) pair recurs constantly across a single
-    artifact's fitness checks: grain and stability both rebuild the SAME
-    per-task pmf many times over (stability alone does it once per leave-one-
-    arm-out pool), and goodness/power reuse the pooled rate across every arm --
-    memoizing here is what keeps the whole artifact fast (contract's own
-    "supported sets are <= 4 tasks at <= 20 attempts -- cheap").
+    only, memoized via `_binom_pmf_cached` below. The same (n, p) pair recurs
+    constantly across a single artifact's fitness checks: grain and stability
+    both rebuild the SAME per-task pmf many times over (stability alone does
+    it once per leave-one-arm-out pool), and goodness/power reuse the pooled
+    rate across every arm -- memoizing is what keeps the whole artifact fast
+    (contract's own "supported sets are <= 4 tasks at <= 20 attempts --
+    cheap").
+
+    This thin, UNCACHED wrapper is where `p` is checked to be exactly a
+    `Fraction`, not merely numerically equal to one (`isinstance`, not `==`).
+    That check has to live OUTSIDE the `@cache`d function, not inside it:
+    Python hashes and compares `0.5` and `Fraction(1, 2)` as equal, so
+    `@cache`'s own key lookup treats `_binom_pmf_cached(n, 0.5)` and
+    `_binom_pmf_cached(n, Fraction(1, 2))` as the SAME cache entry -- a guard
+    written inside the cached function only runs on a cache MISS, and is
+    silently skipped on a cache HIT. Concretely: call the exact form first
+    (populating the cache), then call the float form with the same numeric
+    value, and a guard inside the cached function would never even execute,
+    handing back the cached exact tuple as if the float call had been
+    accepted. Checking here, before the cached function is ever reached in
+    either direction, means a float `p` is refused every time, regardless of
+    what has or hasn't already been cached.
     """
+    if not isinstance(p, Fraction):
+        raise TypeError(
+            f"_binom_pmf: p must be an exact Fraction, got {type(p).__name__} ({p!r}) -- "
+            "a float here would silently collide, by numeric equality, with an exact "
+            "Fraction at the same (n, rate) in this function's memoized cache"
+        )
+    return _binom_pmf_cached(n, p)
+
+
+@cache
+def _binom_pmf_cached(n: int, p: Fraction) -> tuple[Fraction, ...]:
+    """The memoized computation itself -- only ever reached through
+    `_binom_pmf`'s type check above, never called directly."""
     q = 1 - p
     return tuple(Fraction(comb(n, k)) * p**k * q ** (n - k) for k in range(n + 1))
 
 
-def _task_diff_pmf(n_a: int, n_b: int, p: Fraction) -> dict[Fraction, Fraction]:
-    """Exact pmf of ONE task's own (b/n_b - a/n_a), a ~ Binomial(n_a, p),
-    b ~ Binomial(n_b, p), independent -- the per-task building block
-    `null_gain_quantile` convolves across the given task set. Each side keeps
+def _task_diff_pmf(n_a: int, p_a: Fraction, n_b: int, p_b: Fraction) -> dict[Fraction, Fraction]:
+    """Exact pmf of ONE task's own (b/n_b - a/n_a), a ~ Binomial(n_a, p_a),
+    b ~ Binomial(n_b, p_b), independent -- the per-task building block both
+    `null_gain_quantile` (the NULL construction, called with `p_a == p_b`:
+    nothing changed) and the power computations below (the ALTERNATIVE
+    construction, called with `p_b = p_a + offset` on the carrier task: a
+    true improvement is assumed) convolve across a task set. One function,
+    not two, so the null and alternative constructions can never accidentally
+    diverge in how they build a task's own diff distribution. Each side keeps
     its OWN attempt count as the fraction's denominator here, before anything
-    is averaged across tasks: a task judged at n_a=3 on one side and n_b=5 on
-    the other (a real asymmetric evaluate()/confirmed() pair) must never be
-    forced through a shared denominator that belongs to neither side.
+    is averaged across tasks -- this signature SUPPORTS `n_a != n_b` (a task
+    judged at different attempt counts on each side) even though no real
+    caller in this repo produces that shape today (`evaluate()`/`confirmed()`
+    always run `_parity`-matched, symmetric attempts first); the capability
+    exists for a future asymmetric shape, not because one occurs now.
     """
-    pmf_a = _binom_pmf(n_a, p)
-    pmf_b = _binom_pmf(n_b, p)
+    if n_a <= 0 or n_b <= 0:
+        raise ValueError(f"_task_diff_pmf: attempts must be positive, got n_a={n_a}, n_b={n_b}")
+    pmf_a = _binom_pmf(n_a, p_a)
+    pmf_b = _binom_pmf(n_b, p_b)
     out: dict[Fraction, Fraction] = {}
     for a_k, a_p in enumerate(pmf_a):
         if a_p == 0:
@@ -454,6 +491,13 @@ def null_gain_quantile(
     several multi-attempt tasks at once is supported by this signature but not
     a real call shape, and its per-task diff pmf can carry far more distinct
     Fraction keys, so it is not the case this function is optimized for.
+
+    Rejects (`ValueError`) a non-`Fraction` `rate` or `level`: this is the
+    public boundary every caller (including `loop.acceptance`, once Task 3
+    imports it) crosses before a rate ever reaches the memoized `_binom_pmf`
+    cache, so a float mistake is refused HERE, loudly, rather than silently
+    poisoning that cache for every later exact call (see `_binom_pmf`'s own
+    docstring for the mechanism).
     """
     tasks = sorted(rates)
     if not tasks:
@@ -464,12 +508,30 @@ def null_gain_quantile(
             f"in rates ({sorted(tasks)}); got attempts_a={sorted(attempts_a)}, "
             f"attempts_b={sorted(attempts_b)}"
         )
+    non_fraction = sorted(t for t in tasks if not isinstance(rates[t], Fraction))
+    if non_fraction:
+        raise ValueError(
+            f"null_gain_quantile: rates must be exact Fraction values, got a non-Fraction "
+            f"rate for {non_fraction} -- a float rate silently poisons the memoized "
+            "binomial pmf cache for every later exact call at the same (attempts, rate)"
+        )
+    if not isinstance(level, Fraction):
+        raise ValueError(
+            f"null_gain_quantile: level must be an exact Fraction, got "
+            f"{type(level).__name__} ({level!r})"
+        )
     if not (0 < level <= 1):
         raise ValueError(f"null_gain_quantile: level must be in (0, 1], got {level}")
+    non_positive = sorted(t for t in tasks if int(attempts_a[t]) <= 0 or int(attempts_b[t]) <= 0)
+    if non_positive:
+        raise ValueError(
+            f"null_gain_quantile: attempts_a/attempts_b must be positive for every task, "
+            f"got a non-positive attempt count for {non_positive}"
+        )
     n = len(tasks)
     total: dict[Fraction, Fraction] = {Fraction(0): Fraction(1)}
     for t in tasks:
-        task_pmf = _task_diff_pmf(attempts_a[t], attempts_b[t], rates[t])
+        task_pmf = _task_diff_pmf(attempts_a[t], rates[t], attempts_b[t], rates[t])
         nxt: dict[Fraction, Fraction] = {}
         for s, sp in total.items():
             if sp == 0:
@@ -498,7 +560,22 @@ def null_task_quantile(
     adjudication both judge ONE task's own null distribution, never a
     supported-set mean. Implemented as `null_gain_quantile` over a single
     synthetic task key so the two constructions can never silently diverge.
+
+    Validates `rate`/`level` are exact `Fraction`s itself, with a message
+    naming THIS function, before delegating -- `null_gain_quantile` would
+    catch the same mistake, but under its own name, which is confusing from
+    a caller that never mentioned it.
     """
+    if not isinstance(rate, Fraction):
+        raise ValueError(
+            f"null_task_quantile: rate must be an exact Fraction, got "
+            f"{type(rate).__name__} ({rate!r})"
+        )
+    if not isinstance(level, Fraction):
+        raise ValueError(
+            f"null_task_quantile: level must be an exact Fraction, got "
+            f"{type(level).__name__} ({level!r})"
+        )
     return null_gain_quantile({"_task": rate}, {"_task": attempts_a}, {"_task": attempts_b}, level)
 
 
@@ -549,11 +626,27 @@ def _check_supported_set(
 def _task_splits(
     arm_results: dict[str, dict], labels: list[str], supported: frozenset[str]
 ) -> dict[str, str]:
+    """Each supported task's split (`held_in`/`held_out`), read from every arm
+    that carries it -- not just the first. A task's split is a property of
+    the SUITE, not of any one arm's run, so two arms disagreeing on it is not
+    "take the first and move on", it is a sign the arms are not measuring the
+    same suite (a stale/mislabeled result file); refuse naming the task and
+    both disagreeing values rather than silently keeping whichever arm
+    happened to come first in `labels`.
+    """
     splits: dict[str, str] = {}
     for label in labels:
         for task in supported:
-            if task in arm_results[label]["tasks"] and task not in splits:
-                splits[task] = arm_results[label]["tasks"][task]["split"]
+            if task not in arm_results[label]["tasks"]:
+                continue
+            split = arm_results[label]["tasks"][task]["split"]
+            if task in splits and splits[task] != split:
+                raise ValueError(
+                    f"calibrate_model: arm {label!r} disagrees with an earlier arm on "
+                    f"task {task!r}'s split ({split!r} vs {splits[task]!r}) -- a task's "
+                    "split is a property of the suite, not of one arm's run"
+                )
+            splits[task] = split
     return splits
 
 
@@ -561,13 +654,21 @@ def _standard_attempts(
     arm_results: dict[str, dict], labels: list[str], supported: frozenset[str]
 ) -> dict[str, int]:
     """The full-suite attempt count per task -- 3 held-in / 5 held-out in the
-    real protocol (contract §3), never the subset arms' 10. Read from any arm
-    that is NOT a `--only` subset run (no `filter` key present): the same
+    real protocol (contract §3), never the subset arms' 10. Read from EVERY
+    arm that is NOT a `--only` subset run (no `filter` key present): the same
     literal signal `_pairwise_outcomes` already uses to tell a full-suite arm
     apart from a filtered one. Refuses if no such arm is present among
     `labels` -- the fitness checks (grain, stability, power) cannot define
     "standard attempt counts" without at least one arm that ran the real
     suite, and the round-2 protocol always includes three (`r2-null-full-*`).
+
+    Two full-suite arms disagreeing on a task's own attempt count is refused,
+    not silently resolved by keeping whichever arm came first -- the suite's
+    attempt count for a task is fixed, so a disagreement means the arms are
+    not measuring the same suite config. A recorded attempt count of zero (or
+    less) is refused too, naming the arm and task: `_split_grain` divides by
+    this value, and a bare `ZeroDivisionError` two calls later would not say
+    which arm's data caused it.
     """
     attempts: dict[str, int] = {}
     for label in labels:
@@ -575,8 +676,22 @@ def _standard_attempts(
         if "filter" in result:
             continue
         for task in supported:
-            if task in result["tasks"] and task not in attempts:
-                attempts[task] = int(result["tasks"][task]["attempts"])
+            if task not in result["tasks"]:
+                continue
+            value = int(result["tasks"][task]["attempts"])
+            if value <= 0:
+                raise ValueError(
+                    f"calibrate_model: arm {label!r} records {value} attempts for "
+                    f"standard-attempt task {task!r} -- must be positive"
+                )
+            if task in attempts and attempts[task] != value:
+                raise ValueError(
+                    f"calibrate_model: arm {label!r} disagrees with an earlier full-suite "
+                    f"arm on task {task!r}'s standard attempt count ({value} vs "
+                    f"{attempts[task]}) -- a task's standard attempt count is fixed by the "
+                    "suite, not by one arm's run"
+                )
+            attempts[task] = value
     missing = sorted(supported - set(attempts))
     if missing:
         raise ValueError(
@@ -772,21 +887,83 @@ def _check_stability(
     return result
 
 
+def _split_carrier(tasks: list[str]) -> str:
+    """Which of a split's tasks stands in for "the carrier" in a per-split
+    power row (contract §4.4 names a single carrier, not a per-task fan-out).
+    Alphabetically first of the already-sorted split task list -- the same
+    convention this module uses everywhere a deterministic single choice is
+    needed from a task set (`_split_grain`'s own `sorted(...)`), so held_in's
+    carrier is `A1` (the split's real order: `A1`, `G4`, `G5`) and held_out's
+    is trivially its only task, `G2`.
+    """
+    return tasks[0]
+
+
+def _gain_power(
+    rates: dict[str, Fraction],
+    attempts: dict[str, int],
+    carrier: str,
+    offset: Fraction,
+    threshold: Fraction,
+) -> Fraction:
+    """P[supported-split mean gain > threshold | `carrier`'s true rate is
+    `rates[carrier] + offset` (capped at 1), every OTHER task in `rates`
+    still at its pooled null rate] -- the gain gate's own power (contract
+    §4.4's "each gate", the row `_check_power` was missing: a first-pass
+    `evaluate()` judges the split MEAN, not one task alone, so its power must
+    be measured on that same mean, not borrowed from a single-task number).
+
+    Reuses `_task_diff_pmf`, the exact building block `null_gain_quantile`
+    itself convolves across tasks -- same per-task pmf construction, just
+    with the carrier's `b`-side rate substituted for the alternative instead
+    of held equal to `a`-side's (the null hypothesis `null_gain_quantile`
+    always assumes). `threshold` is the caller's own already-computed
+    coverage-level quantile at the SAME rates/attempts (`_check_grain`'s
+    quantity) -- recomputing it here would risk the two silently drifting.
+    """
+    tasks = sorted(rates)
+    n = len(tasks)
+    total: dict[Fraction, Fraction] = {Fraction(0): Fraction(1)}
+    for t in tasks:
+        p_b = min(Fraction(1), rates[t] + offset) if t == carrier else rates[t]
+        task_pmf = _task_diff_pmf(attempts[t], rates[t], attempts[t], p_b)
+        nxt: dict[Fraction, Fraction] = {}
+        for s, sp in total.items():
+            for d, dp in task_pmf.items():
+                nxt[s + d] = nxt.get(s + d, Fraction(0)) + sp * dp
+        total = nxt
+    return sum((p for s, p in total.items() if s / n > threshold), Fraction(0))
+
+
 def _check_power(
     null_counts: dict[str, tuple[int, int]],
     supported: frozenset[str],
+    task_split: dict[str, str],
+    standard_attempts: dict[str, int],
     level: Fraction,
     *,
     offset: Fraction = POWER_OFFSET,
     attempts: int = POWER_ATTEMPTS,
 ) -> dict:
-    """Fitness check 4 (contract §4.4): recorded, never gating. For each
-    supported task (any of which can be a confirmation's carrier), the
-    probability that a TRUE candidate rate of pooled + 0.2 clears that task's
-    own null quantile at `attempts` v `attempts` (contract §3's subset attempt
-    count, the confirmation-shaped one) -- enumerated exactly over both sides'
-    binomial outcomes, published so nobody mistakes a weak test for a strong
-    one (this module's whole reason for existing).
+    """Fitness check 4 (contract §4.4): recorded, never gating -- "each gate",
+    not one. Two shapes of gate, two shapes of row:
+
+    - `per_task`: for each supported task (any of which can be a
+      confirmation's carrier or guard), the probability that a TRUE candidate
+      rate of pooled + 0.2 clears that task's OWN null quantile at
+      `attempts` v `attempts` (contract §3's subset attempt count, the
+      confirmation-shaped one) -- the repeat/guard gate's power.
+    - `gain_gate`: for each split with supported tasks, the probability that
+      the SAME true improvement on `_split_carrier`'s task clears the split's
+      supported-set-MEAN quantile at STANDARD attempt counts -- the first-pass
+      evaluate() gain gate's own power, the weakest of the two shapes (a mean
+      over several tasks dilutes one task's movement, and standard attempts
+      are fewer than the confirmation's 10) and the one this artifact must not
+      omit just because a single-task number already exists nearby.
+
+    Both enumerated exactly over both sides' binomial outcomes, published so
+    nobody mistakes a weak test for a strong one (this module's whole reason
+    for existing).
     """
     per_task: dict[str, dict] = {}
     for task in sorted(supported):
@@ -796,17 +973,7 @@ def _check_power(
         # alternative rate above 1 is not a rate.
         p_alt = min(Fraction(1), p + offset)
         threshold = null_task_quantile(p, attempts, attempts, level)
-        pmf_a = _binom_pmf(attempts, p)
-        pmf_b = _binom_pmf(attempts, p_alt)
-        cleared = Fraction(0)
-        for a_k, a_p in enumerate(pmf_a):
-            if a_p == 0:
-                continue
-            for b_k, b_p in enumerate(pmf_b):
-                if b_p == 0:
-                    continue
-                if Fraction(b_k - a_k, attempts) > threshold:
-                    cleared += a_p * b_p
+        cleared = _gain_power({task: p}, {task: attempts}, task, offset, threshold)
         per_task[task] = {
             "pooled_rate": _fraction_str(p),
             "alt_rate": _fraction_str(p_alt),
@@ -815,7 +982,32 @@ def _check_power(
             "power": _fraction_str(cleared),
             "power_float": float(cleared),
         }
-    return {"offset": _fraction_str(offset), "attempts": attempts, "per_task": per_task}
+
+    gain_gate: dict[str, dict] = {}
+    for split in _present_splits(task_split, supported):
+        tasks, grain = _split_grain(task_split, standard_attempts, supported, split)
+        if not tasks:
+            continue
+        rates = {t: Fraction(*null_counts[t]) for t in tasks}
+        split_attempts = {t: standard_attempts[t] for t in tasks}
+        threshold = null_gain_quantile(rates, split_attempts, split_attempts, level)
+        carrier = _split_carrier(tasks)
+        power = _gain_power(rates, split_attempts, carrier, offset, threshold)
+        gain_gate[split] = {
+            "tasks": tasks,
+            "carrier": carrier,
+            "attempts": dict(split_attempts),
+            "threshold": _fraction_str(threshold),
+            "power": _fraction_str(power),
+            "power_float": float(power),
+        }
+
+    return {
+        "offset": _fraction_str(offset),
+        "attempts": attempts,
+        "per_task": per_task,
+        "gain_gate": gain_gate,
+    }
 
 
 def calibrate_model(labels: list[str], results_dir: Path, supported: frozenset[str]) -> dict:
@@ -825,12 +1017,14 @@ def calibrate_model(labels: list[str], results_dir: Path, supported: frozenset[s
     Refuses (`ValueError`, naming what's wrong) on: no labels; a duplicate
     label; a provenance mismatch across arms (the round-1 4 fields plus
     `carbon_sha`); a subset (`--only`) arm carrying a task outside the pinned
-    {A1, G2, G4, G5} supported set; any arm missing a supported task; or no
-    un-filtered arm to read standard attempt counts from. It does NOT refuse
-    on a failed fitness check -- `fitness.fit` is computed and recorded either
-    way (contract §4: "the artifact is written with `fit: false`"), and it is
-    the LOADER's job, not this function's, to refuse installing an unfit
-    artifact.
+    {A1, G2, G4, G5} supported set; any arm missing a supported task; two arms
+    disagreeing on a task's split or standard attempt count (a property of
+    the SUITE, not of one arm's run); a non-positive recorded attempt count;
+    or no un-filtered arm to read standard attempt counts from at all. It
+    does NOT refuse on a failed fitness check -- `fitness.fit` is computed
+    and recorded either way (contract §4: "the artifact is written with
+    `fit: false`"), and it is the LOADER's job, not this function's, to
+    refuse installing an unfit artifact.
 
     Round-1's `calibrate()` and its output shape are untouched; this is a
     separate entry point, not a replacement in place.
@@ -851,7 +1045,7 @@ def calibrate_model(labels: list[str], results_dir: Path, supported: frozenset[s
     stability = _check_stability(
         arm_results, labels, supported, task_split, standard_attempts, COVERAGE_LEVEL
     )
-    power = _check_power(null_counts, supported, COVERAGE_LEVEL)
+    power = _check_power(null_counts, supported, task_split, standard_attempts, COVERAGE_LEVEL)
     fit = bool(grain["pass"] and goodness["pass"] and stability["pass"])
 
     return {
