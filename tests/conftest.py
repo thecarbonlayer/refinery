@@ -84,11 +84,27 @@ def _isolated_scratch_root():
 
 def pytest_configure(config):
     """Fail the whole run early — remediation, not an ImportError spray — when
-    the sibling carbon checkout is not the pinned base (see carbon-base.json)."""
-    try:
-        from loop.compat import require_carbon_base
+    the sibling carbon checkout is not the pinned base (see carbon-base.json).
 
-        for warning in require_carbon_base():
-            print(f"carbon-base warning: {warning}")
-    except Exception as exc:
-        pytest.exit(f"\n{exc}", returncode=4)
+    ``import loop.compat`` first imports the parent ``loop`` package, whose
+    ``__init__.py`` already runs the guard (``require_carbon_base()``) and
+    prints any commit-drift warnings to stderr — so this import is the ONE
+    guard run for the whole pytest session. Calling ``require_carbon_base()``
+    again here would run it a second time for no benefit.
+
+    The except clause matches ``RuntimeError`` and then checks the class name
+    by string rather than importing and checking ``isinstance(exc,
+    CarbonBaseError)``: the import that raised the error is the very
+    ``loop.compat`` import in the try block, so importing ``CarbonBaseError``
+    to test with would require the module to already be importable —
+    chicken-and-egg. ``CarbonBaseError`` subclasses ``RuntimeError``, so this
+    still narrows out everything else. Any OTHER exception (a genuine bug
+    elsewhere in the import) re-raises with its real traceback instead of
+    being swallowed into a bare pytest.exit.
+    """
+    try:
+        import loop.compat  # noqa: F401
+    except RuntimeError as exc:
+        if type(exc).__name__ == "CarbonBaseError":
+            pytest.exit(f"\n{exc}", returncode=4)
+        raise

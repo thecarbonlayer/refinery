@@ -86,3 +86,42 @@ def test_missing_required_key_rejected(tmp_path):
     message = str(excinfo.value)
     assert str(pin_file) in message
     assert "carbon_commit" in message
+
+
+def test_broken_json_rejected(tmp_path):
+    pin_file = tmp_path / "carbon-base.json"
+    pin_file.write_text('{"carbon_branch":')
+    with pytest.raises(CarbonBaseError) as excinfo:
+        load_pin(pin_file)
+    assert "unreadable pin file" in str(excinfo.value)
+
+
+def test_empty_file_rejected(tmp_path):
+    pin_file = tmp_path / "carbon-base.json"
+    pin_file.write_text("")
+    with pytest.raises(CarbonBaseError) as excinfo:
+        load_pin(pin_file)
+    assert "unreadable pin file" in str(excinfo.value)
+
+
+def test_non_dict_top_level_rejected(tmp_path):
+    pin_file = tmp_path / "carbon-base.json"
+    pin_file.write_text(json.dumps([1, 2]))
+    with pytest.raises(CarbonBaseError):
+        load_pin(pin_file)
+
+
+def test_non_string_carbon_commit_rejected(tmp_path):
+    pin = load_pin()
+    pin["carbon_commit"] = 12345
+    pin_file = tmp_path / "carbon-base.json"
+    pin_file.write_text(json.dumps(pin))
+    with pytest.raises(CarbonBaseError):
+        load_pin(pin_file)
+
+
+def test_junk_module_name_folds_into_carbon_base_error(tmp_path):
+    pin_file = _derived_pin(tmp_path, [["", "X"]])
+    with pytest.raises(CarbonBaseError) as excinfo:
+        require_carbon_base(pin_file)
+    assert "import failed" in str(excinfo.value)

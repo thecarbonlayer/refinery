@@ -34,11 +34,23 @@ _REQUIRED_KEYS = ("carbon_branch", "carbon_commit", "required_symbols")
 def load_pin(pin_file: Path = PIN_FILE) -> dict:
     if not pin_file.is_file():
         raise CarbonBaseError(f"missing pin file: {pin_file}")
-    pin = json.loads(pin_file.read_text())
+    try:
+        pin = json.loads(pin_file.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CarbonBaseError(f"unreadable pin file {pin_file}: {exc}") from exc
+
+    if not isinstance(pin, dict):
+        raise CarbonBaseError(f"{pin_file} must contain a JSON object, got {type(pin).__name__}")
 
     missing_keys = [key for key in _REQUIRED_KEYS if key not in pin]
     if missing_keys:
         raise CarbonBaseError(f"{pin_file} is missing required key(s): {', '.join(missing_keys)}")
+
+    for key in ("carbon_branch", "carbon_commit"):
+        if not isinstance(pin[key], str):
+            raise CarbonBaseError(
+                f"{pin_file}'s {key!r} must be a string, got {type(pin[key]).__name__}"
+            )
 
     required_symbols = pin["required_symbols"]
     if not isinstance(required_symbols, list) or not required_symbols:
@@ -62,12 +74,15 @@ def load_pin(pin_file: Path = PIN_FILE) -> dict:
 
 
 def _carbon_head(root: Path = CARBON_ROOT) -> str:
-    out = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "HEAD"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return "unknown"
     return out.stdout.strip() if out.returncode == 0 else "unknown"
 
 
@@ -81,6 +96,12 @@ def require_carbon_base(pin_file: Path = PIN_FILE) -> list[str]:
         except ImportError:
             missing.append(f"{module_name} (module missing)")
             continue
+        except Exception as exc:
+            # A syntax-broken module, a junk module name (e.g. ""), or any other
+            # import-time failure must still fold into the one loud
+            # CarbonBaseError below, not crash raw mid-collection.
+            missing.append(f"{module_name} (import failed: {type(exc).__name__})")
+            continue
         if not hasattr(module, attr):
             missing.append(f"{module_name}.{attr}")
     if missing:
@@ -88,6 +109,7 @@ def require_carbon_base(pin_file: Path = PIN_FILE) -> list[str]:
             f"carbon checkout at {CARBON_ROOT} is not the base this refinery is "
             f"built against.\nMissing: {', '.join(missing)}.\n"
             f"Fix: git -C {CARBON_ROOT} checkout {pin['carbon_branch']}\n"
+            f"(already on that branch? advance it to the pinned commit)\n"
             f"(pinned base: {pin['carbon_branch']} @ {pin['carbon_commit'][:9]}; "
             f"see carbon-base.json)"
         )
