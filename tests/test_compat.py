@@ -168,3 +168,13 @@ def test_malformed_carbon_commit_rejected(tmp_path):
     with pytest.raises(CarbonBaseError) as excinfo:
         load_pin(pin_file)
     assert "carbon_commit" in str(excinfo.value)
+
+
+def test_carbon_base_exit_code_is_distinct():
+    """Exit code 7 is distinct from pytest's reserved 0-5 to avoid misread failures."""
+    from loop.compat import CARBON_BASE_EXIT_CODE
+
+    assert CARBON_BASE_EXIT_CODE == 7, "Must be 7 to avoid pytest's USAGE_ERROR (code 4)"
+    assert CARBON_BASE_EXIT_CODE not in range(6), (
+        "Must not collide with pytest's reserved codes (0-5)"
+    )

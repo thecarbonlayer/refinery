@@ -23,6 +23,7 @@ from pathlib import Path
 from runner.carbon_env import CARBON_ROOT
 
 PIN_FILE = Path(__file__).resolve().parents[1] / "carbon-base.json"
+CARBON_BASE_EXIT_CODE = 7  # Distinct from pytest's reserved 0-5
 
 
 class CarbonBaseError(RuntimeError):

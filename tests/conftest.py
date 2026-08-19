@@ -109,7 +109,8 @@ def pytest_configure(config):
     """
     try:
         import loop.compat  # noqa: F401
+        from loop.compat import CARBON_BASE_EXIT_CODE
     except RuntimeError as exc:
         if type(exc).__name__ == "CarbonBaseError" and type(exc).__module__ == "loop.compat":
-            pytest.exit(f"\n{exc}", returncode=4)
+            pytest.exit(f"\n{exc}", returncode=CARBON_BASE_EXIT_CODE)
         raise
