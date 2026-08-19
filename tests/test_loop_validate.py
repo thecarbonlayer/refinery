@@ -303,3 +303,239 @@ def test_the_real_gate_refuses_to_recurse_into_pytest():
 
     with pytest.raises(RuntimeError, match="must not run inside pytest"):
         run_harness_gates()
+
+
+# --- section calibration: the loader and the rule's section gate (contract §4) ----
+
+
+def _analysis(tmp_path, *, stamped_sha, name="analysis.json"):
+    """A calibration artifact of contract §3's shape, MEASURED by `loop.calibrate`
+    from four fabricated null arms — nothing here is a hand-written threshold.
+
+    `stamped_sha` becomes the arms' `runner_sha` and therefore the artifact's
+    `computed_at_runner_sha`: pass the live hash for a fresh artifact, anything else
+    for one measured by a different verifier.
+    """
+    from loop.calibrate import SUPPORTED, calibrate
+
+    results_dir = tmp_path / f"results-{name}"
+    results_dir.mkdir()
+    fp = {"runner_sha": stamped_sha, "config_version": 8, "model": "m"}
+    arms = {
+        "null-cmp-a": {"A1": 7, "G4": 8, "G5": 9, "G2": 6},
+        "null-cmp-b": {"A1": 7, "G4": 8, "G5": 9, "G2": 6},
+        "null-cmp-c": {"A1": 8, "G4": 8, "G5": 9, "G2": 7},
+        "null-cmp-d": {"A1": 7, "G4": 8, "G5": 9, "G2": 6},
+    }
+    for label, passes in arms.items():
+        (results_dir / f"{label}.json").write_text(
+            json.dumps(
+                {
+                    "fingerprint": fp,
+                    "filter": sorted(passes),
+                    "tasks": {
+                        n: {
+                            "split": "held_out" if n == "G2" else "held_in",
+                            "attempts": 10,
+                            "passes": p,
+                            "pass_fraction": round(p / 10, 4),
+                        }
+                        for n, p in passes.items()
+                    },
+                }
+            )
+        )
+    path = tmp_path / name
+    path.write_text(json.dumps(calibrate(sorted(arms), results_dir, SUPPORTED)))
+    return path
+
+
+# Supported set (A1/G4/G5 held-in, G2 held-out) plus ballast the bound was never
+# measured on. X1 moves in the candidate and is the evidence-grade exclusion.
+_CMP = {
+    "A1": ("held_in", 10, 8),
+    "G4": ("held_in", 10, 8),
+    "G5": ("held_in", 10, 8),
+    "G2": ("held_out", 20, 10),
+    "X1": ("held_in", 20, 10),
+    "X2": ("held_out", 4, 2),
+}
+
+
+def _cmp_results(moved=None):
+    tasks = dict(_CMP)
+    for name, passes in (moved or {}).items():
+        split, attempts, _ = tasks[name]
+        tasks[name] = (split, attempts, passes)
+    return {
+        "fingerprint": dict(FP),
+        "tasks": {
+            n: {
+                "split": s,
+                "attempts": a,
+                "passes": p,
+                "pass_fraction": round(p / a, 4),
+                "outcomes": ["pass"] * p + ["fail"] * (a - p),
+            }
+            for n, (s, a, p) in tasks.items()
+        },
+    }
+
+
+_COVERAGE = {"unreachable_proven": {}, "unreachable_probable": {"X1": -0.05}}
+
+
+def _cmp_candidate(fields):
+    return Candidate(
+        id="cmp",
+        cluster_id="CL-1",
+        proposer="Fable",
+        proposer_detail="test",
+        fields={f: {"old": 1, "new": 2} for f in fields},
+        rationale="r",
+        expected_effect="e",
+        regression_risk="g",
+    )
+
+
+def test_an_absent_calibration_artifact_leaves_the_section_uncalibrated(tmp_path):
+    from loop.validate import section_calibration
+
+    assert section_calibration("compaction", analysis_path=tmp_path / "nothing.json") is None
+
+
+def test_a_calibration_measured_by_a_different_verifier_is_not_a_calibration(tmp_path):
+    """Stale = uncalibrated. `runner_sha` is the verifier's content identity: a bound
+    measured by a different verifier is not a measurement of this one."""
+    from loop.validate import section_calibration
+
+    stale = _analysis(tmp_path, stamped_sha="0" * 64)
+    assert json.loads(stale.read_text())["computed_at_runner_sha"] == "0" * 64
+    assert section_calibration("compaction", analysis_path=stale) is None
+
+
+def test_a_fresh_calibration_loads_exactly_what_the_artifact_measured(tmp_path):
+    from loop.validate import _SECTION_CONFIRM_GUARDS, section_calibration
+    from runner.carbon_env import runner_sha
+
+    path = _analysis(tmp_path, stamped_sha=runner_sha())
+    cal = section_calibration("compaction", analysis_path=path)
+    analysis = json.loads(path.read_text())
+    assert cal is not None
+    assert cal.section == "compaction"
+    assert cal.supported == frozenset(analysis["per_task"])
+    assert cal.noise_in == analysis["section_noise"]["held_in"]
+    assert cal.noise_ho == analysis["section_noise"]["held_out"]
+    assert cal.guards == _SECTION_CONFIRM_GUARDS["compaction"] == frozenset({"A1", "G2", "G5"})
+
+
+def test_compaction_enters_the_rule_only_through_a_fresh_calibration(tmp_path, monkeypatch):
+    """The gate the whole phase turns on, in its three states."""
+    import loop.validate as validate_mod
+    from loop.validate import rule_disposition
+    from runner.carbon_env import runner_sha
+
+    base, cand = _cmp_results(), _cmp_results({"G2": 14, "X1": 9})
+    candidate = _cmp_candidate(["compaction"])
+
+    monkeypatch.setitem(validate_mod._SECTION_ANALYSIS, "compaction", tmp_path / "absent.json")
+    missing = rule_disposition(candidate, base, cand, _COVERAGE)
+    assert missing["applied"] is False
+    assert "not calibrated" in missing["why"]
+
+    monkeypatch.setitem(
+        validate_mod._SECTION_ANALYSIS,
+        "compaction",
+        _analysis(tmp_path, stamped_sha="0" * 64, name="stale.json"),
+    )
+    stale = rule_disposition(candidate, base, cand, _COVERAGE)
+    assert stale["applied"] is False
+    assert "not calibrated" in stale["why"] and "stale" in stale["why"].lower()
+
+    monkeypatch.setitem(
+        validate_mod._SECTION_ANALYSIS,
+        "compaction",
+        _analysis(tmp_path, stamped_sha=runner_sha(), name="fresh.json"),
+    )
+    fresh = rule_disposition(candidate, base, cand, _COVERAGE)
+    assert fresh["applied"] is True
+    assert fresh["outcome"] == "CONFIRM"
+    assert fresh["improved_tasks"] == ["G2"]
+    assert fresh["calibration"]["section"] == "compaction"
+    assert set(fresh["calibration"]["guards"]) <= set(fresh["confirm_tasks"])
+    # The evidence-grade exclusion is context, never a subtraction.
+    assert fresh["raw"]["unreachable_probable"] == ["X1"]
+    assert fresh["raw"]["full_split_delta_in"] < 0
+
+
+def test_compaction_prompt_reaches_the_rule_through_the_same_section(tmp_path, monkeypatch):
+    import loop.validate as validate_mod
+    from loop.validate import _FIELD_SECTION, rule_disposition
+    from runner.carbon_env import runner_sha
+
+    assert _FIELD_SECTION["compaction_prompt"] == _FIELD_SECTION["compaction"] == "compaction"
+    monkeypatch.setitem(
+        validate_mod._SECTION_ANALYSIS,
+        "compaction",
+        _analysis(tmp_path, stamped_sha=runner_sha()),
+    )
+    out = rule_disposition(
+        _cmp_candidate(["compaction_prompt"]), _cmp_results(), _cmp_results({"G2": 14}), _COVERAGE
+    )
+    assert out["applied"] is True and out["calibration"]["section"] == "compaction"
+
+
+def test_an_edit_spanning_two_sections_gets_no_rule_even_when_both_are_calibrated(
+    tmp_path, monkeypatch
+):
+    """Two sections' evidence in one measurement belongs to neither section."""
+    import loop.validate as validate_mod
+    from loop.validate import rule_disposition
+    from runner.carbon_env import runner_sha
+
+    monkeypatch.setitem(
+        validate_mod._SECTION_ANALYSIS,
+        "compaction",
+        _analysis(tmp_path, stamped_sha=runner_sha()),
+    )
+    out = rule_disposition(
+        _cmp_candidate(["compaction", "tool_output"]),
+        _cmp_results(),
+        _cmp_results({"G2": 14}),
+        _COVERAGE,
+    )
+    assert out["applied"] is False
+    assert "compaction" in out["why"] and "tool_output" in out["why"]
+
+
+def test_tool_output_decides_without_consulting_any_calibration_artifact(tmp_path, monkeypatch):
+    """The cardinal constraint of this change, pinned: the calibrated regime must be
+    unreachable from tool_output. No artifact exists for it, none is consulted, and
+    its Decision carries none of the calibrated regime's fields."""
+    import loop.validate as validate_mod
+    from loop.validate import rule_disposition, section_calibration
+
+    assert section_calibration("tool_output") is None
+    monkeypatch.setitem(validate_mod._SECTION_ANALYSIS, "compaction", tmp_path / "absent.json")
+    out = rule_disposition(
+        _cmp_candidate(["tool_output"]), _cmp_results(), _cmp_results({"G2": 14}), _COVERAGE
+    )
+    assert out["applied"] is True
+    assert "calibration" not in out
+    assert set(out["raw"]) == {"delta_in", "delta_ho"}
+
+
+def test_the_dead_max_item_chars_mapping_is_gone_and_says_why(tmp_path):
+    """carbon locked `max_item_chars` out of the editable surface (config v3), so the
+    field can never appear in a candidate — its `tool_output` mapping was dead code
+    pointing at the one calibrated section. The removal keeps a comment: a mapping
+    deleted with no reason recorded is a mapping someone restores."""
+    from pathlib import Path
+
+    import loop.validate as validate_mod
+    from loop.validate import _FIELD_SECTION
+
+    assert "max_item_chars" not in _FIELD_SECTION
+    assert "max_item_chars" in Path(validate_mod.__file__).read_text(), (
+        "the removal must leave a comment saying why"
+    )

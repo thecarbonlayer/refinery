@@ -20,13 +20,14 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from loop.acceptance import ACCEPT
+from loop.acceptance import ACCEPT, SectionCalibration
 from loop.acceptance import evaluate as rule_evaluate
 from loop.artifacts import Candidate, ValidationRecord
+from loop.calibrate import ANALYSIS_PATH as COMPACTION_ANALYSIS_PATH
 from loop.config_edit import CONFIG_REL, apply_candidate
 from loop.observed_coverage import activity_from_rows, partition_deltas, select_attempts
 from loop.surface_sweep import sweep as run_sweep
-from runner.carbon_env import CARBON_ROOT, _git
+from runner.carbon_env import CARBON_ROOT, _git, runner_sha
 from runner.delta import delta
 from runner.suite import RESULTS_DIR
 
@@ -260,13 +261,49 @@ def causal_verdict(d: dict, coverage: dict, baseline: dict) -> dict:
     }
 
 
-# The sections the three-outcome rule may DECIDE. Only `tool_output` has proof-grade
-# exclusions and measured null limits; the six unchanged runs showed two-attempt
-# held-in swings on the unfiltered sections (compaction, retry, file_injection), which
-# the one-attempt allowance would false-reject. Those sections stay on the causal
-# verdict until they have their own supported task sets or fresh null measurements.
-RULE_SECTIONS = frozenset({"tool_output"})
-_FIELD_SECTION = {"tool_output": "tool_output", "max_item_chars": "tool_output"}
+# The sections the three-outcome rule may DECIDE, and on what footing.
+#
+# `tool_output` earned its place from the six unchanged runs: proof-grade exclusions
+# (a task with no tool registry cannot be reached by any value of the knob) and a null
+# measurement the one-attempt allowance fits. It consults NO artifact and is unchanged
+# by everything below.
+#
+# `compaction` is the opposite case and enters on the opposite footing. Those same six
+# runs showed two-attempt held-in swings on it, which a one-attempt allowance would
+# false-reject, and its exclusions can never be proof-grade — `trigger_fraction`
+# belongs to the knob, so the knob can CREATE the activity whose absence would be the
+# exclusion. It therefore enters ONLY through a fresh `SectionCalibration`: a
+# supported task set and bounds measured by null arms at the LIVE runner hash. No
+# artifact, or one measured by a different verifier, and the section falls back to the
+# causal verdict exactly as before (contract §4).
+RULE_SECTIONS = frozenset({"tool_output", "compaction"})
+
+# Sections whose entry into the rule is CONDITIONAL on that fresh calibration. A
+# section outside this set decides on its own footing and never reads an artifact —
+# which is what keeps `tool_output`'s behavior identical to the day it was calibrated.
+_CALIBRATION_REQUIRED = frozenset({"compaction"})
+
+# field -> section. `compaction` and `compaction_prompt` are two fields of ONE section:
+# they change the same mechanism (when the harness compacts, and what it says while
+# doing it) and the calibration measured that mechanism, not either field alone.
+#
+# `max_item_chars` used to map to `tool_output` here and is deliberately GONE: carbon
+# locked it out of the editable surface at config v3 (it survives in the schema for
+# chapter/API compatibility — see `locked_fields` in carbon's surface), so no candidate
+# can ever carry it and the mapping was dead code pointing at the one section the rule
+# decides. Recorded rather than silently deleted: a mapping removed with no reason is a
+# mapping someone restores.
+_FIELD_SECTION = {
+    "tool_output": "tool_output",
+    "compaction": "compaction",
+    "compaction_prompt": "compaction",
+}
+
+# Where each calibrated section's artifact lives. `loop.calibrate` WRITES this path;
+# importing the constant rather than re-spelling it means the writer and the reader
+# cannot drift apart — a divergence would silently leave the section uncalibrated
+# forever, with a perfectly good artifact sitting on disk.
+_SECTION_ANALYSIS = {"compaction": COMPACTION_ANALYSIS_PATH}
 
 # Tasks a confirmation pair must rerun for a section EVEN IF UNMOVED — the section's
 # known trade-off guards and its reachable security checks. Movement-only selection
@@ -279,7 +316,104 @@ _FIELD_SECTION = {"tool_output": "tool_output", "max_item_chars": "tool_output"}
 #        it changes what the model sees and therefore what it does next — and a leak
 #        whose critical outcome appears only under the confirmation's higher attempt
 #        counts must block there, not slip past a movement filter.
-_SECTION_CONFIRM_GUARDS = {"tool_output": frozenset({"E1", "C1", "C2", "C3"})}
+#   A1, G2, G5 — compaction's guards (contract §1). G4 is the MINER and is deliberately
+#        absent: the task a candidate is mined from cannot also be the task that
+#        vouches for it. G2 is the held-out member, so the guard set spans both splits.
+_SECTION_CONFIRM_GUARDS = {
+    "tool_output": frozenset({"E1", "C1", "C2", "C3"}),
+    "compaction": frozenset({"A1", "G2", "G5"}),
+}
+
+
+def _repo_relative(path: Path) -> str:
+    """A path fit to sit in a committed record: repo-relative, or the bare filename.
+
+    This string reaches `iterations/` through the decision's `raw` and its reasons.
+    This repo is public and machine paths have leaked into it twice; nothing here may
+    carry `/Users/...` even when the artifact is a test's temp file.
+    """
+    try:
+        return str(path.resolve().relative_to(EDITOR_ROOT))
+    except ValueError:
+        return path.name
+
+
+def _load_calibration(
+    section: str, analysis_path: Path | None = None
+) -> tuple[SectionCalibration | None, str]:
+    """`section_calibration()` plus the reason it came back empty.
+
+    Split out because "not calibrated" is a fact the record must EXPLAIN — missing
+    artifact, stale artifact, and unmeasured bound are three different states of the
+    world and only one of them is fixed by running the null protocol again.
+    """
+    path = analysis_path or _SECTION_ANALYSIS.get(section)
+    if path is None:
+        return None, f"section {section!r} has no calibration artifact to load"
+    where = _repo_relative(path)
+    if not path.is_file():
+        return None, (
+            f"section {section!r} is not calibrated: no calibration artifact at {where} — "
+            "run the null-arm protocol and `python -m loop.calibrate <arm labels>` first"
+        )
+    try:
+        analysis = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        return None, f"section {section!r} is not calibrated: {where} is unreadable ({exc})"
+    computed, live = analysis.get("computed_at_runner_sha"), runner_sha()
+    if computed != live:
+        return None, (
+            f"section {section!r} is not calibrated: {where} is STALE — it was computed at "
+            f"runner_sha {str(computed)[:12]}, the live runner is {live[:12]}. A bound "
+            "measured by a different verifier is not a measurement of this one, so the "
+            "section falls back to the causal verdict until the arms are re-run."
+        )
+    noise = analysis.get("section_noise") or {}
+    # A split named in `section_noise` with fewer than two arms behind it carries a
+    # bound of 0.0 by construction — no pair, no spread. That is an ABSENCE of
+    # measurement, and installing it as a threshold would give the section a floor of
+    # zero, where any movement at all reads as evidence. `section_noise_arms` is what
+    # tells the two apart; a genuine measured zero names its arms.
+    arms = analysis.get("section_noise_arms") or {}
+    per_task = analysis.get("per_task") or {}
+    unmeasured = [s for s in ("held_in", "held_out") if s not in noise or len(arms.get(s, ())) < 2]
+    if unmeasured or not per_task:
+        return None, (
+            f"section {section!r} is not calibrated: {where} carries no measured bound for "
+            f"{', '.join(unmeasured) or 'any supported task'} — fewer than two arms covered "
+            "it, and a bound no pair of arms produced is an absence, not a measurement of zero"
+        )
+    return (
+        SectionCalibration(
+            section=section,
+            supported=frozenset(per_task),
+            noise_in=float(noise["held_in"]),
+            noise_ho=float(noise["held_out"]),
+            guards=_SECTION_CONFIRM_GUARDS.get(section, frozenset()),
+            source=where,
+        ),
+        "",
+    )
+
+
+def section_calibration(
+    section: str, analysis_path: Path | None = None
+) -> SectionCalibration | None:
+    """The section's measured bounds, or None if it is not calibrated RIGHT NOW.
+
+    None means the section stays on the causal verdict. It is returned for a section
+    with no artifact at all (`tool_output`, which does not want one), for an artifact
+    that has not been written yet, and — the case worth stating out loud — for an
+    artifact whose `computed_at_runner_sha` is not the live runner's hash. Stale is
+    uncalibrated: `runner_sha` is the verifier's content identity, every recorded
+    result is stamped with it, and a noise bound measured by one verifier says nothing
+    about another. Silently reusing it would put an unfalsifiable number at the centre
+    of the rule.
+
+    `analysis_path` is a test seam, mirroring `run_runner=`/`run_gates=` elsewhere in
+    this module; production reads `_SECTION_ANALYSIS`.
+    """
+    return _load_calibration(section, analysis_path)[0]
 
 
 def rule_disposition(candidate: Candidate, baseline: dict, results: dict, coverage: dict) -> dict:
@@ -287,26 +421,58 @@ def rule_disposition(candidate: Candidate, baseline: dict, results: dict, covera
 
     The record carries this either way, so "the rule was not applied" is a stated fact
     with a reason rather than an absence someone reads as an oversight.
+
+    ONE section at a time, always. An edit spanning two sections produces one Δ that
+    belongs to neither section's evidence, and no calibration covers it — that was
+    already true when `tool_output` was the only entry, and it stays true now that the
+    set has two.
     """
     sections = {_FIELD_SECTION.get(f) for f in candidate.fields}
-    if sections != RULE_SECTIONS or None in sections:
+    if len(sections) != 1 or None in sections:
         return {
             "applied": False,
             "why": (
                 f"edited sections {sorted(s or 'unmapped' for s in sections)} are not "
-                "calibrated for the three-outcome rule; only tool_output has proof-grade "
-                "exclusions and measured null limits"
+                "calibrated for the three-outcome rule: it decides ONE calibrated section "
+                f"at a time (calibrated: {', '.join(sorted(RULE_SECTIONS))}), and an "
+                "unmapped field or an edit spanning two sections belongs to no section's "
+                "evidence"
             ),
         }
-    excluded = frozenset(coverage.get("unreachable_proven", ()))
     section = next(iter(sections))
+    if section not in RULE_SECTIONS:
+        return {
+            "applied": False,
+            "why": (
+                f"edited section {section!r} is not calibrated for the three-outcome rule; "
+                f"only {', '.join(sorted(RULE_SECTIONS))} carry the exclusions and measured "
+                "limits the rule reads"
+            ),
+        }
+    calibration, why_not = _load_calibration(section)
+    if calibration is None and section in _CALIBRATION_REQUIRED:
+        return {"applied": False, "why": why_not}
+    excluded = frozenset(coverage.get("unreachable_proven", ()))
     decision = rule_evaluate(
         baseline,
         results,
         excluded=excluded,
         always_confirm=_SECTION_CONFIRM_GUARDS.get(section, frozenset()),
+        calibration=calibration,
+        # Evidence-grade exclusions are CONTEXT on the decision and change no verdict.
+        # Passed only for a calibrated section: `tool_output`'s decisions must stay
+        # exactly what they were when the six null runs calibrated them, down to the
+        # reason strings, and this adds one.
+        unreachable_probable=(
+            frozenset(coverage.get("unreachable_probable", ()))
+            if calibration is not None
+            else frozenset()
+        ),
     )
-    return {"applied": True, **decision.to_json()}
+    out = {"applied": True, **decision.to_json()}
+    if calibration is not None:
+        out["calibration"] = calibration.to_json()
+    return out
 
 
 def _run_runner(label: str, only: list[str] | None, attempts: int | None) -> None:

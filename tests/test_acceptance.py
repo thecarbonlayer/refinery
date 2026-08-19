@@ -793,3 +793,228 @@ def test_a_written_validation_record_can_be_loaded_back_by_the_pr_command(tmp_pa
     fields = {f.name for f in dataclasses.fields(ValidationRecord)}
     loaded = ValidationRecord(**{k: v for k, v in raw.items() if k in fields})
     assert loaded.candidate_id == "c" and loaded.disposition == "PENDING_CONFIRMATION"
+
+
+# --- section calibration: measured bounds for ONE section (contract §4) ----------
+
+
+def _measured_calibration(tmp_path, *, runner_sha_value=None):
+    """A `SectionCalibration` whose every number was MEASURED, never authored here.
+
+    Four null arms of the contract's shape (§2 — nothing changed between them) are
+    written to a scratch results dir, run through `loop.calibrate` (the same code the
+    real protocol runs), and the artifact is loaded back through the production
+    loader. No threshold in the tests below is a literal: each one reads the bound off
+    the calibration and asserts its own movement against that.
+    """
+    import json
+
+    from loop.calibrate import SUPPORTED, calibrate
+    from loop.validate import section_calibration
+    from runner.carbon_env import runner_sha
+
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    fp = {"runner_sha": runner_sha_value or runner_sha(), "config_version": 8, "model": "m"}
+    # A1/G4/G5 held-in, G2 held-out (contract §1). One arm drifts on A1 and G2 — that
+    # drift IS the measurement: the spread with nothing changed between the arms.
+    arms = {
+        "null-cmp-a": {"A1": 7, "G4": 8, "G5": 9, "G2": 6},
+        "null-cmp-b": {"A1": 7, "G4": 8, "G5": 9, "G2": 6},
+        "null-cmp-c": {"A1": 8, "G4": 8, "G5": 9, "G2": 7},
+        "null-cmp-d": {"A1": 7, "G4": 8, "G5": 9, "G2": 6},
+    }
+    for label, passes in arms.items():
+        (results_dir / f"{label}.json").write_text(
+            json.dumps(
+                {
+                    "fingerprint": fp,
+                    "filter": sorted(passes),
+                    "tasks": {
+                        n: {
+                            "split": "held_out" if n == "G2" else "held_in",
+                            "attempts": 10,
+                            "passes": p,
+                            "pass_fraction": round(p / 10, 4),
+                        }
+                        for n, p in passes.items()
+                    },
+                }
+            )
+        )
+    path = tmp_path / "analysis.json"
+    path.write_text(json.dumps(calibrate(sorted(arms), results_dir, SUPPORTED)))
+    return section_calibration("compaction", analysis_path=path)
+
+
+# The supported set (A1, G4, G5 held-in; G2 held-out) plus BALLAST the section's bound
+# was never measured on — X1..X4 exist to make the whole-split mean and the
+# supported-set mean different numbers, which is the entire point of the mechanism.
+_CMP_COUNTS = {
+    "A1": (8, 10, "held_in"),
+    "G4": (8, 10, "held_in"),
+    "G5": (8, 10, "held_in"),
+    "G2": (10, 20, "held_out"),
+    "X1": (2, 3, "held_in"),
+    "X2": (2, 4, "held_out"),
+    "X3": (2, 4, "held_out"),
+    "X4": (2, 4, "held_out"),
+}
+
+
+def _cmp_run(moved=None, **kw):
+    counts = dict(_CMP_COUNTS)
+    for name, passes in (moved or {}).items():
+        _, attempts, split = counts[name]
+        counts[name] = (passes, attempts, split)
+    return _run(counts, **kw)
+
+
+def test_section_calibration_carries_only_values_the_artifact_measured(tmp_path):
+    """Contract §5: no threshold is authored by hand. The dataclass is a view onto the
+    artifact — supported set from `per_task`, bounds from `section_noise` — and its
+    `source` must not carry a machine path into a committed record."""
+    import json
+
+    from loop.acceptance import SectionCalibration
+
+    cal = _measured_calibration(tmp_path)
+    analysis = json.loads((tmp_path / "analysis.json").read_text())
+    assert isinstance(cal, SectionCalibration)
+    assert cal.section == "compaction"
+    assert cal.supported == frozenset(analysis["per_task"])
+    assert cal.noise_in == analysis["section_noise"]["held_in"]
+    assert cal.noise_ho == analysis["section_noise"]["held_out"]
+    assert cal.guards == frozenset({"A1", "G2", "G5"})
+    assert cal.source.endswith("analysis.json") and "/Users/" not in cal.source
+
+
+def test_a_supported_set_gain_above_the_measured_bound_confirms_naming_the_task(tmp_path):
+    """The mechanism's reason for existing: a gain the whole-split rule cannot see.
+
+    G2 is the section's one held-out supported task. It gains four attempts; the
+    whole-split mean divides that by four unsupported tasks the bound was never
+    measured on and lands under the one-attempt allowance, so the UNCALIBRATED rule
+    finds nothing. Judged on the supported-set mean against the MEASURED bound, the
+    same movement is evidence.
+    """
+    cal = _measured_calibration(tmp_path)
+    base, cand = _cmp_run(), _cmp_run({"G2": 14})
+    gain = 14 / 20 - 10 / 20
+    assert gain > cal.noise_ho, "fixture precondition: the movement must clear the bound"
+
+    assert evaluate(base, cand).outcome == REJECT, (
+        "the whole-split rule cannot see this gain — that is what the calibration is for"
+    )
+
+    d = evaluate(base, cand, calibration=cal)
+    assert d.outcome == CONFIRM
+    assert d.evidence_split == "held_out"
+    assert d.improved_tasks == ("G2",), "the evidence basis is the SUPPORTED set"
+    assert d.delta_ho == pytest.approx(gain), "the supported-set mean decides"
+    assert d.threshold_ho == cal.noise_ho and d.threshold_in == cal.noise_in
+    assert d.raw["full_split_delta_ho"] == pytest.approx(gain / 4), (
+        "the whole-split number is still recorded — the rule may not hide what it stopped reading"
+    )
+    assert any("measured section noise" in r for r in d.reasons)
+    assert set(cal.guards) <= set(d.confirm_tasks), "the section's guards ride in unmoved"
+
+
+def test_the_same_movement_below_the_measured_bound_is_within_noise(tmp_path):
+    cal = _measured_calibration(tmp_path)
+    base, cand = _cmp_run(), _cmp_run({"G2": 11})
+    assert 0 < 11 / 20 - 10 / 20 < cal.noise_ho, "fixture precondition: under the bound"
+
+    d = evaluate(base, cand, calibration=cal)
+    assert d.outcome == REJECT
+    assert any("within measured noise" in r for r in d.reasons)
+    assert d.improved_tasks == () and d.evidence_split == ""
+
+
+def test_a_mechanical_security_rise_still_rejects_under_a_calibration(tmp_path):
+    """Whole-suite protections are UNCHANGED by the calibration: the leak is on X2, a
+    task outside the supported set entirely, and it still blocks unconditionally."""
+    cal = _measured_calibration(tmp_path)
+    base = _cmp_run()
+    cand = _cmp_run(
+        {"G2": 14},
+        outcomes={"X2": ["pass", "pass", "critical_failure", "fail"]},
+        security_classes={"X2": [None, None, "mechanical", None]},
+    )
+    d = evaluate(base, cand, calibration=cal)
+    assert d.outcome == REJECT
+    assert "harness storage contract regressed (mechanical): X2 0->1" in d.reasons
+    assert d.security_regressions == {"X2": [0, 1]}
+
+
+def test_a_collapse_on_a_causally_plausible_task_still_vetoes_under_a_calibration(tmp_path):
+    cal = _measured_calibration(tmp_path)
+    base = _cmp_run({"X2": 4})  # X2 at a full pass in the baseline
+    cand = _cmp_run({"G2": 14, "X2": 0})
+    d = evaluate(base, cand, calibration=cal)
+    assert d.outcome == REJECT
+    assert any("full-pass task collapsed to zero: X2" in r for r in d.reasons)
+
+
+def test_evidence_grade_exclusions_are_context_and_never_zero_a_movement(tmp_path):
+    """Contract §4: compaction's exclusions are evidence-grade (`airtight=False` is
+    structural — `trigger_fraction` belongs to the knob), so they are recorded and
+    caveated, never subtracted."""
+    cal = _measured_calibration(tmp_path)
+    base, cand = _cmp_run(), _cmp_run({"G2": 14, "X1": 0})
+    d = evaluate(base, cand, calibration=cal, unreachable_probable={"X1"})
+    assert d.outcome == CONFIRM
+    assert d.excluded == (), "an evidence-grade exclusion is not a proof-grade one"
+    assert d.raw["unreachable_probable"] == ["X1"]
+    assert d.raw["full_split_delta_in"] < 0, "X1's movement is still counted in full"
+    context = " ".join(d.reasons)
+    assert "unreachable_probable" in context and "X1" in context
+    assert "never a verdict" in context, "the caveat must be stated, not just the name"
+
+
+def test_confirmed_honors_the_measured_bound_where_one_attempt_would_have_accepted(tmp_path):
+    """`confirmed()` with the calibration asks the SAME magnitude question the first
+    decision asked: the original gain must repeat above the measured section bound.
+    A one-attempt grain re-derived from the confirmation's own attempt counts (0.02 at
+    50 attempts) would accept a repeat five times smaller than the noise the arms
+    actually measured."""
+    cal = _measured_calibration(tmp_path)
+    first = evaluate(_cmp_run(), _cmp_run({"G2": 14}), calibration=cal)
+    assert first.outcome == CONFIRM and first.improved_tasks == ("G2",)
+    assert set(first.confirm_tasks) == {"A1", "G2", "G5"}
+
+    base_counts = {
+        "A1": (40, 50, "held_in"),
+        "G5": (40, 50, "held_in"),
+        "G2": (25, 50, "held_out"),
+    }
+    weak = {**base_counts, "G2": (28, 50, "held_out")}  # +0.06, under the measured bound
+    assert 0 < 28 / 50 - 25 / 50 < cal.noise_ho
+    fb, fc = _confirm_pair(first, base_counts, weak)
+    assert confirmed(first, fb, fc).outcome == ACCEPT, "one attempt (0.02) would accept it"
+    d = confirmed(first, fb, fc, calibration=cal)
+    assert d.outcome == REJECT
+    assert any("did not repeat" in r for r in d.reasons)
+    assert d.threshold_ho == cal.noise_ho
+
+    strong = {**base_counts, "G2": (34, 50, "held_out")}  # +0.18, over the measured bound
+    assert 34 / 50 - 25 / 50 > cal.noise_ho
+    fb2, fc2 = _confirm_pair(first, base_counts, strong)
+    assert confirmed(first, fb2, fc2, calibration=cal).outcome == ACCEPT
+
+
+def test_a_calibrated_confirmation_still_blocks_a_mechanical_leak(tmp_path):
+    cal = _measured_calibration(tmp_path)
+    first = evaluate(_cmp_run(), _cmp_run({"G2": 14}), calibration=cal)
+    base_counts = {
+        "A1": (40, 50, "held_in"),
+        "G5": (40, 50, "held_in"),
+        "G2": (25, 50, "held_out"),
+    }
+    cand_counts = {**base_counts, "G2": (34, 50, "held_out")}
+    fb, fc = _confirm_pair(first, base_counts, cand_counts)
+    fc["tasks"]["A1"]["outcomes"] = ["pass"] * 40 + ["critical_failure"] + ["fail"] * 9
+    fc["tasks"]["A1"]["security_classes"] = [None] * 40 + ["mechanical"] + [None] * 9
+    d = confirmed(first, fb, fc, calibration=cal)
+    assert d.outcome == REJECT
+    assert "harness storage contract regressed (mechanical): A1 0->1" in d.reasons
