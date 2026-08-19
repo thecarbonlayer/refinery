@@ -389,6 +389,43 @@ def _supported_means(
     return mean("held_in"), mean("held_out")
 
 
+def _require_supported(where: str, calibration: SectionCalibration, *results: dict) -> None:
+    """Every supported task must be present in every arm, or refuse.
+
+    The bound was measured on a mean over a NAMED set of tasks. Computing the mean
+    over whatever subset happens to be present divides by a different denominator and
+    compares the result to a threshold that was never about it — a candidate missing
+    one held-in task of three would be judged on 1/2 of a sum against a bound built
+    from 1/3 of one. Nothing in the record would say so: the number simply moves.
+    A short denominator is a broken comparison, not a smaller one.
+    """
+    present = set.intersection(*(set(r["tasks"]) for r in results))
+    missing = sorted(calibration.supported - present)
+    if missing:
+        raise ValueError(
+            f"{where}: calibrated section {calibration.section!r} is missing supported "
+            f"task(s) {', '.join(missing)} — the bounds in {calibration.source} were "
+            f"measured on the mean over {', '.join(sorted(calibration.supported))}, and a "
+            "mean over a smaller set is not the quantity they bound"
+        )
+
+
+def _collapses(baseline: dict, candidate: dict, excluded: frozenset[str] | set[str]) -> list[str]:
+    """Tasks that went from a full pass to zero — the catastrophic per-task veto.
+
+    Shared by `evaluate()` and `confirmed()` so the two cannot drift: the confirmation
+    is the ONLY road to ACCEPT, so a protection that runs on the first measurement and
+    not on the second is a protection with a door in it.
+    """
+    return sorted(
+        n
+        for n in baseline["tasks"]
+        if n not in excluded
+        and _exact(baseline["tasks"][n]) == 1
+        and _exact(candidate["tasks"][n]) == 0
+    )
+
+
 def evaluate(
     baseline: dict,
     candidate: dict,
@@ -426,6 +463,8 @@ def evaluate(
     verdict; it only adds a line to the record.
     """
     _parity(baseline, candidate)
+    if calibration is not None:
+        _require_supported("evaluate", calibration, baseline, candidate)
     per, d_in, d_ho = _split_deltas(baseline, candidate, excluded)
     splits = {n: t["split"] for n, t in baseline["tasks"].items()}
     # The whole-split means, kept whatever regime decides — see `raw_evidence` below.
@@ -452,13 +491,7 @@ def evaluate(
 
     # Complete-collapse veto, causal-filtered: a collapse the edited section cannot
     # reach is the grader's noise wearing the candidate's name.
-    collapses = sorted(
-        n
-        for n, v in per.items()
-        if n not in excluded
-        and _exact(baseline["tasks"][n]) == 1
-        and _exact(candidate["tasks"][n]) == 0
-    )
+    collapses = _collapses(baseline, candidate, excluded)
     if collapses:
         reasons.append("full-pass task collapsed to zero: " + ", ".join(collapses))
 
@@ -576,8 +609,18 @@ def evaluate(
     # attempt counts — unfiltered, so a behavioral-classed task rides in here too), and
     # every named guard whether it moved or not. `moved` stays WHOLE-SUITE under a
     # calibration: narrowing the judgment must never narrow what gets re-measured.
-    guards = set(always_confirm) | (set(calibration.guards) if calibration is not None else set())
-    confirm = tuple(sorted(moved | set(base_sec) | set(cand_sec) | guards))
+    #
+    # A calibration adds its WHOLE SUPPORTED SET on top of its guards, movement or no
+    # movement. Those tasks are the bound's own basis — the confirmation has to compute
+    # the same supported-set mean this decision was judged on, and it cannot do that
+    # from a subset. G4 (compaction's miner) is the case that makes this concrete: never
+    # a guard, usually unmoved, and one of the four tasks the noise floor is measured
+    # over. Selecting only movers and guards would leave the confirmation unable to
+    # reproduce the very quantity it exists to re-test.
+    required = set(always_confirm)
+    if calibration is not None:
+        required |= set(calibration.guards) | set(calibration.supported)
+    confirm = tuple(sorted(moved | set(base_sec) | set(cand_sec) | required))
     confirm_reasons = [
         f"gain beyond {bound} on {evidence_split.replace('_', '-')} "
         f"(carried by {', '.join(improved)})",
@@ -641,8 +684,24 @@ def confirmed(
     measured bound that made it evidence in the first place, not a one-attempt grain
     re-derived from this run's (deliberately larger) attempt counts, which shrinks as
     attempts grow and would let a confirmation clear a bar the first decision never
-    had to.
+    had to. A calibrated first decision REQUIRES its calibration here; being confirmed
+    against the weaker whole-split bar is not a milder outcome, it is a different
+    question answered under the same word.
     """
+    # Before anything else, including the non-CONFIRM passthrough: a decision that
+    # records `regime == "section_calibration"` was judged against measured bounds, and
+    # arriving here without them is a WIRING failure wherever it happens. Letting it
+    # through would silently re-decide a calibrated claim on the one-attempt grain.
+    if calibration is None and (first.raw or {}).get("regime") == "section_calibration":
+        cal_json = (first.raw or {}).get("calibration") or {}
+        raise ValueError(
+            "this first decision was judged under a section calibration "
+            f"({cal_json.get('section', 'unknown section')}, bounds from "
+            f"{cal_json.get('source', 'an artifact')}) — confirming it without that "
+            "calibration would judge the repeat against the weaker one-attempt bound. "
+            "Load the section's calibration and pass calibration=; if it is no longer "
+            "fresh, the claim needs re-measuring, not re-judging."
+        )
     if first.outcome != CONFIRM:
         return first
     _parity(confirm_baseline, confirm_candidate)
@@ -653,6 +712,11 @@ def confirmed(
             f"confirmation must rerun exactly the selected tasks: "
             f"missing={sorted(want - ran)}, extra={sorted(ran - want)}"
         )
+    if calibration is not None:
+        # Reachable through a record written before `confirm_tasks` carried the whole
+        # supported set: the pair covers exactly what that record asked for, and still
+        # cannot compute the mean the bound belongs to.
+        _require_supported("confirmation", calibration, confirm_baseline, confirm_candidate)
 
     per, d_in, d_ho = _split_deltas(confirm_baseline, confirm_candidate, excluded)
     if calibration is None:
@@ -670,6 +734,17 @@ def confirmed(
         reasons.append(f"held-in regressed in confirmation ({float(d_in):+.4f})")
     if d_ho < -thr_ho:
         reasons.append(f"held-out regressed in confirmation ({float(d_ho):+.4f})")
+
+    # The catastrophic per-task veto, same rule and same wording as `evaluate()`'s
+    # (contract §4 amendment). This function is the ONLY road to ACCEPT, so every
+    # whole-suite protection has to hold here too — and under a calibration the split
+    # means read the supported set alone, which makes a full-pass task outside that set
+    # collapsing to zero invisible to every other check in this function. It is not a
+    # calibration-only guard: an uncalibrated pair could always hide a collapse behind
+    # a split mean that stayed inside its allowance, and now it cannot.
+    collapses = _collapses(confirm_baseline, confirm_candidate, excluded)
+    if collapses:
+        reasons.append("full-pass task collapsed to zero: " + ", ".join(collapses))
 
     # Mechanical: same unconditional veto as evaluate(), same reason wording — it does
     # not matter that this is the confirmation and not the first run.

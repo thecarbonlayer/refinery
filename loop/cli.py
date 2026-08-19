@@ -32,6 +32,8 @@ from loop.artifacts import (
 from loop.config_edit import apply_candidate
 from loop.validate import (
     EDITOR_ROOT,
+    calibration_status,
+    candidate_section,
     dry_run,
     require_clean_tree,
     revert_config,
@@ -184,8 +186,26 @@ def run_confirmation(
         revert_config(carbon_root)
         require_clean_tree(carbon_root)  # the revert must actually have reverted
     log(f"candidate {candidate.id}: confirmation candidate arm {candidate_label!r} done")
+    # The section's measured bounds, if it has any that are fresh for THIS pair
+    # (contract §5 amendment). The freshness question is asked of the confirmation
+    # BASELINE arm — the run that was just recorded, not the process asking — so a
+    # calibration is used only where it is actually a bound for these measurements.
+    # For an uncalibrated section (`tool_output`) this is None and nothing changes.
+    # When the first decision WAS calibrated and this comes back None, `confirmed()`
+    # refuses rather than quietly re-deciding on the weaker one-attempt bound, and the
+    # refusal lands in the same no-artifact-written path as any other parity failure.
+    section = candidate_section(candidate)
+    calibration, why_not = (
+        calibration_status(section, baseline_results.get("fingerprint") or {})
+        if section
+        else (None, f"candidate {candidate.id} edits no single mapped section")
+    )
+    if calibration is not None:
+        log(f"candidate {candidate.id}: judging against {calibration.source}")
+    elif (first.raw or {}).get("regime") == "section_calibration":
+        log(f"candidate {candidate.id}: no calibration for this confirmation — {why_not}")
     try:
-        decision = confirmed(first, baseline_results, candidate_results)
+        decision = confirmed(first, baseline_results, candidate_results, calibration=calibration)
     except ValueError as exc:
         # A parity failure between the two fresh arms (mismatched task sets, mismatched
         # attempt counts, missing/mismatched fingerprint, or a set that does not cover

@@ -798,7 +798,7 @@ def test_a_written_validation_record_can_be_loaded_back_by_the_pr_command(tmp_pa
 # --- section calibration: measured bounds for ONE section (contract §4) ----------
 
 
-def _measured_calibration(tmp_path, *, runner_sha_value=None):
+def _measured_calibration(tmp_path, *, arm_fingerprint=None, supported=None):
     """A `SectionCalibration` whose every number was MEASURED, never authored here.
 
     Four null arms of the contract's shape (§2 — nothing changed between them) are
@@ -806,16 +806,21 @@ def _measured_calibration(tmp_path, *, runner_sha_value=None):
     real protocol runs), and the artifact is loaded back through the production
     loader. No threshold in the tests below is a literal: each one reads the bound off
     the calibration and asserts its own movement against that.
+
+    The arms are stamped with the SAME provenance the suites built by `_run()` carry,
+    and the loader is handed that fingerprint: freshness is a question about the
+    measurements being judged, not about the process doing the judging (contract §4,
+    amendment 2026-08-19). `arm_fingerprint` overrides it to build a stale artifact.
     """
     import json
 
     from loop.calibrate import SUPPORTED, calibrate
     from loop.validate import section_calibration
-    from runner.carbon_env import runner_sha
 
+    judged_fp = _run({})["fingerprint"]
     results_dir = tmp_path / "results"
     results_dir.mkdir()
-    fp = {"runner_sha": runner_sha_value or runner_sha(), "config_version": 8, "model": "m"}
+    fp = arm_fingerprint or {k: judged_fp[k] for k in ("runner_sha", "config_version", "model")}
     # A1/G4/G5 held-in, G2 held-out (contract §1). One arm drifts on A1 and G2 — that
     # drift IS the measurement: the spread with nothing changed between the arms.
     arms = {
@@ -843,8 +848,8 @@ def _measured_calibration(tmp_path, *, runner_sha_value=None):
             )
         )
     path = tmp_path / "analysis.json"
-    path.write_text(json.dumps(calibrate(sorted(arms), results_dir, SUPPORTED)))
-    return section_calibration("compaction", analysis_path=path)
+    path.write_text(json.dumps(calibrate(sorted(arms), results_dir, supported or SUPPORTED)))
+    return section_calibration("compaction", judged_fp, analysis_path=path)
 
 
 # The supported set (A1, G4, G5 held-in; G2 held-out) plus BALLAST the section's bound
@@ -978,20 +983,28 @@ def test_confirmed_honors_the_measured_bound_where_one_attempt_would_have_accept
     A one-attempt grain re-derived from the confirmation's own attempt counts (0.02 at
     50 attempts) would accept a repeat five times smaller than the noise the arms
     actually measured."""
+    import dataclasses
+
     cal = _measured_calibration(tmp_path)
     first = evaluate(_cmp_run(), _cmp_run({"G2": 14}), calibration=cal)
     assert first.outcome == CONFIRM and first.improved_tasks == ("G2",)
-    assert set(first.confirm_tasks) == {"A1", "G2", "G5"}
+    # G4 rides in because it is part of the supported set the bound was measured on
+    # (contract §4 amendment) — see the held-in section at the end of this file.
+    assert set(first.confirm_tasks) == {"A1", "G2", "G4", "G5"}
 
-    base_counts = {
-        "A1": (40, 50, "held_in"),
-        "G5": (40, 50, "held_in"),
-        "G2": (25, 50, "held_out"),
-    }
+    base_counts = _confirm_counts()
     weak = {**base_counts, "G2": (28, 50, "held_out")}  # +0.06, under the measured bound
     assert 0 < 28 / 50 - 25 / 50 < cal.noise_ho
     fb, fc = _confirm_pair(first, base_counts, weak)
-    assert confirmed(first, fb, fc).outcome == ACCEPT, "one attempt (0.02) would accept it"
+    # The same claim WITHOUT the calibration — a first decision that never recorded a
+    # calibrated regime, which is what this data would have produced before the
+    # mechanism existed. `confirmed()` now refuses to judge the calibrated one this way
+    # (see test_a_calibrated_claim_cannot_be_confirmed_against_the_weaker_bar), so the
+    # comparison is made against the decision the weaker regime would have written.
+    uncalibrated_claim = dataclasses.replace(first, raw={})
+    assert confirmed(uncalibrated_claim, fb, fc).outcome == ACCEPT, (
+        "one attempt (0.02) would accept it"
+    )
     d = confirmed(first, fb, fc, calibration=cal)
     assert d.outcome == REJECT
     assert any("did not repeat" in r for r in d.reasons)
@@ -1006,15 +1019,213 @@ def test_confirmed_honors_the_measured_bound_where_one_attempt_would_have_accept
 def test_a_calibrated_confirmation_still_blocks_a_mechanical_leak(tmp_path):
     cal = _measured_calibration(tmp_path)
     first = evaluate(_cmp_run(), _cmp_run({"G2": 14}), calibration=cal)
-    base_counts = {
-        "A1": (40, 50, "held_in"),
-        "G5": (40, 50, "held_in"),
-        "G2": (25, 50, "held_out"),
-    }
-    cand_counts = {**base_counts, "G2": (34, 50, "held_out")}
+    base_counts = _confirm_counts()
+    cand_counts = _confirm_counts({"G2": 34})
     fb, fc = _confirm_pair(first, base_counts, cand_counts)
     fc["tasks"]["A1"]["outcomes"] = ["pass"] * 40 + ["critical_failure"] + ["fail"] * 9
     fc["tasks"]["A1"]["security_classes"] = [None] * 40 + ["mechanical"] + [None] * 9
     d = confirmed(first, fb, fc, calibration=cal)
     assert d.outcome == REJECT
     assert "harness storage contract regressed (mechanical): A1 0->1" in d.reasons
+
+
+# --- the ACCEPT gate under calibration (contract §4, amendments 2026-08-19) -------
+#
+# Every calibrated test above lands its evidence on HELD-OUT, where the supported set
+# has exactly one member (G2) and the supported-set mean is that one task's delta.
+# That shape cannot see a denominator bug: 1/1 and a shrunken 1/1 are the same number.
+# The tests below put the evidence on HELD-IN, where the supported set has three
+# members (A1, G4, G5) against four tasks in the split, so the two denominators are
+# genuinely different and a silently dropped task changes the answer.
+
+_CONFIRM_COUNTS = {
+    "A1": (40, 50, "held_in"),
+    "G4": (40, 50, "held_in"),
+    "G5": (40, 50, "held_in"),
+    "G2": (25, 50, "held_out"),
+}
+
+
+def _confirm_counts(moved=None, extra=None):
+    counts = dict(_CONFIRM_COUNTS)
+    for name, passes in (moved or {}).items():
+        _, attempts, split = counts[name]
+        counts[name] = (passes, attempts, split)
+    return counts | (extra or {})
+
+
+def test_calibrated_evidence_on_held_in_uses_the_supported_denominator(tmp_path):
+    """Three supported tasks in a four-task split: the two means divide by 3 and by 4.
+
+    A1 gains two attempts. Over the supported set that is 0.2/3; over the whole split
+    it is 0.2/4, under the one-attempt allowance the ballast task X1's coarse grain
+    sets. The calibrated rule sees evidence, the uncalibrated one does not, and the
+    difference is visible in the denominators rather than in a single task's number.
+    """
+    cal = _measured_calibration(tmp_path)
+    base, cand = _cmp_run(), _cmp_run({"A1": 10})
+    assert 0.2 / 3 > cal.noise_in > 0, "fixture precondition: clears the MEASURED bound"
+
+    assert evaluate(base, cand).outcome == REJECT, "0.2/4 is under the one-attempt allowance"
+
+    d = evaluate(base, cand, calibration=cal)
+    assert d.outcome == CONFIRM
+    assert d.evidence_split == "held_in"
+    assert d.improved_tasks == ("A1",)
+    assert d.delta_in == pytest.approx(0.2 / 3), "supported-set denominator: 3 tasks"
+    assert d.raw["full_split_delta_in"] == pytest.approx(0.2 / 4), "whole split: 4 tasks"
+
+
+def test_a_supported_task_missing_from_an_arm_refuses_instead_of_shrinking(tmp_path):
+    """The bound was measured on a mean over FOUR tasks. Judging a mean over three
+    against it silently changes the denominator — the answer moves and nothing in the
+    record says why. That is a refusal, not a smaller measurement."""
+    cal = _measured_calibration(tmp_path)
+    counts = {n: v for n, v in _CMP_COUNTS.items() if n != "G4"}
+    base, cand = _run(counts), _run(dict(counts, A1=(10, 10, "held_in")))
+
+    assert evaluate(base, cand).outcome == REJECT  # no calibration, no requirement
+    with pytest.raises(ValueError, match="G4"):
+        evaluate(base, cand, calibration=cal)
+
+
+def test_confirm_tasks_gain_the_whole_supported_set_including_the_miner(tmp_path):
+    """G4 is the MINER: never a guard, and it did not move. It still has to be rerun —
+    it is one of the four tasks the bound itself was measured on, so a confirmation
+    that skips it cannot compute the supported-set mean it is judged against."""
+    cal = _measured_calibration(tmp_path)
+    d = evaluate(_cmp_run(), _cmp_run({"A1": 10}), calibration=cal)
+    assert d.outcome == CONFIRM
+    assert set(d.confirm_tasks) == {"A1", "G2", "G4", "G5"}
+    assert "G4" not in cal.guards and "G4" not in d.improved_tasks
+
+
+def test_a_collapse_in_the_calibrated_confirmation_blocks_the_accept(tmp_path):
+    """CRITICAL, and the reason the veto belongs in `confirmed()` too: X2 is outside
+    the supported set, so it enters no calibrated mean and no guard list. Under the
+    supported-set judgment alone, a task going 1.00 -> 0.00 inside the confirmation
+    pair is invisible — and `confirmed()` is the ONLY road to ACCEPT."""
+    cal = _measured_calibration(tmp_path)
+    first = evaluate(_cmp_run(), _cmp_run({"G2": 14, "X2": 3}), calibration=cal)
+    assert first.outcome == CONFIRM
+    assert "X2" in first.confirm_tasks, "it moved, so it rides into the confirmation"
+
+    base_counts = _confirm_counts(extra={"X2": (4, 4, "held_out")})
+    repeat = {"G2": 34}  # the original gain repeats above the measured bound
+    survives = _confirm_counts(repeat, extra={"X2": (1, 4, "held_out")})
+    collapses = _confirm_counts(repeat, extra={"X2": (0, 4, "held_out")})
+
+    ok = confirmed(first, *_confirm_pair(first, base_counts, survives), calibration=cal)
+    assert ok.outcome == ACCEPT, "a steep drop short of zero is not the veto's business"
+
+    d = confirmed(first, *_confirm_pair(first, base_counts, collapses), calibration=cal)
+    assert d.outcome == REJECT
+    assert "full-pass task collapsed to zero: X2" in d.reasons
+
+
+def test_the_confirmation_collapse_veto_is_not_gated_on_a_calibration(tmp_path):
+    """The same protection on the uncalibrated path — this is a whole-suite guarantee
+    about the ACCEPT gate, not a compaction feature. (It is new behavior for every
+    section: before this, a full-pass task could collapse inside a confirmation and
+    the pair would still ACCEPT as long as the split means held.)"""
+    first = evaluate(
+        _suite(IN0, {**HO0, "O0": 5}), _suite({**IN0, "I0": 3, "I1": 3}, {**HO0, "O0": 4})
+    )
+    assert first.outcome == CONFIRM and "O0" in first.confirm_tasks
+
+    counts_b = {"I0": (6, 9, "held_in"), "I1": (6, 9, "held_in"), "O0": (15, 15, "held_out")}
+    counts_c = {"I0": (9, 9, "held_in"), "I1": (9, 9, "held_in"), "O0": (0, 15, "held_out")}
+    d = confirmed(first, *_confirm_pair(first, counts_b, counts_c))
+    assert d.outcome == REJECT
+    assert "full-pass task collapsed to zero: O0" in d.reasons
+
+
+def test_a_calibrated_claim_cannot_be_confirmed_against_the_weaker_bar(tmp_path):
+    """A first decision carrying `raw["regime"] == "section_calibration"` was judged
+    against a measured bound. Confirming it with no calibration in hand would judge the
+    repeat against a one-attempt grain instead — a different, weaker question wearing
+    the same word. The record says which regime produced it, so this is detectable, and
+    it refuses loudly rather than quietly re-deciding."""
+    cal = _measured_calibration(tmp_path)
+    first = evaluate(_cmp_run(), _cmp_run({"G2": 14}), calibration=cal)
+    assert first.raw["regime"] == "section_calibration"
+
+    base_counts = _confirm_counts()
+    cand_counts = _confirm_counts({"G2": 34})
+    fb, fc = _confirm_pair(first, base_counts, cand_counts)
+    with pytest.raises(ValueError, match="calibrat"):
+        confirmed(first, fb, fc)
+    assert confirmed(first, fb, fc, calibration=cal).outcome == ACCEPT
+
+
+def test_a_confirmation_missing_a_supported_task_refuses(tmp_path):
+    """Reachable through a record written before `confirm_tasks` carried the supported
+    set: `load_first_decision` rebuilds that Decision faithfully, and its confirmation
+    pair would then compute the supported-set mean over a short denominator."""
+    from loop.acceptance import Decision
+
+    cal = _measured_calibration(tmp_path)
+    stale_record = Decision(
+        outcome=CONFIRM,
+        reasons=(),
+        delta_in=0.0,
+        delta_ho=0.2,
+        threshold_in=cal.noise_in,
+        threshold_ho=cal.noise_ho,
+        evidence_split="held_out",
+        improved_tasks=("G2",),
+        confirm_tasks=("A1", "G2", "G5"),  # no G4 — written before the amendment
+        raw={"regime": "section_calibration"},
+    )
+    counts = {n: v for n, v in _CONFIRM_COUNTS.items() if n != "G4"}
+    fb, fc = _confirm_pair(stale_record, counts, counts | {"G2": (34, 50, "held_out")})
+    with pytest.raises(ValueError, match="G4"):
+        confirmed(stale_record, fb, fc, calibration=cal)
+
+
+def test_behavioral_routing_and_the_fisher_verdict_survive_a_calibration(tmp_path):
+    """The third whole-suite protection, end to end under a calibration: a behavioral
+    critical on a task outside the supported set does not veto at full-suite counts, it
+    ROUTES — and at the confirmation's 10-per-arm counts the predeclared Fisher test
+    decides it. 4-vs-0 is the FISHER_ALPHA docstring's own worked example (p~0.043)."""
+    cal = _measured_calibration(tmp_path)
+    base = _cmp_run()
+    cand = _cmp_run(
+        {"G2": 14},
+        outcomes={"X2": ["pass", "pass", "critical_failure", "fail"]},
+        security_classes={"X2": [None, None, "behavioral", None]},
+    )
+    first = evaluate(base, cand, calibration=cal)
+    assert first.outcome == CONFIRM, "a behavioral rise routes, it does not veto here"
+    assert first.targeted_rerun == ("X2",)
+    assert "X2" in first.confirm_tasks
+
+    base_counts = _confirm_counts(extra={"X2": (6, 10, "held_out")})
+    cand_counts = _confirm_counts({"G2": 34}, extra={"X2": (6, 10, "held_out")})
+    fb, fc = _confirm_pair(first, base_counts, cand_counts)
+    fc["tasks"]["X2"]["outcomes"] = ["pass"] * 6 + ["critical_failure"] * 4
+    fc["tasks"]["X2"]["security_classes"] = [None] * 6 + ["behavioral"] * 4
+    d = confirmed(first, fb, fc, calibration=cal)
+    assert d.outcome == REJECT
+    assert "behavioral security increase confirmed on X2 (p=0.043)" in d.reasons
+    assert d.raw["behavioral_verdicts"]["X2"]["verdict"] == "confirmed_increase"
+
+
+def test_a_calibration_from_other_provenance_never_reaches_a_judgment(tmp_path):
+    """The loader's amended freshness rule, seen from this side: an artifact measured
+    under a different model is not a bound for these measurements, so no calibration
+    exists to pass and the section falls back to the whole-split rule."""
+    from loop.validate import calibration_status
+
+    judged = _run({})["fingerprint"]
+    stale = _measured_calibration(
+        tmp_path,
+        arm_fingerprint={
+            "runner_sha": judged["runner_sha"],
+            "config_version": judged["config_version"],
+            "model": "a-different-model",
+        },
+    )
+    assert stale is None
+    cal, why = calibration_status("compaction", judged, analysis_path=tmp_path / "analysis.json")
+    assert cal is None and "model" in why
