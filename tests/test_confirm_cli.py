@@ -174,20 +174,21 @@ def test_per_task_matches_the_canned_pass_counts(fake_carbon, it_dir):
 
 
 def test_the_config_is_applied_for_the_candidate_arm_and_reverted_after(fake_carbon, it_dir):
-    """The candidate arm must actually run against the EDITED config, or a
-    confirmation would just rerun the same state twice under two different labels."""
+    """The candidate arm must actually run against the EDITED config and the baseline
+    arm against the UNMODIFIED one, or a confirmation would just rerun the same state
+    twice under two different labels — this is the property the whole apply/revert
+    design exists for, pinned on both arms, not just the edited one."""
     _write_validation_record(it_dir, CANDIDATE.id, FIRST_CONFIRM)
     base_arm = _arm({"E4": (0, 10, "held_out"), "G5": (4, 10, "held_in")})
     cand_arm = _arm({"E4": (10, 10, "held_out"), "G5": (8, 10, "held_in")})
     seen_config = {}
 
     def fake_runner(label, only, attempts):
+        live = json.loads((fake_carbon / "harness" / "harness_config.json").read_text())
         if label == "confirm-cand":
-            seen_config["max_tokens"] = json.loads(
-                (fake_carbon / "harness" / "harness_config.json").read_text()
-            )["max_tokens"]
+            seen_config["max_tokens"] = live["max_tokens"]
             return cand_arm
-        seen_config.setdefault("base_max_tokens", None)
+        seen_config["base_max_tokens"] = live["max_tokens"]
         return base_arm
 
     run_confirmation(
@@ -201,6 +202,9 @@ def test_the_config_is_applied_for_the_candidate_arm_and_reverted_after(fake_car
         log=lambda *_: None,
     )
 
+    # baseline arm ran on the config AS RECORDED — unmodified, not yet touched.
+    assert seen_config["base_max_tokens"] == OLD_MT
+    # candidate arm ran on the config WITH THE EDIT APPLIED.
     assert seen_config["max_tokens"] == NEW_MT
     # reverted afterwards
     assert (
@@ -259,14 +263,18 @@ def test_stage_defaults_to_paired_confirmation():
     assert rec.stage == "paired_confirmation"
 
 
-# --- confirm-set mismatch surfaces confirmed()'s REJECT, not a crash ------------
+# --- confirm-set / parity mismatch fails loudly, never as a recorded REJECT -----
 
 
-def test_arm_mismatch_is_a_reject_not_a_crash(fake_carbon, it_dir):
+def test_arm_mismatch_fails_loudly_with_no_artifact_written(fake_carbon, it_dir):
     """The two fresh arms disagreeing on which tasks they measured is exactly the
-    hole `acceptance.confirmed()` raises `ValueError` on (`_parity`). The CLI must
-    turn that into a REJECTED record, not let the whole `confirm` invocation die with
-    an unhandled traceback and no artifact to show for the run that just happened."""
+    hole `acceptance.confirmed()` raises `ValueError` on (`_parity`) — the pair was
+    never actually MEASURED. Refusal is the feature here (mirrors `runner.delta`'s
+    refusal to compare filtered/mismatched results, per AGENTS.md): a written
+    `outcome: REJECT` is reserved for a genuine `confirmed()` verdict, and stamping
+    one on an unmeasured pair would be a false measurement claim. The failure must be
+    loud — `SystemExit` naming the cause — and must leave no `confirmation-*.json`
+    behind to be mistaken for a real decision."""
     _write_validation_record(it_dir, CANDIDATE.id, FIRST_CONFIRM)
     base_arm = _arm({"E4": (0, 10, "held_out"), "G5": (4, 10, "held_in")})
     cand_arm = _arm({"E4": (10, 10, "held_out")})  # G5 missing entirely
@@ -274,22 +282,22 @@ def test_arm_mismatch_is_a_reject_not_a_crash(fake_carbon, it_dir):
     def fake_runner(label, only, attempts):
         return base_arm if label == "confirm-base" else cand_arm
 
-    record = run_confirmation(
-        CANDIDATE,
-        it_dir,
-        baseline_label="confirm-base",
-        candidate_label="confirm-cand",
-        attempts=10,
-        carbon_root=fake_carbon,
-        run_runner=fake_runner,
-        log=lambda *_: None,
-    )
+    with pytest.raises(SystemExit) as excinfo:
+        run_confirmation(
+            CANDIDATE,
+            it_dir,
+            baseline_label="confirm-base",
+            candidate_label="confirm-cand",
+            attempts=10,
+            carbon_root=fake_carbon,
+            run_runner=fake_runner,
+            log=lambda *_: None,
+        )
 
-    assert record.confirmation["outcome"] == REJECT
-    assert "did not match" in record.confirmation["reasons"][0]
-    # per_task stays defensive: only tasks BOTH arms actually measured are recorded.
-    assert "G5" not in record.per_task
-    assert record.per_task["E4"] == {"base": [0, 10], "cand": [10, 10]}
+    message = str(excinfo.value)
+    assert "confirmation could not be measured" in message
+    assert "task sets differ" in message  # the underlying ValueError's cause, named
+    assert list(it_dir.glob("confirmation-*.json")) == []
 
 
 # --- the refusal case: no first CONFIRM -------------------------------------------

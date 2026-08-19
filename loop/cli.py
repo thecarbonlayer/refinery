@@ -19,7 +19,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from loop.acceptance import CONFIRM, REJECT, Decision, confirmed
+from loop.acceptance import CONFIRM, Decision, confirmed
 from loop.artifacts import (
     Candidate,
     Cluster,
@@ -188,22 +188,15 @@ def run_confirmation(
         decision = confirmed(first, baseline_results, candidate_results)
     except ValueError as exc:
         # A parity failure between the two fresh arms (mismatched task sets, mismatched
-        # attempt counts, or a set that does not cover exactly `first.confirm_tasks`)
-        # is still a confirmation OUTCOME the record must carry, not an unhandled
-        # crash that drops the run on the floor with no artifact to show for it.
-        decision = Decision(
-            outcome=REJECT,
-            reasons=(f"confirmation arms did not match: {exc}",),
-            delta_in=0.0,
-            delta_ho=0.0,
-            threshold_in=0.0,
-            threshold_ho=0.0,
-            excluded=first.excluded,
-            evidence_split=first.evidence_split,
-            improved_tasks=first.improved_tasks,
-            confirm_tasks=first.confirm_tasks,
-            raw={"stage": "confirmation", "error": str(exc)},
-        )
+        # attempt counts, missing/mismatched fingerprint, or a set that does not cover
+        # exactly `first.confirm_tasks`) means the pair was never actually MEASURED —
+        # this is an infrastructure refusal, the same family as `runner.delta`'s own
+        # refusal to compare filtered or mismatched results (see AGENTS.md: "the
+        # refusal is the feature"). Writing a REJECT record here would claim a
+        # measurement that never happened, so nothing is written: fail loud instead,
+        # with the cause named, and leave no confirmation-*.json behind to be mistaken
+        # for a real verdict.
+        raise SystemExit(f"confirmation could not be measured: {exc}") from exc
     log(f"candidate {candidate.id}: confirmation outcome {decision.outcome}")
     return ConfirmationRecord(
         candidate_id=candidate.id,
