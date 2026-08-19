@@ -28,10 +28,37 @@ class CarbonBaseError(RuntimeError):
     """The sibling carbon checkout cannot run this refinery."""
 
 
+_REQUIRED_KEYS = ("carbon_branch", "carbon_commit", "required_symbols")
+
+
 def load_pin(pin_file: Path = PIN_FILE) -> dict:
     if not pin_file.is_file():
         raise CarbonBaseError(f"missing pin file: {pin_file}")
-    return json.loads(pin_file.read_text())
+    pin = json.loads(pin_file.read_text())
+
+    missing_keys = [key for key in _REQUIRED_KEYS if key not in pin]
+    if missing_keys:
+        raise CarbonBaseError(f"{pin_file} is missing required key(s): {', '.join(missing_keys)}")
+
+    required_symbols = pin["required_symbols"]
+    if not isinstance(required_symbols, list) or not required_symbols:
+        raise CarbonBaseError(
+            f"{pin_file} has an empty or non-list required_symbols; "
+            "an empty list would make the compatibility check a silent no-op"
+        )
+    for entry in required_symbols:
+        is_well_formed = (
+            isinstance(entry, (list, tuple))
+            and len(entry) == 2
+            and all(isinstance(part, str) for part in entry)
+        )
+        if not is_well_formed:
+            raise CarbonBaseError(
+                f"{pin_file} has a malformed required_symbols entry: {entry!r} "
+                "(expected a 2-item [module, attr] list of strings)"
+            )
+
+    return pin
 
 
 def _carbon_head(root: Path = CARBON_ROOT) -> str:

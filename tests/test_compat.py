@@ -56,3 +56,33 @@ def test_missing_pin_file_fails(tmp_path):
     with pytest.raises(CarbonBaseError) as excinfo:
         require_carbon_base(tmp_path / "nope.json")
     assert "missing pin file" in str(excinfo.value)
+
+
+def test_empty_required_symbols_rejected(tmp_path):
+    pin_file = _derived_pin(tmp_path, [])
+    with pytest.raises(CarbonBaseError) as excinfo:
+        load_pin(pin_file)
+    message = str(excinfo.value)
+    assert str(pin_file) in message
+    assert "required_symbols" in message
+
+
+def test_malformed_entry_wrong_arity_rejected(tmp_path):
+    pin_file = _derived_pin(tmp_path, [["a", "b", "c"]])
+    with pytest.raises(CarbonBaseError) as excinfo:
+        load_pin(pin_file)
+    message = str(excinfo.value)
+    assert str(pin_file) in message
+    assert "required_symbols" in message
+
+
+def test_missing_required_key_rejected(tmp_path):
+    pin = load_pin()
+    del pin["carbon_commit"]
+    pin_file = tmp_path / "carbon-base.json"
+    pin_file.write_text(json.dumps(pin))
+    with pytest.raises(CarbonBaseError) as excinfo:
+        load_pin(pin_file)
+    message = str(excinfo.value)
+    assert str(pin_file) in message
+    assert "carbon_commit" in message
