@@ -225,6 +225,36 @@ def test_agent_metrics_verified_false_is_a_present_zero_not_an_absent_key():
     assert recorded["verified_pass"] == 0.0
 
 
+def test_agent_metrics_token_split_respects_the_include_cost_gate():
+    """Orchestrator fix: a scripted/fault-injection provider's ``result.usage`` is
+    non-empty structural zeros (carbon's ``Tracer.totals()`` always returns a
+    fully-keyed dict, real call or not) — exactly the phantom accounting
+    ``include_cost=False`` exists to exclude for ``tokens``/``cost``.
+    ``tokens_in``/``tokens_out`` must sit behind the SAME gate, not just
+    ``result.usage`` being non-empty. ``verified_pass``/``stop_*`` are unaffected —
+    they carry no cost signal and stay ungated."""
+    agent = _FakeAgent()
+    result = _StubResult(
+        turns=1,
+        stop_reason="stop",
+        usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        verified=None,
+        compactions=0,
+    )
+    excluded = agent_metrics(agent, result, include_cost=False)
+    assert "tokens_in" not in excluded
+    assert "tokens_out" not in excluded
+    assert "tokens" not in excluded
+    assert "cost" not in excluded
+    # stop_tool_budget/stop_deadline carry no cost signal and stay ungated.
+    assert "stop_tool_budget" in excluded
+    assert "stop_deadline" in excluded
+
+    included = agent_metrics(agent, result, include_cost=True)
+    assert included["tokens_in"] == 10.0
+    assert included["tokens_out"] == 5.0
+
+
 def test_agent_metrics_omits_only_cost_fields_when_asked():
     """Assert both key sets explicitly. Defining the expectation in terms of the
     full set makes any SYMMETRIC change pass — deleting a metric from both sides
