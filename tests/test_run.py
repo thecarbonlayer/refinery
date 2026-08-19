@@ -37,6 +37,8 @@ def _spec(name="A1", split="held_in", passed=True, metrics=None):
         split=split,
         cluster="A",
         expected_baseline="pass",
+        primitive="compaction",
+        alias=None,
         run=lambda: Attempt(
             passed,
             "pass" if passed else "fail",
@@ -153,8 +155,38 @@ def test_attempt_metrics_are_persisted(tmp_path):
         attempts=1,
         log=lambda *a: None,
     )
-    assert tr.records[0]["metrics"] == {"tokens": 123.0, "tool_calls": 4.0}
+    # duration_s is now injected into every attempt's metrics (run.py's
+    # setdefault) alongside whatever the task itself reported.
+    metrics = tr.records[0]["metrics"]
+    assert metrics["tokens"] == 123.0
+    assert metrics["tool_calls"] == 4.0
+    assert "duration_s" in metrics
     assert json.loads(jsonl.read_text())["metrics"]["tokens"] == 123.0
+
+
+def test_recorded_attempt_carries_primitive_alias_and_duration(tmp_path):
+    """The two other additive fields the record gains alongside duration_s:
+    ``primitive``/``alias`` are copied straight off the spec, and duration_s
+    lands in ``metrics`` even for a task that reported no metrics of its own."""
+    jsonl = tmp_path / "meta.jsonl"
+    spec = TaskSpec(
+        name="A1",
+        split="held_in",
+        cluster="A",
+        expected_baseline="pass",
+        primitive="compaction",
+        alias="CMP-1",
+        run=lambda: Attempt(True, "pass", "ok"),
+    )
+    tr = run_task(spec, FP, jsonl, attempts=1, log=lambda *a: None)
+    rec = tr.records[0]
+    assert rec["primitive"] == "compaction"
+    assert rec["alias"] == "CMP-1"
+    assert isinstance(rec["metrics"]["duration_s"], float)
+    on_disk = json.loads(jsonl.read_text())
+    assert on_disk["primitive"] == "compaction"
+    assert on_disk["alias"] == "CMP-1"
+    assert "duration_s" in on_disk["metrics"]
 
 
 def test_suite_aggregates_task_equal_weight_metrics(tmp_path):
@@ -190,7 +222,15 @@ def test_task_metric_mean_covers_only_reporting_attempts(tmp_path):
             return Attempt(True, "pass", "ok", metrics={"tokens": 900.0})
         return Attempt(False, "error", "boom", metrics={})
 
-    spec = TaskSpec(name="A1", split="held_in", cluster="A", expected_baseline="pass", run=run)
+    spec = TaskSpec(
+        name="A1",
+        split="held_in",
+        cluster="A",
+        expected_baseline="pass",
+        primitive="compaction",
+        alias=None,
+        run=run,
+    )
     results = run_suite(
         [spec],
         label="attempts",
@@ -202,7 +242,11 @@ def test_task_metric_mean_covers_only_reporting_attempts(tmp_path):
     task = results["tasks"]["A1"]
     assert task["attempts"] == 3
     assert task["metrics"]["tokens"] == 900.0  # not 300.0
-    assert task["metric_attempt_counts"] == {"tokens": 1}
+    # duration_s is now injected into EVERY attempt's metrics (run.py's
+    # setdefault), including the two that raised — it is deliberately the
+    # metric that reports on every attempt regardless of outcome, unlike
+    # `tokens`, which only the one good attempt reports.
+    assert task["metric_attempt_counts"] == {"tokens": 1, "duration_s": 3}
 
 
 def test_suite_to_delta_carries_attempt_drift_end_to_end(tmp_path):
@@ -229,8 +273,12 @@ def test_suite_to_delta_carries_attempt_drift_end_to_end(tmp_path):
     def suite(label, good):
         return run_suite(
             [
-                TaskSpec("A1", "held_in", "A", "pass", flaky(good)),
-                TaskSpec("B1", "held_in", "B", "pass", flaky(good)),
+                TaskSpec(
+                    "A1", "held_in", "A", "pass", flaky(good), primitive="compaction", alias=None
+                ),
+                TaskSpec(
+                    "B1", "held_in", "B", "pass", flaky(good), primitive="verification", alias=None
+                ),
             ],
             label=label,
             attempts=3,
@@ -241,8 +289,11 @@ def test_suite_to_delta_carries_attempt_drift_end_to_end(tmp_path):
 
     base = suite("base", good=3)  # 2 tasks x 3 reporting attempts
     cand = suite("cand", good=1)  # 2 tasks x 1 reporting attempt
-    assert base["summary"]["metric_attempt_counts"] == {"tokens": 6}
-    assert cand["summary"]["metric_attempt_counts"] == {"tokens": 2}
+    # duration_s reports on every attempt regardless of outcome (run.py's
+    # setdefault), so its count is the full 6 attempts on BOTH sides — only
+    # `tokens` (reported by "good" attempts alone) reveals the drift.
+    assert base["summary"]["metric_attempt_counts"] == {"tokens": 6, "duration_s": 6}
+    assert cand["summary"]["metric_attempt_counts"] == {"tokens": 2, "duration_s": 6}
     d = delta(base, cand)
     # Same task count on both sides, so ONLY the attempt counts reveal the change.
     assert d["metric_task_counts"]["tokens"] == {"baseline": 2, "candidate": 2}
@@ -273,7 +324,9 @@ def test_suite_metric_mean_excludes_tasks_that_cannot_report(tmp_path):
     )
     assert results["summary"]["metrics"]["tokens"] == 100.0  # over 1 task, not 50.0 over 2
     assert results["summary"]["metrics"]["retries"] == 2.0
-    assert results["summary"]["metric_task_counts"] == {"retries": 2, "tokens": 1}
+    # duration_s reports for both tasks (run.py's setdefault applies regardless
+    # of what the task itself measured), unlike tokens/retries above.
+    assert results["summary"]["metric_task_counts"] == {"retries": 2, "tokens": 1, "duration_s": 2}
 
 
 def test_load_done_tolerates_malformed_final_line(tmp_path):
@@ -417,7 +470,7 @@ def test_run_suite_resumes_after_additive_carbon_bump(tmp_path):
             ran["n"] += 1
             return Attempt(True, "pass", "d")
 
-        return TaskSpec("A1", "held_in", "A", "pass", run=run)
+        return TaskSpec("A1", "held_in", "A", "pass", primitive="compaction", alias=None, run=run)
 
     results = run_suite(
         [counting_spec()],
@@ -442,7 +495,7 @@ def test_run_suite_refuses_stale_baseline_up_front(tmp_path):
             ran["n"] += 1
             return Attempt(True, "pass", "d")
 
-        return TaskSpec("A1", "held_in", "A", "pass", run=run)
+        return TaskSpec("A1", "held_in", "A", "pass", primitive="compaction", alias=None, run=run)
 
     with pytest.raises(StaleBaseline, match="behavior_key"):
         run_suite(
@@ -505,7 +558,15 @@ def test_summary_carries_security_classes_and_session_env(tmp_path):
             return Attempt(False, "critical_failure", "leak", security_class="behavioral")
         return Attempt(True, "pass", "ok")
 
-    spec = TaskSpec(name="C1", split="held_in", cluster="C", expected_baseline="pass", run=run)
+    spec = TaskSpec(
+        name="C1",
+        split="held_in",
+        cluster="C",
+        expected_baseline="pass",
+        primitive="safety",
+        alias=None,
+        run=run,
+    )
     results = run_suite(
         [spec],
         label="secclass",

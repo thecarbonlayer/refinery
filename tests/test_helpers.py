@@ -151,6 +151,80 @@ def test_agent_metrics_reports_plain_attribute_counters():
     assert recorded["model_attempts"] == 7.0
 
 
+class _StubResult:
+    """Stand-in for carbon's ``RunResult`` (harness/result.py) — VALUE-level
+    only, since ``agent_metrics`` reads plain attributes off it, never
+    ``getattr`` with a default (that pattern is reserved for the AGENT reads
+    the pin tests above hold to a real carbon; a RunResult is a value object
+    this module constructs itself and can rely on having every field)."""
+
+    def __init__(self, **overrides):
+        self.turns = 0
+        self.stop_reason = "stop"
+        self.usage: dict = {}
+        self.verified: bool | None = None
+        self.compactions = 0
+        self.__dict__.update(overrides)
+
+
+def test_agent_metrics_with_result_reads_the_public_seam():
+    """Contract §5's worked example: a stub RunResult carrying every new field
+    at once, checked against every metric key that reads it."""
+    agent = _FakeAgent()
+    result = _StubResult(
+        turns=3,
+        stop_reason="tool_budget",
+        usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        verified=True,
+        compactions=2,
+    )
+    recorded = agent_metrics(agent, result)
+    assert recorded["model_attempts"] == 3.0
+    assert recorded["stop_tool_budget"] == 1.0
+    assert recorded["stop_deadline"] == 0.0
+    assert recorded["tokens_in"] == 10.0
+    assert recorded["tokens_out"] == 5.0
+    assert recorded["compactions"] == 2.0
+    assert recorded["verified_pass"] == 1.0
+
+
+def test_agent_metrics_without_result_matches_the_legacy_output():
+    """The contract's compatibility promise: omitting ``result`` entirely (every
+    legacy caller and every pre-existing test above) must reproduce today's
+    output byte-for-byte — no new keys leak in just because the parameter
+    exists now."""
+    agent = _FakeAgent(compaction_count=3, retry_count=2, _turn_model_calls=7)
+    without_arg = agent_metrics(agent)
+    with_explicit_none = agent_metrics(agent, None)
+    assert with_explicit_none == without_arg
+    new_keys = {"stop_tool_budget", "stop_deadline", "tokens_in", "tokens_out", "verified_pass"}
+    assert not (new_keys & set(without_arg)), f"legacy call leaked new keys: {without_arg}"
+
+
+def test_agent_metrics_omits_verified_pass_and_token_split_when_absent():
+    """``verified_pass`` is emitted ONLY when a verification gate actually ran
+    this turn (``result.verified is not None``); ``tokens_in``/``tokens_out``
+    only when ``result.usage`` is non-empty. Both absent here on purpose."""
+    agent = _FakeAgent()
+    result = _StubResult(turns=1, stop_reason="stop", usage={}, verified=None, compactions=0)
+    recorded = agent_metrics(agent, result)
+    assert "verified_pass" not in recorded
+    assert "tokens_in" not in recorded
+    assert "tokens_out" not in recorded
+    # stop_tool_budget/stop_deadline are unconditional with a result, unlike those three.
+    assert recorded["stop_tool_budget"] == 0.0
+    assert recorded["stop_deadline"] == 0.0
+
+
+def test_agent_metrics_verified_false_is_a_present_zero_not_an_absent_key():
+    """A verification gate that ran and FAILED must record ``verified_pass=0``,
+    not omit the key — omission is reserved for "no gate ran at all"."""
+    agent = _FakeAgent()
+    result = _StubResult(turns=1, stop_reason="stop", usage={}, verified=False, compactions=0)
+    recorded = agent_metrics(agent, result)
+    assert recorded["verified_pass"] == 0.0
+
+
 def test_agent_metrics_omits_only_cost_fields_when_asked():
     """Assert both key sets explicitly. Defining the expectation in terms of the
     full set makes any SYMMETRIC change pass — deleting a metric from both sides

@@ -237,8 +237,31 @@ def recording_tool(tool, sink: list[str]):
     return _dataclass_replace(tool, func=recording)
 
 
-def agent_metrics(agent, *, include_cost: bool = True) -> dict[str, float]:
+def agent_metrics(agent, result=None, *, include_cost: bool = True) -> dict[str, float]:
     """Quality/cost telemetry used to compare knob candidates, never to grade truth.
+
+    ``result`` (Phase 1 measurement contract §5), when given, is the ``RunResult``
+    the task's own ``agent.run(...)`` call for its LAST turn already produced.
+    ``model_attempts``/``incomplete_responses``/``compactions`` then read that
+    public seam (``result.turns``/``result.stop_reason``/``result.compactions``)
+    instead of carbon's privates — the same values those privates would have held
+    right after that turn, since both are reset per-turn on the agent side too, so
+    this is a source swap, not a semantic change. Four metric keys become
+    available that no private attribute ever exposed:
+    ``stop_tool_budget``/``stop_deadline`` (always emitted alongside
+    ``incomplete_responses`` when a result is given — 0 or 1, never omitted),
+    ``tokens_in``/``tokens_out`` (from ``result.usage``, emitted only when that
+    dict is non-empty — a tracerless agent reports empty usage; a TRACED but
+    scripted/fault-injection provider still reports a non-empty usage dict of
+    structural zeros, same as its `tokens`/`cost` totals, so those two clusters
+    can carry `tokens_in: 0.0`/`tokens_out: 0.0` even under `include_cost=False`
+    — literal per the contract's gate on `result.usage`, not on `include_cost`),
+    and ``verified_pass`` (emitted only when ``result.verified is not None``, i.e. a
+    verification gate actually ran this turn; 0 or 1 once it did, never a bare
+    absence-means-false). Omitting ``result`` (every legacy caller) reproduces
+    today's output byte-for-byte: every ``getattr(agent, ...)`` read below still
+    runs exactly as before, just selected by the same ``is None`` check the
+    ternaries use instead of being the only option.
 
     ``include_cost=False`` drops the token and cost fields for scripted-provider
     tasks. A fault-injection provider reports no usage, so emitting 0.0 would
@@ -253,18 +276,31 @@ def agent_metrics(agent, *, include_cost: bool = True) -> dict[str, float]:
         for m in messages
         if m.get("role") == "tool" and str(m.get("content", "")).startswith(TOOL_ERROR_PREFIX)
     )
+    stop_reason = result.stop_reason if result is not None else getattr(agent, "_stop_reason", "")
     metrics = {
         "llm_calls": float(totals.get("llm_calls", 0)),
-        "model_attempts": float(getattr(agent, "_turn_model_calls", 0)),
+        "model_attempts": float(
+            result.turns if result is not None else getattr(agent, "_turn_model_calls", 0)
+        ),
         "tool_calls": float(totals.get("tool_calls", tool_calls)),
-        "compactions": float(getattr(agent, "compaction_count", 0)),
+        "compactions": float(
+            result.compactions if result is not None else getattr(agent, "compaction_count", 0)
+        ),
         "tool_errors": float(tool_errors),
-        "incomplete_responses": float(getattr(agent, "_stop_reason", "") == "incomplete_response"),
+        "incomplete_responses": float(stop_reason == "incomplete_response"),
         "retries": float(getattr(agent, "retry_count", 0)),
     }
     if include_cost:
         metrics["tokens"] = float(totals.get("tokens", 0))
         metrics["cost"] = float(totals.get("cost", 0))
+    if result is not None:
+        metrics["stop_tool_budget"] = float(stop_reason == "tool_budget")
+        metrics["stop_deadline"] = float(stop_reason == "deadline")
+        if result.usage:
+            metrics["tokens_in"] = float(result.usage.get("input_tokens", 0))
+            metrics["tokens_out"] = float(result.usage.get("output_tokens", 0))
+        if result.verified is not None:
+            metrics["verified_pass"] = float(result.verified is True)
     return metrics
 
 

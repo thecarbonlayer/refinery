@@ -53,6 +53,16 @@ class TaskSpec:
     split: str  # "held_in" | "held_out"
     cluster: str  # short mechanism-cluster id, e.g. "A" or "G"
     expected_baseline: str  # "pass" | "fail" | "uncertain"  (miner-vs-guard prior, v2 table)
+    # primitive/alias (Phase 1 measurement contract §6): ADDITIVE metadata, never
+    # part of a task's identity. Required keyword-only fields, declared with
+    # kw_only so `run` stays the positional 5th argument every existing SPECS
+    # construction already uses — only the two new fields need updating to
+    # keyword form. `primitive` is one of the vetted 12 (test_registry.py pins
+    # the set); `alias` is `None` for a task with no short mnemonic yet, or an
+    # `AAA(A)-N` id otherwise — always passed explicitly (never defaulted) so a
+    # SPECS entry can never silently omit the call it should have made.
+    primitive: str = field(kw_only=True)
+    alias: str | None = field(kw_only=True)
     run: Callable[[], Attempt]
 
     @property

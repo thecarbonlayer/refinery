@@ -96,7 +96,8 @@ def run_a1() -> Attempt:
                 turns=len(a.messages),
                 metrics=agent_metrics(a),
             )
-        reply = a.send("What is the deploy key rotation schedule? Reply with the exact key phrase.")
+        result = a.run("What is the deploy key rotation schedule? Reply with the exact key phrase.")
+        reply = result.text
         is_compacted = compacted(a.messages)
         recalled = A1_SENTINEL.lower() in reply.lower()
         ok = recalled and is_compacted
@@ -107,7 +108,7 @@ def run_a1() -> Attempt:
         outcome="pass" if ok else "fail",
         detail=f"compacted={is_compacted} sentinel_recalled={recalled} reply={reply!r}",
         turns=len(a.messages),
-        metrics=agent_metrics(a),
+        metrics=agent_metrics(a, result=result),
     )
 
 
@@ -137,10 +138,11 @@ def run_a2() -> Attempt:
     )
     a = _plain_agent(tools=tools)
     try:
-        reply = a.send(
+        result = a.run(
             "Call the fetch_log tool and tell me what the FINAL line says the rollout "
             "password is. Reply with just the password."
         )
+        reply = result.text
         ok = A2_SENTINEL.lower() in reply.lower()
         called = any(m.get("role") == "tool" for m in a.messages)
     finally:
@@ -150,7 +152,7 @@ def run_a2() -> Attempt:
         outcome="pass" if ok else "fail",
         detail=f"needle_in_reply={ok} tool_called={called} reply={reply!r}",
         turns=len(a.messages),
-        metrics=agent_metrics(a),
+        metrics=agent_metrics(a, result=result),
     )
 
 
@@ -172,7 +174,8 @@ def run_a3() -> Attempt:
             f"{A3_VALUES['C']}. Acknowledge briefly."
         )
         a.send(_filler(3, sentences=8))
-        reply = a.send("What is the database migration code? Reply with just the code.")
+        result = a.run("What is the database migration code? Reply with just the code.")
+        reply = result.text
         low = reply.lower()
         has_b = A3_VALUES["B"].lower() in low
         has_other = A3_VALUES["A"].lower() in low or A3_VALUES["C"].lower() in low
@@ -184,7 +187,7 @@ def run_a3() -> Attempt:
         outcome="pass" if ok else "fail",
         detail=f"has_B={has_b} contaminated={has_other} reply={reply!r}",
         turns=len(a.messages),
-        metrics=agent_metrics(a),
+        metrics=agent_metrics(a, result=result),
     )
 
 
@@ -199,10 +202,11 @@ def run_a4() -> Attempt:
     notes.write_text(body)
     a = _plain_agent()
     try:
-        reply = a.send(
+        result = a.run(
             f"@{notes} What does the last section say the rollout password is? "
             "Reply with just the password."
         )
+        reply = result.text
         ok = A4_SENTINEL.lower() in reply.lower()
     finally:
         a.close()  # the storage contract says close ends the scratch lifecycle
@@ -211,7 +215,7 @@ def run_a4() -> Attempt:
         outcome="pass" if ok else "fail",
         detail=f"needle_in_reply={ok} reply={reply!r}",
         turns=len(a.messages),
-        metrics=agent_metrics(a),
+        metrics=agent_metrics(a, result=result),
     )
 
 
@@ -257,10 +261,11 @@ def run_a5() -> Attempt:
     notes.write_text(body)
     a = _plain_agent()
     try:
-        reply = a.send(
+        result = a.run(
             f"@{notes} What rollback token does the incident summary give? "
             "Reply with just the token."
         )
+        reply = result.text
         ok = A5_SENTINEL.lower() in reply.lower()
     finally:
         a.close()  # the storage contract says close ends the scratch lifecycle
@@ -269,7 +274,7 @@ def run_a5() -> Attempt:
         outcome="pass" if ok else "fail",
         detail=f"needle_in_reply={ok} reply={reply!r}",
         turns=len(a.messages),
-        metrics=agent_metrics(a),
+        metrics=agent_metrics(a, result=result),
     )
 
 
@@ -280,9 +285,29 @@ SPECS = [
     # though A1 registers no tools), but a task that swings a third of its range with
     # nothing changed cannot serve as a firm regression check. It is also the task that
     # supplied -1.00 to iteration 3's rejection against a knob it cannot even observe.
-    TaskSpec("A1", "held_in", "A", "uncertain", run_a1),
-    TaskSpec("A2", "held_in", "A", "pass", run_a2),
-    TaskSpec("A3", "held_out", "A", "uncertain", run_a3),
-    TaskSpec("A4", "held_out", "A", "uncertain", run_a4),
-    TaskSpec("A5", "held_in", "A", "pass", run_a5),
+    TaskSpec("A1", "held_in", "A", "uncertain", primitive="compaction", alias="CMP-1", run=run_a1),
+    # A2/A3 primitive rationale (contract §6 delegates this pair to the implementer):
+    # A2 is a single turn — a `fetch_log` tool call returns an oversized string with
+    # the needle on its FINAL line, and the only mechanism in play is whether that
+    # tool result survives `tool_output` truncation before it reaches the model. No
+    # filler turns, no compaction check anywhere in run_a2 — same shape as A4/A5
+    # (does an oversized delivery survive truncation), just through a tool result
+    # instead of an `@path` block, so it is `context-delivery`, not `compaction`.
+    # A3 LOOKS like a compaction task (the module docstring pairs it with A1 as the
+    # "compaction loss" mechanism), but measuring the actual conversation it sends —
+    # 3 short facts + 3 short filler turns against `harness.compaction.estimate_tokens`
+    # — tops out around 1,242 estimated tokens, well under the 3,200-token trigger
+    # (default_context_limit=4000 * trigger_fraction=0.8). Compaction never fires at
+    # baseline, and run_a3's oracle never calls `compacted()` at all (unlike A1's,
+    # which requires it via `ok = recalled and is_compacted`) — its pass condition is
+    # purely "the middle fact comes back uncontaminated by its neighbors", a delivery/
+    # isolation property, not a compaction-survival one. So A3 is `context-delivery`.
+    TaskSpec("A2", "held_in", "A", "pass", primitive="context-delivery", alias=None, run=run_a2),
+    TaskSpec(
+        "A3", "held_out", "A", "uncertain", primitive="context-delivery", alias=None, run=run_a3
+    ),
+    TaskSpec(
+        "A4", "held_out", "A", "uncertain", primitive="context-delivery", alias="CTX-2", run=run_a4
+    ),
+    TaskSpec("A5", "held_in", "A", "pass", primitive="context-delivery", alias="CTX-1", run=run_a5),
 ]

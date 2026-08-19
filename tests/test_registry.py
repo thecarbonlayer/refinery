@@ -3,6 +3,7 @@ import contextlib
 import hashlib
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,96 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # A set, not the string "ABCDEFGH": `"EF" in "ABCDEFGH"` is True, so a substring
 # test would accept a malformed multi-letter cluster id.
 CLUSTERS = frozenset("ABCDEFGH")
+
+# Phase 1 measurement contract §6's vetted primitive vocabulary, copied verbatim
+# from the plan's Global Constraints list (exactly 12) — never re-derived from
+# whatever the registry happens to use today, or an unvetted primitive slipping
+# into a SPECS entry would silently pass.
+PRIMITIVES = frozenset(
+    {
+        "instructions",
+        "context-delivery",
+        "tool-selection",
+        "tool-output",
+        "compaction",
+        "loop-control",
+        "verification",
+        "edit-semantics",
+        "safety",
+        "retry",
+        "subagent",
+        "response",
+    }
+)
+
+ALIAS_RE = re.compile(r"^[A-Z]{3,4}-\d+$")
+
+# The 26 fixed (primitive, alias) assignments from the frozen contract's §6 table —
+# every canonical task except A2/A3, whose assignment the contract explicitly
+# delegates to the implementer reading cluster_a.py. Copied verbatim: this is a
+# frozen contract, not a loop-editable value, so it is pinned by literal equality
+# rather than membership.
+CONTRACT_PRIMITIVE_ALIAS = {
+    "A1": ("compaction", "CMP-1"),
+    "A4": ("context-delivery", "CTX-2"),
+    "A5": ("context-delivery", "CTX-1"),
+    "B1": ("verification", "VER-1"),
+    "B2": ("verification", "VER-2"),
+    "B3": ("verification", "VER-3"),
+    "C1": ("safety", "SAFE-1"),
+    "C2": ("safety", "SAFE-2"),
+    "C3": ("safety", "SAFE-3"),
+    "D1": ("tool-selection", None),
+    "D2": ("tool-selection", None),
+    "D3": ("tool-selection", None),
+    "E1": ("tool-output", None),
+    "E2": ("tool-output", "OUT-2"),
+    "E3": ("tool-output", "OUT-3"),
+    "E4": ("tool-output", "OUT-4"),
+    "F1": ("edit-semantics", "EDT-1"),
+    "F2": ("loop-control", "LOOP-1"),
+    "G1": ("response", "RSP-1"),
+    "G2": ("compaction", "CMP-2"),
+    "G3": ("subagent", "SUB-1"),
+    "G4": ("compaction", "CMP-3"),
+    "G5": ("compaction", "CMP-4"),
+    "H1": ("retry", "RET-1"),
+    "H2": ("retry", "RET-2"),
+    "H3": ("retry", "RET-3"),
+}
+
+
+def test_task_primitive_is_in_the_vetted_set():
+    for t in TASKS:
+        assert t.primitive in PRIMITIVES, f"{t.name}: unvetted primitive {t.primitive!r}"
+
+
+def test_task_alias_is_unique_and_well_formed():
+    aliases = [t.alias for t in TASKS if t.alias is not None]
+    for alias in aliases:
+        assert ALIAS_RE.match(alias), f"{alias!r} does not match ^[A-Z]{{3,4}}-\\d+$"
+    assert len(aliases) == len(set(aliases)), f"duplicate alias among {sorted(aliases)}"
+
+
+def test_contract_primitive_alias_assignments_hold():
+    by_name = {t.name: t for t in TASKS}
+    for name, (primitive, alias) in CONTRACT_PRIMITIVE_ALIAS.items():
+        assert by_name[name].primitive == primitive, (
+            f"{name}: primitive {by_name[name].primitive!r} != frozen {primitive!r}"
+        )
+        assert by_name[name].alias == alias, (
+            f"{name}: alias {by_name[name].alias!r} != frozen {alias!r}"
+        )
+
+
+def test_a2_a3_primitive_is_compaction_or_context_delivery():
+    """A2/A3 are the two canonical ids the contract deliberately leaves open —
+    the implementer reads their task functions and assigns whichever of the two
+    mechanisms the oracle actually exercises (contract §6)."""
+    by_name = {t.name: t for t in TASKS}
+    for name in ("A2", "A3"):
+        assert by_name[name].primitive in {"compaction", "context-delivery"}, name
+        assert by_name[name].alias is None, f"{name}: A2/A3 aliases are not assigned yet"
 
 
 def test_registry_shape():
@@ -484,6 +575,15 @@ def test_workspace_bound_tasks_anchor_carbon_at_the_workspace(monkeypatch):
 
         def send(self, prompt: str) -> str:
             return ""
+
+        def run(self, prompt: str, **kwargs) -> SimpleNamespace:
+            # D3/E4/F1 all thread `result=` into agent_metrics now (contract §5),
+            # so the stand-in needs every field agent_metrics reads off a
+            # RunResult, not just `.text` — a bare string return (the old
+            # `send`-only shape) would AttributeError on `.turns` etc.
+            return SimpleNamespace(
+                text="", turns=0, stop_reason="stop", usage={}, verified=None, compactions=0
+            )
 
         def close(self) -> None:
             # Mirrors the real contract (remove the owned scratch) so this

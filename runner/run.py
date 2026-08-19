@@ -143,11 +143,20 @@ def run_task(
             att = spec.run()
         except Exception:
             att = Attempt(False, "error", traceback.format_exc(limit=8))
+        # duration_s becomes a METRIC too (contract §5), so suite aggregation
+        # picks it up like any other — on every attempt, including an error row
+        # (whose metrics dict starts empty). setdefault: a task that already
+        # measured its own duration_s keeps that value; nothing else about an
+        # error row's handling changes.
+        if isinstance(att.metrics, dict):
+            att.metrics.setdefault("duration_s", round(time.monotonic() - t0, 1))
         rec = {
             "task": spec.name,
             "split": spec.split,
             "cluster": spec.cluster,
             "expected_baseline": spec.expected_baseline,
+            "primitive": spec.primitive,
+            "alias": spec.alias,
             "attempt": i,
             "passed": att.passed,
             "outcome": att.outcome,

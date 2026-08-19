@@ -103,7 +103,8 @@ def _last_int(text: str) -> str | None:
 def run_d1() -> Attempt:
     a = _calculator_agent()
     try:
-        reply = a.send("What is 7391 * 4283? Reply with just the number.")
+        result = a.run("What is 7391 * 4283? Reply with just the number.")
+        reply = result.text
         in_reply = _number_in(D1_ANSWER, reply)
         in_tool = any(_number_in(D1_ANSWER, t) for t in tool_texts(a.messages))
     finally:
@@ -113,16 +114,17 @@ def run_d1() -> Attempt:
         outcome="pass" if (in_reply and in_tool) else "fail",
         detail=f"answer_in_reply={in_reply} answer_in_tool_result={in_tool} reply={reply!r}",
         turns=len(a.messages),
-        metrics=agent_metrics(a),
+        metrics=agent_metrics(a, result=result),
     )
 
 
 def run_d2() -> Attempt:
     a = _calculator_agent()
     try:
-        reply = a.send(
+        result = a.run(
             "Compute 5137 * 219, then divide that result by 3. Reply with just the final number."
         )
+        reply = result.text
         in_reply = _number_in(D2_ANSWER, reply)
         in_tool = any(_number_in(D2_ANSWER, t) for t in tool_texts(a.messages))
     finally:
@@ -132,7 +134,7 @@ def run_d2() -> Attempt:
         outcome="pass" if (in_reply and in_tool) else "fail",
         detail=f"answer_in_reply={in_reply} answer_in_tool_result={in_tool} reply={reply!r}",
         turns=len(a.messages),
-        metrics=agent_metrics(a),
+        metrics=agent_metrics(a, result=result),
     )
 
 
@@ -198,10 +200,11 @@ def run_d3() -> Attempt:
     )
     a.tools = tools
     try:
-        reply = a.send(
+        result = a.run(
             "How many times does the substring TODO appear in tasks.txt? "
             "Count exactly and reply with just the number."
         )
+        reply = result.text
         # Anchor to the model's stated answer: the LAST integer in the reply must
         # be the count (a mere `\b23\b` scan would pass on quoted file content).
         ok = _last_int(reply) == str(D3_COUNT)
@@ -213,12 +216,14 @@ def run_d3() -> Attempt:
         detail=f"expected={D3_COUNT} last_int={_last_int(reply)!r} reply={reply!r}",
         approvals=approvals,
         turns=len(a.messages),
-        metrics=agent_metrics(a),
+        metrics=agent_metrics(a, result=result),
     )
 
 
 SPECS = [
-    TaskSpec("D1", "held_in", "D", "pass", run_d1),
-    TaskSpec("D2", "held_in", "D", "pass", run_d2),
-    TaskSpec("D3", "held_out", "D", "uncertain", run_d3),
+    TaskSpec("D1", "held_in", "D", "pass", primitive="tool-selection", alias=None, run=run_d1),
+    TaskSpec("D2", "held_in", "D", "pass", primitive="tool-selection", alias=None, run=run_d2),
+    TaskSpec(
+        "D3", "held_out", "D", "uncertain", primitive="tool-selection", alias=None, run=run_d3
+    ),
 ]
