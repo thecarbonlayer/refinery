@@ -243,3 +243,76 @@ def write_validation_record(record: ValidationRecord, path: Path) -> Path:
     """
     path.write_text(json.dumps(record.to_json(), indent=2) + "\n")
     return path
+
+
+# The only stage a ConfirmationRecord names today — a fresh PAIRED rerun of a first
+# CONFIRM's selected tasks (`loop.acceptance.confirmed`). A named constant rather than
+# a literal repeated at each call site, so the record and its tests read the same word.
+STAGE_PAIRED_CONFIRMATION = "paired_confirmation"
+
+
+@dataclass(frozen=True)
+class ConfirmationRecord:
+    """The outcome of one paired-confirmation rerun — the only path to ACCEPT.
+
+    Formalizes the shape iter-06's confirmation was hand-assembled into (contract
+    §5): a candidate's first CONFIRM decision, rerun fresh at higher attempt counts on
+    exactly that decision's ``confirm_tasks``, judged by ``acceptance.confirmed()``.
+    Kept on disk whether the confirmation lands ACCEPT or REJECT — a REJECTED
+    confirmation is still the honest record of what was tried, same reasoning as
+    ``ValidationRecord`` keeping rejected candidates.
+
+    ``first_decision`` and ``confirmation`` are ``Decision.to_json()`` dicts, not
+    ``Decision`` objects — this artifact is the frozen-JSON contract, the same
+    boundary ``ValidationRecord.rule`` already draws around a ``Decision``.
+    ``per_task`` mirrors iter-06's shape exactly: ``{task: {"base": [passes,
+    attempts], "cand": [passes, attempts]}}``, for every task both arms actually
+    measured.
+    """
+
+    candidate_id: str
+    baseline_label: str
+    candidate_label: str
+    attempts_per_task_per_arm: int
+    confirm_set: tuple[str, ...]
+    first_decision: dict
+    confirmation: dict
+    per_task: dict[str, dict[str, list[int]]]
+    finding: str
+    stage: str = STAGE_PAIRED_CONFIRMATION
+
+    def to_json(self) -> dict:
+        return {
+            "candidate_id": self.candidate_id,
+            "stage": self.stage,
+            "baseline_label": self.baseline_label,
+            "candidate_label": self.candidate_label,
+            "attempts_per_task_per_arm": self.attempts_per_task_per_arm,
+            "confirm_set": list(self.confirm_set),
+            "first_decision": self.first_decision,
+            "confirmation": self.confirmation,
+            "per_task": self.per_task,
+            "finding": self.finding,
+        }
+
+    @classmethod
+    def from_json(cls, data: dict) -> ConfirmationRecord:
+        return cls(
+            candidate_id=data["candidate_id"],
+            stage=data.get("stage", STAGE_PAIRED_CONFIRMATION),
+            baseline_label=data["baseline_label"],
+            candidate_label=data["candidate_label"],
+            attempts_per_task_per_arm=data["attempts_per_task_per_arm"],
+            confirm_set=tuple(data["confirm_set"]),
+            first_decision=data["first_decision"],
+            confirmation=data["confirmation"],
+            per_task=data["per_task"],
+            finding=data["finding"],
+        )
+
+
+def write_confirmation_record(record: ConfirmationRecord, path: Path) -> Path:
+    """The one path a confirmation record takes to disk — mirrors
+    ``write_validation_record`` so both artifacts have exactly one writer to test."""
+    path.write_text(json.dumps(record.to_json(), indent=2) + "\n")
+    return path
