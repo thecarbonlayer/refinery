@@ -42,13 +42,17 @@ PRIMITIVES = frozenset(
 
 ALIAS_RE = re.compile(r"^[A-Z]{3,4}-\d+$")
 
-# The 26 fixed (primitive, alias) assignments from the frozen contract's §6 table —
-# every canonical task except A2/A3, whose assignment the contract explicitly
-# delegates to the implementer reading cluster_a.py. Copied verbatim: this is a
-# frozen contract, not a loop-editable value, so it is pinned by literal equality
-# rather than membership.
+# The 28 fixed (primitive, alias) assignments from the frozen contract's §6 table.
+# A2/A3 were originally delegated to the implementer reading cluster_a.py; the
+# 2026-08-19 audit-finding-4 amendment resolved both explicitly (A2's original
+# assignment was itself wrong — its oracle measures tool_output truncation
+# survival of an oversized TOOL result, not @path delivery — and A3 was confirmed
+# as-implemented), so all 28 are now pinned the same way: by literal equality
+# against this frozen copy, never a loop-editable value.
 CONTRACT_PRIMITIVE_ALIAS = {
     "A1": ("compaction", "CMP-1"),
+    "A2": ("tool-output", None),
+    "A3": ("context-delivery", None),
     "A4": ("context-delivery", "CTX-2"),
     "A5": ("context-delivery", "CTX-1"),
     "B1": ("verification", "VER-1"),
@@ -98,16 +102,6 @@ def test_contract_primitive_alias_assignments_hold():
         assert by_name[name].alias == alias, (
             f"{name}: alias {by_name[name].alias!r} != frozen {alias!r}"
         )
-
-
-def test_a2_a3_primitive_is_compaction_or_context_delivery():
-    """A2/A3 are the two canonical ids the contract deliberately leaves open —
-    the implementer reads their task functions and assigns whichever of the two
-    mechanisms the oracle actually exercises (contract §6)."""
-    by_name = {t.name: t for t in TASKS}
-    for name in ("A2", "A3"):
-        assert by_name[name].primitive in {"compaction", "context-delivery"}, name
-        assert by_name[name].alias is None, f"{name}: A2/A3 aliases are not assigned yet"
 
 
 def test_registry_shape():

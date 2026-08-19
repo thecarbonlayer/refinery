@@ -226,13 +226,14 @@ def test_agent_metrics_verified_false_is_a_present_zero_not_an_absent_key():
 
 
 def test_agent_metrics_token_split_respects_the_include_cost_gate():
-    """Orchestrator fix: a scripted/fault-injection provider's ``result.usage`` is
-    non-empty structural zeros (carbon's ``Tracer.totals()`` always returns a
-    fully-keyed dict, real call or not) — exactly the phantom accounting
-    ``include_cost=False`` exists to exclude for ``tokens``/``cost``.
-    ``tokens_in``/``tokens_out`` must sit behind the SAME gate, not just
-    ``result.usage`` being non-empty. ``verified_pass``/``stop_*`` are unaffected —
-    they carry no cost signal and stay ungated."""
+    """A scripted/fault-injection provider's ``result.usage`` can be non-empty
+    even though nothing real was measured (carbon still books a real completed
+    call's total, per-provider — see the total-only-usage test below) — exactly
+    the phantom accounting ``include_cost=False`` exists to exclude for
+    ``tokens``/``cost``. ``tokens_in``/``tokens_out`` must sit behind the SAME
+    gate, not a separate one keyed only on ``result.usage``.
+    ``verified_pass``/``stop_*`` are unaffected — they carry no cost signal and
+    stay ungated."""
     agent = _FakeAgent()
     result = _StubResult(
         turns=1,
@@ -253,6 +254,35 @@ def test_agent_metrics_token_split_respects_the_include_cost_gate():
     included = agent_metrics(agent, result, include_cost=True)
     assert included["tokens_in"] == 10.0
     assert included["tokens_out"] == 5.0
+
+
+def test_agent_metrics_token_split_requires_a_complete_provider_split():
+    """Contract §2 amendment (audit findings 1-2): carbon's split accumulators
+    book only a REAL provider-reported split. When any call this turn fell back
+    to booking its total as input, ``RunResult.usage`` carries ``total_tokens``
+    alone — no ``input_tokens``/``output_tokens`` keys at all, not zeros. Gating
+    on ``result.usage`` truthiness alone would read that total-only dict as
+    "has a split" and fabricate ``tokens_in: 0.0``/``tokens_out: 0.0`` out of
+    nothing; the gate must check for both keys' PRESENCE, not just non-emptiness."""
+    agent = _FakeAgent()
+
+    total_only = _StubResult(
+        turns=1, stop_reason="stop", usage={"total_tokens": 15}, verified=None, compactions=0
+    )
+    recorded = agent_metrics(agent, total_only, include_cost=True)
+    assert "tokens_in" not in recorded
+    assert "tokens_out" not in recorded
+
+    full_split = _StubResult(
+        turns=1,
+        stop_reason="stop",
+        usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        verified=None,
+        compactions=0,
+    )
+    recorded = agent_metrics(agent, full_split, include_cost=True)
+    assert recorded["tokens_in"] == 10.0
+    assert recorded["tokens_out"] == 5.0
 
 
 def test_agent_metrics_omits_only_cost_fields_when_asked():

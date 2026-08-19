@@ -143,13 +143,19 @@ def run_task(
             att = spec.run()
         except Exception:
             att = Attempt(False, "error", traceback.format_exc(limit=8))
+        # Computed ONCE: rec["duration_s"] and the metrics copy below must agree
+        # to the same measured wall time, not two independently-timed reads a
+        # few instructions apart.
+        elapsed = round(time.monotonic() - t0, 1)
         # duration_s becomes a METRIC too (contract §5), so suite aggregation
-        # picks it up like any other — on every attempt, including an error row
-        # (whose metrics dict starts empty). setdefault: a task that already
-        # measured its own duration_s keeps that value; nothing else about an
-        # error row's handling changes.
-        if isinstance(att.metrics, dict):
-            att.metrics.setdefault("duration_s", round(time.monotonic() - t0, 1))
+        # picks it up like any other — but ONLY when att.metrics already reports
+        # something: an error row's metrics dict starts (and stays) empty, and
+        # adding a LONE duration_s key there would make it the one metric every
+        # attempt reports while every other metric reports on some — a
+        # denominator asymmetry no other metric has. setdefault: a task that
+        # already measured its own duration_s keeps that value.
+        if att.metrics:
+            att.metrics.setdefault("duration_s", elapsed)
         rec = {
             "task": spec.name,
             "split": spec.split,
@@ -165,7 +171,7 @@ def run_task(
             "approvals": att.approvals,
             "turns": att.turns,
             "metrics": att.metrics,
-            "duration_s": round(time.monotonic() - t0, 1),
+            "duration_s": elapsed,
             **fingerprint,
         }
         write_record(jsonl_path, rec)

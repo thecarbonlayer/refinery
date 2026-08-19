@@ -286,13 +286,20 @@ SPECS = [
     # nothing changed cannot serve as a firm regression check. It is also the task that
     # supplied -1.00 to iteration 3's rejection against a knob it cannot even observe.
     TaskSpec("A1", "held_in", "A", "uncertain", primitive="compaction", alias="CMP-1", run=run_a1),
-    # A2/A3 primitive rationale (contract §6 delegates this pair to the implementer):
+    # A2/A3 primitive rationale. Contract §6 originally delegated this pair to the
+    # implementer; the 2026-08-19 audit-finding-4 amendment resolved A2 explicitly —
+    # the implementer's first pass (context-delivery) was itself wrong.
+    #
     # A2 is a single turn — a `fetch_log` tool call returns an oversized string with
-    # the needle on its FINAL line, and the only mechanism in play is whether that
-    # tool result survives `tool_output` truncation before it reaches the model. No
-    # filler turns, no compaction check anywhere in run_a2 — same shape as A4/A5
-    # (does an oversized delivery survive truncation), just through a tool result
-    # instead of an `@path` block, so it is `context-delivery`, not `compaction`.
+    # the needle on its FINAL line. No filler turns, no compaction check anywhere in
+    # run_a2 — the only mechanism in play is whether that oversized TOOL RESULT
+    # survives `tool_output` truncation before reaching the model, which is exactly
+    # what cluster_e's own docstring names as the `tool_output` door's job (E1-E4 are
+    # all `tool-output`). A4/A5 look similar on the surface (an oversized delivery
+    # surviving truncation) but go through `file_injection` (an `@path` block), a
+    # DIFFERENT door with its own knob — so A2 does not belong beside them. A2 is
+    # `tool-output`, alias none, matching the contract amendment.
+    #
     # A3 LOOKS like a compaction task (the module docstring pairs it with A1 as the
     # "compaction loss" mechanism), but measuring the actual conversation it sends —
     # 3 short facts + 3 short filler turns against `harness.compaction.estimate_tokens`
@@ -301,8 +308,9 @@ SPECS = [
     # baseline, and run_a3's oracle never calls `compacted()` at all (unlike A1's,
     # which requires it via `ok = recalled and is_compacted`) — its pass condition is
     # purely "the middle fact comes back uncontaminated by its neighbors", a delivery/
-    # isolation property, not a compaction-survival one. So A3 is `context-delivery`.
-    TaskSpec("A2", "held_in", "A", "pass", primitive="context-delivery", alias=None, run=run_a2),
+    # isolation property, not a compaction-survival one. So A3 is `context-delivery`,
+    # confirmed as-implemented by the same amendment.
+    TaskSpec("A2", "held_in", "A", "pass", primitive="tool-output", alias=None, run=run_a2),
     TaskSpec(
         "A3", "held_out", "A", "uncertain", primitive="context-delivery", alias=None, run=run_a3
     ),

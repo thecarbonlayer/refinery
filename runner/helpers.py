@@ -242,29 +242,42 @@ def agent_metrics(agent, result=None, *, include_cost: bool = True) -> dict[str,
 
     ``result`` (Phase 1 measurement contract §5), when given, is the ``RunResult``
     the task's own ``agent.run(...)`` call for its LAST turn already produced.
-    ``model_attempts``/``incomplete_responses``/``compactions`` then read that
-    public seam (``result.turns``/``result.stop_reason``/``result.compactions``)
-    instead of carbon's privates — the same values those privates would have held
-    right after that turn, since both are reset per-turn on the agent side too, so
-    this is a source swap, not a semantic change. Four metric keys become
-    available that no private attribute ever exposed:
+    ``model_attempts``/``incomplete_responses`` read the public seam
+    (``result.turns``/``result.stop_reason``) instead of carbon's privates
+    (``agent._turn_model_calls``/``agent._stop_reason``) — a TRUE per-turn swap:
+    both privates reset to a fresh value at the top of every ``run()`` call, so
+    reading them off the last turn's result reproduces exactly what reading the
+    private would have given right after that turn, no semantic change.
+    ``compactions`` is different: `agent.compaction_count` only ever
+    INCREMENTS — it is never reset, per-turn or otherwise — but that is exactly
+    why reading ``result.compactions`` off the LAST turn is still correct: with
+    no turn after it, that snapshot IS the conversation's final, cumulative
+    count, identical to reading ``agent.compaction_count`` once the whole
+    conversation has ended.
+
+    Four metric keys become available that no private attribute ever exposed:
     ``stop_tool_budget``/``stop_deadline`` (always emitted alongside
     ``incomplete_responses`` when a result is given — 0 or 1, never omitted),
     ``tokens_in``/``tokens_out`` (from ``result.usage``, emitted only when
-    ``include_cost`` AND that dict is non-empty — the SAME gate as
-    ``tokens``/``cost`` below, not a looser one: a tracerless agent reports empty
-    usage, but a TRACED scripted/fault-injection provider still reports a
-    non-empty usage dict of structural zeros, same as its `tokens`/`cost` totals,
-    so gating on ``result.usage`` alone would leak exactly the phantom accounting
-    ``include_cost=False`` exists to exclude, just via two new keys instead of the
-    old two), and ``verified_pass`` (emitted only when ``result.verified is not
-    None``, i.e. a verification gate actually ran this turn; 0 or 1 once it did,
-    never a bare absence-means-false — this one carries no cost signal and stays
-    ungated, like ``stop_tool_budget``/``stop_deadline``). Omitting ``result``
-    (every legacy caller) reproduces today's output byte-for-byte: every
+    ``include_cost`` AND carbon reported a COMPLETE provider split — both
+    ``"input_tokens"``/``"output_tokens"`` present, not just ``"total_tokens"``;
+    contract §2's 2026-08-19 amendment: carbon's split accumulators book only a
+    REAL per-call split, so a turn where any call fell back to booking its
+    total as input publishes `total_tokens` alone, no split keys at all, and
+    reading those two with a zero default would fabricate a `0.0` split out of
+    nothing. The ``include_cost`` half of the gate matches ``tokens``/``cost``
+    below: a tracerless agent reports empty usage, but a TRACED
+    scripted/fault-injection provider can still report a real completed call's
+    structural-zero split, which is exactly the phantom accounting
+    ``include_cost=False`` exists to exclude), and ``verified_pass`` (emitted
+    only when ``result.verified is not None``, i.e. a verification gate
+    actually ran this turn; 0 or 1 once it did, never a bare
+    absence-means-false — this one carries no cost signal and stays ungated,
+    like ``stop_tool_budget``/``stop_deadline``). Omitting ``result`` (every
+    legacy caller) reproduces today's output byte-for-byte: every
     ``getattr(agent, ...)`` read below still runs exactly as before, just
-    selected by the same ``is None`` check the ternaries use instead of being the
-    only option.
+    selected by the same ``is None`` check the ternaries use instead of being
+    the only option.
 
     ``include_cost=False`` drops the token and cost fields for scripted-provider
     tasks — now including the ``tokens_in``/``tokens_out`` split above, not just
@@ -301,14 +314,19 @@ def agent_metrics(agent, result=None, *, include_cost: bool = True) -> dict[str,
     if result is not None:
         metrics["stop_tool_budget"] = float(stop_reason == "tool_budget")
         metrics["stop_deadline"] = float(stop_reason == "deadline")
-        # Same gate as tokens/cost above: a scripted/fault-injection provider's
-        # result.usage is non-empty structural zeros (Tracer.totals() always
-        # returns a fully-keyed dict, real call or not), so tokens_in/tokens_out
-        # would otherwise leak the exact phantom accounting include_cost=False
-        # exists to exclude — just via two new keys instead of the old two.
-        if include_cost and result.usage:
-            metrics["tokens_in"] = float(result.usage.get("input_tokens", 0))
-            metrics["tokens_out"] = float(result.usage.get("output_tokens", 0))
+        # Both key PRESENCE (not mere non-emptiness) and include_cost gate the
+        # split. Contract §2 amendment: carbon's usage dict carries
+        # total_tokens alone whenever any call this turn lacked a real
+        # provider-reported split — reading input_tokens/output_tokens with a
+        # zero default there would fabricate a 0.0 split that was never
+        # measured. And even a COMPLETE split needs include_cost=True: a
+        # scripted/fault-injection provider's completed call still reports a
+        # real (if structurally zero) split, which is exactly the phantom
+        # accounting include_cost=False exists to exclude — same gate as
+        # tokens/cost above, just extended to these two new keys.
+        if include_cost and "input_tokens" in result.usage and "output_tokens" in result.usage:
+            metrics["tokens_in"] = float(result.usage["input_tokens"])
+            metrics["tokens_out"] = float(result.usage["output_tokens"])
         if result.verified is not None:
             metrics["verified_pass"] = float(result.verified is True)
     return metrics
