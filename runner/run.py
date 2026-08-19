@@ -152,10 +152,10 @@ def run_task(
         # something: an error row's metrics dict starts (and stays) empty, and
         # adding a LONE duration_s key there would make it the one metric every
         # attempt reports while every other metric reports on some — a
-        # denominator asymmetry no other metric has. setdefault: a task that
-        # already measured its own duration_s keeps that value.
+        # denominator asymmetry no other metric has. Direct assignment ensures
+        # the runner's measured value always wins, never an attempt's override.
         if att.metrics:
-            att.metrics.setdefault("duration_s", elapsed)
+            att.metrics["duration_s"] = elapsed
         rec = {
             "task": spec.name,
             "split": spec.split,

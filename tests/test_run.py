@@ -164,6 +164,32 @@ def test_attempt_metrics_are_persisted(tmp_path):
     assert json.loads(jsonl.read_text())["metrics"]["tokens"] == 123.0
 
 
+def test_runner_measured_duration_overrides_attempt_duration(tmp_path):
+    """The runner's measured duration_s must always win, even if an Attempt
+    pre-seeds the metrics dict with an arbitrary duration_s value. This ensures
+    the top-level rec["duration_s"] field matches the attempt's metrics["duration_s"]."""
+    jsonl = tmp_path / "dur_override.jsonl"
+    # Spec that returns an Attempt with pre-seeded (bogus) duration_s
+    tr = run_task(
+        _spec(metrics={"duration_s": 9999.0, "llm_calls": 1}),
+        FP,
+        jsonl,
+        attempts=1,
+        log=lambda *a: None,
+    )
+    # The recorded attempt should have duration_s from the runner's measurement,
+    # not the bogus 9999.0 from the Attempt
+    rec = tr.records[0]
+    assert rec["duration_s"] != 9999.0, "Runner's measured duration was overridden by attempt"
+    assert isinstance(rec["duration_s"], float)
+    assert rec["duration_s"] < 1.0  # Should be a small measured time
+    # Metrics dict should also have the runner's measured value, not 9999.0
+    assert rec["metrics"]["duration_s"] != 9999.0
+    assert rec["metrics"]["duration_s"] == rec["duration_s"], (
+        "Top-level duration_s must match metrics['duration_s']"
+    )
+
+
 def test_recorded_attempt_carries_primitive_alias_and_duration(tmp_path):
     """``primitive``/``alias`` are copied straight off the spec onto every
     record. ``duration_s`` always lands on the record's own top-level field;
