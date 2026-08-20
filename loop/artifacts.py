@@ -178,11 +178,22 @@ class ValidationRecord:
     # it as evidence. `accepted` above is the CAUSAL one: recording the split beside a
     # verdict the noise still decided left iteration 3's failure in place.
     causal: dict = field(default_factory=dict)
-    # The three-outcome rule's disposition — applied and decisive for calibrated
-    # sections (tool_output today), or a stated reason it was not applied. When
-    # applied, `accepted` above follows it, and can only become True through a
-    # confirmation run recorded separately.
+    # The three-outcome rule's disposition — applied and decisive for a calibrated
+    # section, or a stated reason it was not applied. Two sections reach it today:
+    # `tool_output` unconditionally, and `compaction` only through a fresh, fit,
+    # recomputable null model. When applied, `accepted` above follows it, and can only
+    # become True through a confirmation run recorded separately. When NOT applied and
+    # the section is calibration-required, `rule["calibration_required"]` is True and
+    # `accepted` is False — a refusal, never a fallback to the weaker causal rule.
     rule: dict = field(default_factory=dict)
+    # The confirmation that promoted this record, when one did — the full
+    # `ConfirmationRecord.to_json()` payload, attached by `loop.cli._pr_eligible_record`
+    # and by nothing else. A CONFIRM candidate's validation record carries stage 1's
+    # numbers forever; the confirmation is what actually accepted it, at its own attempt
+    # counts against its own quantiles. Without this, the PR body rendered stage 1's
+    # deltas under the word ACCEPTED — the right verdict beside the wrong evidence.
+    # Empty for every record that was never promoted, which is most of them.
+    confirmation: dict = field(default_factory=dict)
 
     @property
     def disposition(self) -> str:
@@ -237,6 +248,7 @@ class ValidationRecord:
             "coverage": self.coverage,
             "causal": self.causal,
             "rule": self.rule,
+            "confirmation": self.confirmation,
         }
 
 
@@ -263,8 +275,8 @@ STAGE_PAIRED_CONFIRMATION = "paired_confirmation"
 class ConfirmationRecord:
     """The outcome of one paired-confirmation rerun — the only path to ACCEPT.
 
-    Formalizes the shape iter-06's confirmation was hand-assembled into (contract
-    §5): a candidate's first CONFIRM decision, rerun fresh at higher attempt counts on
+    Formalizes the shape iter-06's confirmation was hand-assembled into: a
+    candidate's first CONFIRM decision, rerun fresh at higher attempt counts on
     exactly that decision's ``confirm_tasks``, judged by ``acceptance.confirmed()``.
     Kept on disk whether the confirmation lands ACCEPT or REJECT — a REJECTED
     confirmation is still the honest record of what was tried, same reasoning as

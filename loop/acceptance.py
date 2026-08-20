@@ -46,7 +46,7 @@ report and in the Fisher p-values, which are exact ratios of `math.comb` integer
 one final division.
 
 A SECTION CALIBRATION replaces that derived allowance with a MEASURED NULL MODEL, for
-one editable section at a time (phase2b contract §1+§2). `one_attempt` is a bound on
+one editable section at a time. `one_attempt` is a bound on
 what a single attempt can move a whole split's mean — a structural stand-in for null
 variation, correct for `tool_output` because six unchanged runs said so. For a section
 with its own supported task set, null arms measure the real thing: one exact pooled
@@ -71,7 +71,7 @@ an ACCEPT. Every whole-suite protection keeps reading the WHOLE suite: a leak on
 unsupported task is still a leak, and a collapse there still vetoes. Without a
 calibration this module behaves exactly as it did before the mechanism existed,
 byte for byte, including its reason strings — except the confirmation collapse veto
-(contract amendment): ``confirmed()`` runs the catastrophic per-task check
+(added by a later amendment): ``confirmed()`` runs the catastrophic per-task check
 unconditionally rather than only under a calibration, closing a hole where an
 uncalibrated confirmation pair could hide a full-pass-to-zero collapse behind a split
 mean that stayed inside its allowance.
@@ -82,6 +82,8 @@ governance rule must not invalidate baselines when it changes.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from fractions import Fraction
 from functools import cache
@@ -166,7 +168,7 @@ def _frac(x: Fraction) -> str:
 
 @dataclass(frozen=True)
 class SectionCalibration:
-    """The measured NULL MODEL for ONE editable section (phase2b contract §1).
+    """The measured NULL MODEL for ONE editable section.
 
     Every number in here comes out of a calibration artifact produced by
     ``loop.calibrate.calibrate_model`` from arms with NOTHING changed between them —
@@ -187,7 +189,7 @@ class SectionCalibration:
       ``Fraction`` of the pooled integer counts, in a read-only mapping (the memos key
       on these values, so a post-construction edit would move the bound underneath
       quantiles already cached at the old rate). Every rate must be strictly interior,
-      ``0 < rate < 1`` (contract §4.1 amendment): a rate of exactly 0 or 1 gives that
+      ``0 < rate < 1``: a rate of exactly 0 or 1 gives that
       task a null quantile of 0 at every attempt count, which is a gate nothing can
       fail. Exact, and checked to be exact: a
       float rate is refused here rather than at the arithmetic, because
@@ -196,14 +198,18 @@ class SectionCalibration:
       every later exact call a cached tuple computed for a value that had already
       rounded.
     - ``coverage_level``: the one-sided coverage every quantile is computed at
-      (contract §1: "0.975"), exact for the same reason.
+      (97.5%, i.e. 39/40 exactly), exact for the same reason.
     - ``guards``: tasks a confirmation must rerun even unmoved (added to
       ``always_confirm``) AND now adjudicate against their own null distribution
-      (contract §2). A guard the model has no rate for could not be adjudicated at
+      the guard gate. A guard the model has no rate for could not be adjudicated at
       all, so ``guards`` must be a subset of ``supported`` — a guard silently skipped
       is exactly the not-a-gate this phase exists to remove.
     - ``source``: where the artifact came from, repo-relative — this string lands in
       a committed record, so it must never carry a machine path.
+    - ``computed_at_runner_sha``: the verifier version the arms behind this model were
+      measured at. Carried so a PR body can state the artifact's IDENTITY — path plus
+      the version it was computed at — instead of naming a file and leaving the reader
+      to guess which build of it. Empty only for a calibration built by hand in a test.
     """
 
     section: str
@@ -212,6 +218,7 @@ class SectionCalibration:
     coverage_level: Fraction
     guards: frozenset[str]
     source: str
+    computed_at_runner_sha: str = ""
 
     def __post_init__(self) -> None:
         if not self.supported:
@@ -294,7 +301,71 @@ class SectionCalibration:
             "coverage_level": _frac(self.coverage_level),
             "guards": sorted(self.guards),
             "source": self.source,
+            "computed_at_runner_sha": self.computed_at_runner_sha,
         }
+
+
+def _sha256_json(payload: dict) -> str:
+    """A stable sha256 over a JSON payload — sorted keys, no incidental whitespace.
+
+    Both digests below are only as good as their canonicalization: a digest that
+    changes when a dict is re-serialized in a different order refuses honest
+    records and teaches whoever meets it to route around the check.
+    """
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def calibration_digest(calibration: SectionCalibration) -> str:
+    """A digest of the three things a calibrated judgment actually depends on: the
+    null RATES, the COVERAGE LEVEL, and the SOURCE the two came from.
+
+    Both stages of this pipeline judge against a null model, and until this existed
+    nothing tied them to the SAME one. A first pass under a strict model and a
+    confirmation under a loose one both look clean in their own records: each check
+    (fit, freshness, pinned supported set) passes independently on each artifact, and
+    the pair of decisions reads as one coherent story it never was. The first
+    decision records this digest; ``confirmed()`` recomputes it from the calibration
+    in its hand and refuses a mismatch.
+
+    Deliberately NOT over the whole artifact: `fitness`, `provenance` and the power
+    rows are audit material, and re-running `loop.calibrate --model` on the same arms
+    to add a published number would otherwise invalidate every in-flight claim. What
+    must not move under a claim is the numbers the claim was judged with.
+    """
+    return _sha256_json(
+        {
+            "null_rates": {t: _frac(r) for t, r in sorted(calibration.null_rates.items())},
+            "coverage_level": _frac(calibration.coverage_level),
+            "source": calibration.source,
+        }
+    )
+
+
+def _decision_digest_payload(improved_tasks, confirm_tasks, regime: str | None) -> dict:
+    return {
+        "improved_tasks": list(improved_tasks),
+        "confirm_tasks": list(confirm_tasks),
+        "regime": regime,
+    }
+
+
+def decision_digest(decision: Decision) -> str:
+    """A digest of the first decision's own CLAIM: which tasks carried the gain,
+    which tasks the confirmation must rerun, and under which regime.
+
+    The confirmation re-tests every task in ``improved_tasks``, each against its own
+    null quantile, and ALL of them must repeat. So a record edited from three
+    carriers down to one is not a smaller claim, it is an easier exam — and the
+    record is a JSON file on disk that a later step reloads and trusts. The digest is
+    written by the decision that made the claim and checked by whatever reloads it.
+    """
+    return _sha256_json(
+        _decision_digest_payload(
+            decision.improved_tasks, decision.confirm_tasks, (decision.raw or {}).get("regime")
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -556,7 +627,7 @@ def _gain_quantile(
     baseline: dict,
     candidate: dict,
 ) -> Fraction:
-    """The gain gate's bound for one split, computed NOW (contract §2).
+    """The gain gate's bound for one split, computed NOW, at judgment time.
 
     The null distribution of (candidate supported-split mean − baseline supported-split
     mean) with both arms binomial at the pooled rates, at each side's REAL attempt
@@ -677,7 +748,7 @@ def evaluate(
     exists to re-establish.
 
     ``calibration`` switches the gain/noise judgment — and ONLY that judgment — onto
-    the section's measured null model (contract §2): the supported-set split means
+    the section's measured null model: the supported-set split means
     against a quantile computed HERE, from the pooled null rates and THESE two runs'
     own per-task attempt counts, instead of the whole-split means against
     ``one_attempt``. CONFIRM requires the observed supported-set mean to exceed that
@@ -803,6 +874,13 @@ def evaluate(
             "held_in": _quantile_record(calibration, tasks_in, thr_in, baseline, candidate),
             "held_out": _quantile_record(calibration, tasks_ho, thr_ho, baseline, candidate),
         }
+        # STAGE BINDING, half one: the calibration this decision was judged against,
+        # digested. `confirmed()` recomputes it from the calibration IT was handed and
+        # refuses a mismatch, so the two stages cannot be answered under two different
+        # null models. Written on every calibrated decision, not only the CONFIRMs — a
+        # REJECT's record is evidence too, and a reader should be able to tell which
+        # model produced it.
+        raw_evidence["calibration_digest"] = calibration_digest(calibration)
     # Both REJECT branches below carry `behavioral_regressions`/`targeted_rerun` too,
     # not just `security_regressions` — `beh_reg` is computed unconditionally above,
     # independent of which reason (or no reason at all) ends up rejecting. A behavioral
@@ -900,6 +978,13 @@ def evaluate(
         confirm_reasons.append(
             "behavioral security movement routed to confirmation: " + ", ".join(sorted(beh_reg))
         )
+    if calibration is not None:
+        # STAGE BINDING, half two: this decision's own claim, digested — the carrier
+        # set the confirmation must reproduce and the task set it must rerun. Only a
+        # CONFIRM is ever reloaded and acted on, so only a CONFIRM carries it.
+        raw_evidence["decision_digest"] = _sha256_json(
+            _decision_digest_payload(improved, confirm, "section_calibration")
+        )
     return Decision(
         outcome=CONFIRM,
         reasons=tuple(confirm_reasons) + context,
@@ -950,7 +1035,7 @@ def confirmed(
       of which way the Decision comes out.
 
     ``calibration`` does here what it does in ``evaluate()``, and then three things
-    more (phase2b contract §2):
+    more:
 
     - The split judgments move onto the supported-set means against quantiles computed
       at THIS pair's own attempt counts.
@@ -983,6 +1068,25 @@ def confirmed(
             "Load the section's calibration and pass calibration=; if it is no longer "
             "fresh, the claim needs re-measuring, not re-judging."
         )
+    if calibration is not None and (first.raw or {}).get("regime") == "section_calibration":
+        # The other half of the same wiring check: a calibration IS in hand, but is it
+        # the one this claim was judged against? Every other check in the loader passes
+        # independently on any fit, fresh, correctly-pinned artifact, so two different
+        # null models both install cleanly and the swap leaves no trace anywhere else.
+        # An ABSENT digest refuses too: a record that never bound itself to a model is
+        # exactly the record this check exists to stop being trusted.
+        recorded = (first.raw or {}).get("calibration_digest")
+        current = calibration_digest(calibration)
+        if recorded != current:
+            raise ValueError(
+                "this first decision was judged against a DIFFERENT calibration than the "
+                f"one handed to the confirmation: the record's calibration digest is "
+                f"{recorded!r} and the calibration in hand digests to {current!r} (rates, "
+                f"coverage level and source from {calibration.source}). Confirming a claim "
+                "under a null model it was never judged against answers a different "
+                "question under the same word. Re-validate the candidate against the "
+                "calibration you intend to confirm it with."
+            )
     if first.outcome != CONFIRM:
         return first
     _parity(confirm_baseline, confirm_candidate)
@@ -1033,7 +1137,7 @@ def confirmed(
     report = (float(d_in), float(d_ho), float(thr_in), float(thr_ho))
 
     # The catastrophic per-task veto, same rule and same wording as `evaluate()`'s
-    # (contract §4 amendment). This function is the ONLY road to ACCEPT, so every
+    # (added by amendment). This function is the ONLY road to ACCEPT, so every
     # whole-suite protection has to hold here too — and under a calibration the split
     # means read the supported set alone, which makes a full-pass task outside that set
     # collapsing to zero invisible to every other check in this function. It is not a
@@ -1110,7 +1214,7 @@ def confirmed(
                 + " — a gain elsewhere is a new claim, not a confirmation"
             )
     else:
-        # PER CARRIER (contract §2), never the mean of them: a carrier that stayed flat
+        # PER CARRIER, never the mean of them: a carrier that stayed flat
         # cannot be carried over the line by a louder one beside it, and a task's own
         # null distribution is the only distribution its own movement is drawn from.
         if not basis:
@@ -1131,7 +1235,7 @@ def confirmed(
                     f"{_counts_note([n], confirm_baseline, confirm_candidate)} — a gain "
                     "elsewhere is a new claim, not a confirmation"
                 )
-        # GUARDS ARE GATES (contract §2). Each guard's DROP is judged against its own
+        # GUARDS ARE GATES. Each guard's DROP is judged against its own
         # null distribution, which is the only check in this function that can see a
         # trade the supported-set mean cancels out to zero.
         for g in sorted(calibration.guards):
@@ -1146,7 +1250,7 @@ def confirmed(
                     f"null-model quantile computed at "
                     f"{_counts_note([g], confirm_baseline, confirm_candidate)}"
                 )
-        # POSITIVITY (contract §2): an ACCEPT ships the edit. A supported-set mean below
+        # POSITIVITY: an ACCEPT ships the edit. A supported-set mean below
         # zero on either split is a net loss the section's own evidence recorded, small
         # enough to stay inside the null band and real enough not to ship.
         for label, delta in (("held-in", d_in), ("held-out", d_ho)):

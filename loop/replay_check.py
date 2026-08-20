@@ -18,15 +18,25 @@ CONFIRM is then re-judged through `confirmed()` as well, with the pair itself re
 to `confirm_tasks` standing in for the confirmation rerun, so the ACCEPT gate is covered
 by the same replay rather than assumed.
 
-`calibration=` is never passed. The calibrated regime is NEW behavior and has nothing to
-be identical to; what must not move is what the loop already decides today for
-`tool_output` and for every uncalibrated section.
+`calibration=` is never passed in that mode. The calibrated regime is NEW behavior and
+has nothing to be identical to; what must not move is what the loop already decides
+today for `tool_output` and for every uncalibrated section.
+
+`--calibrated` is the OTHER mode, and it answers a different question: does the
+calibrated path execute end to end on real recorded data, and does it produce a false
+outcome on the pairs where a false outcome is identifiable? See `replay_calibrated` for
+exactly what that covers and what it deliberately does not.
+
+Both modes fail on a result file they could not read. A skipped file is a recorded
+measurement the replay never covered, and a gate that silently narrows its own input
+can pass by covering nothing.
 
 Usage::
 
     python -m loop.replay_check                     # working tree vs HEAD
     python -m loop.replay_check --ref <git-ref>     # working tree vs any ref
     python -m loop.replay_check --results-dir <dir>
+    python -m loop.replay_check --calibrated        # the calibrated path, on real data
 
 Prints the pair and mismatch counts and exits nonzero if anything differs, so it can be
 read as a gate rather than as prose. Run it BEFORE committing a change to
@@ -101,23 +111,31 @@ def load_current(editor_root: Path = EDITOR_ROOT) -> ModuleType:
     return load_source((editor_root / ACCEPTANCE_REL).read_text(), "acceptance_current")
 
 
-def load_results(results_dir: Path) -> dict[str, dict]:
-    """Every readable, suite-shaped `*.json` under `results_dir`.
+def load_results(results_dir: Path) -> tuple[dict[str, dict], list[str]]:
+    """Every readable, suite-shaped `*.json` under `results_dir`, AND what was skipped.
 
-    A file that is unreadable, is not JSON, or carries no `tasks` map is SKIPPED rather
-    than failed on: this directory is written by live runs, and a partially written
-    result appearing mid-replay is an artifact of when the tool ran, not a difference
-    between two versions of the rule.
+    A file that is unreadable, is not JSON, or carries no `tasks` map cannot be
+    replayed. It used to be dropped silently, on the reasoning that this directory is
+    written by live runs and a half-written file is an artifact of timing. That
+    reasoning is fine and the silence was not: a gate that quietly narrows its own
+    input can pass by covering nothing, and nobody reading "0 mismatches" would know
+    how many recorded measurements never entered the comparison. The skipped names come
+    back with the results, `main()` prints them, and any skip fails the run — a
+    concurrent write is a reason to re-run the gate, not to trust a partial one.
     """
     out: dict[str, dict] = {}
+    skipped: list[str] = []
     for path in sorted(results_dir.glob("*.json")):
         try:
             data = json.loads(path.read_text())
         except (OSError, ValueError):
+            skipped.append(path.stem)
             continue
         if isinstance(data, dict) and isinstance(data.get("tasks"), dict) and data["tasks"]:
             out[path.stem] = data
-    return out
+        else:
+            skipped.append(path.stem)
+    return out, skipped
 
 
 def _payload(judge, *args) -> str:
@@ -203,19 +221,145 @@ def replay(
     return report
 
 
+# The label prefix of this program's round-2 NULL arms: runs with nothing changed
+# between them. A CONFIRM or an ACCEPT on a pair of these is a false outcome by
+# construction, which is what makes them the one population the calibrated mode can
+# gate on rather than merely report.
+NULL_ARM_PREFIX = "r2-null-"
+
+
+def replay_calibrated(
+    results_dir: Path, model_path: Path | None = None, section: str = "compaction"
+) -> dict:
+    """Exercise the CALIBRATED branch over every recorded pair, and gate on the arms
+    whose right answer is known.
+
+    This is NOT a byte-identity replay and cannot be: the calibrated regime is new
+    behavior with nothing to be identical to. What it covers, stated plainly so nobody
+    reads more into a green run than it earns:
+
+    - Every ordered pair of recorded results whose BASELINE the installed artifact is
+      fresh for is judged through `evaluate(calibration=...)`. Pairs the parity gates
+      refuse (different task sets, different attempt counts, different runner_sha) are
+      counted as refused, exactly as in the uncalibrated replay — the refusal is
+      behavior, not a skipped case.
+    - Every CONFIRM is carried into `confirmed()` with the pair restricted to the
+      first decision's own `confirm_tasks`, so the ACCEPT gate runs too.
+    - Pairs where both sides are round-2 NULL ARMS are the gate: nothing changed
+      between those runs, so a CONFIRM or an ACCEPT there is a false outcome and the
+      run fails, naming the pair.
+    - Everything else is REPORTED, never gated: a real candidate pair reaching CONFIRM
+      is the rule working, and this tool has no way to know which of those is right.
+
+    So a green run means "the calibrated path executes on real recorded data end to
+    end, and produces zero false outcomes on the pairs where a false outcome is
+    identifiable". It does not mean the calibrated rule is correct in general.
+    """
+    from loop.acceptance import ACCEPT, CONFIRM, evaluate
+    from loop.validate import calibration_status
+
+    results, skipped = load_results(results_dir)
+    report: dict = {
+        "results": len(results),
+        "skipped": skipped,
+        "pairs": 0,
+        "uncalibrated_pairs": 0,
+        "refused": 0,
+        "decided": 0,
+        "confirms": 0,
+        "accepts": 0,
+        "null_arm_pairs": 0,
+        "false_outcomes": [],
+    }
+    labels = sorted(results)
+    for a in labels:
+        for b in labels:
+            if a == b:
+                continue
+            base, cand = results[a], results[b]
+            calibration = calibration_status(
+                section, base.get("fingerprint") or {}, model_path=model_path
+            )[0]
+            if calibration is None:
+                report["uncalibrated_pairs"] += 1
+                continue
+            report["pairs"] += 1
+            try:
+                first = evaluate(base, cand, calibration=calibration)
+            except Exception:  # a parity refusal is behavior, not a skipped case
+                report["refused"] += 1
+                continue
+            report["decided"] += 1
+            both_null = a.startswith(NULL_ARM_PREFIX) and b.startswith(NULL_ARM_PREFIX)
+            if both_null:
+                report["null_arm_pairs"] += 1
+            outcome = first.outcome
+            if outcome == CONFIRM:
+                report["confirms"] += 1
+                fb = _restrict(base, first.confirm_tasks)
+                fc = _restrict(cand, first.confirm_tasks)
+                decision = confirmed_or_error(first, fb, fc, calibration)
+                if decision == ACCEPT:
+                    report["accepts"] += 1
+                if both_null:
+                    report["false_outcomes"].append(f"{a}::{b} CONFIRM -> {decision}")
+            elif both_null and outcome == ACCEPT:  # pragma: no cover -- evaluate cannot
+                report["false_outcomes"].append(f"{a}::{b} {outcome}")
+    return report
+
+
+def confirmed_or_error(first, baseline: dict, candidate: dict, calibration) -> str:
+    """`confirmed()`'s outcome, or the name of the refusal it raised.
+
+    A refusal here is a legitimate answer (the restricted stand-in pair may not cover
+    exactly what the first decision selected), and it is emphatically not an ACCEPT,
+    so it is recorded as itself rather than allowed to end the sweep."""
+    from loop.acceptance import confirmed
+
+    try:
+        return confirmed(first, baseline, candidate, calibration=calibration).outcome
+    except Exception as exc:
+        return f"RAISED {type(exc).__name__}"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--ref", default="HEAD", help="git ref to compare against (default HEAD)")
     parser.add_argument("--results-dir", type=Path, default=RESULTS_DIR)
     parser.add_argument("--show", type=int, default=3, help="how many mismatches to print")
+    parser.add_argument(
+        "--calibrated",
+        action="store_true",
+        help="exercise the CALIBRATED branch instead of the byte-identity replay",
+    )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
+    if args.calibrated:
+        report = replay_calibrated(args.results_dir)
+        print(
+            f"calibrated replay over {report['results']} recorded results: "
+            f"{report['pairs']} ordered pairs had a fresh calibration "
+            f"({report['uncalibrated_pairs']} did not), {report['decided']} reached a "
+            f"verdict, {report['refused']} were refused by the parity gates; "
+            f"{report['confirms']} CONFIRM, {report['accepts']} ACCEPT"
+        )
+        print(
+            f"null-arm pairs judged (nothing changed between those runs, so any CONFIRM "
+            f"or ACCEPT is false): {report['null_arm_pairs']}; "
+            f"false outcomes: {len(report['false_outcomes'])}"
+        )
+        for item in report["false_outcomes"][: args.show]:
+            print(f"  FALSE OUTCOME {item}")
+        skipped = _report_skipped(report["skipped"], args.results_dir)
+        return 1 if report["false_outcomes"] or skipped else 0
+
     reference = load_reference(args.ref)
-    results = load_results(args.results_dir)
+    results, skipped_files = load_results(args.results_dir)
     if not results:
         print(f"no readable results under {args.results_dir} — nothing to replay")
         return 1
     report = replay(reference, results)
+    report["skipped"] = skipped_files
     print(
         f"replayed {report['results']} recorded results as "
         f"{report['evaluate_pairs']} ordered evaluate() pairs against {args.ref}: "
@@ -233,7 +377,29 @@ def main(argv: list[str] | None = None) -> int:
         for item in report[kind][: args.show]:
             print(f"\n{kind} {item['pair']}\n  reference: {item['reference']}")
             print(f"  current:   {item['current']}")
-    return 1 if report["evaluate_mismatches"] or report["confirmed_mismatches"] else 0
+    skipped = _report_skipped(skipped_files, args.results_dir)
+    mismatched = report["evaluate_mismatches"] or report["confirmed_mismatches"]
+    return 1 if mismatched or skipped else 0
+
+
+def _report_skipped(skipped: list[str], results_dir: Path) -> bool:
+    """Print what the replay could not read, and say whether that is a failure.
+
+    Always a failure when nonempty. A skipped result file is a recorded measurement
+    this gate did not cover, and a gate that decides how much of its own input to
+    ignore is not a gate. The usual cause is benign (a live run writing a file while
+    the replay reads the directory), and the remedy is to run it again, not to accept
+    a partial pass.
+    """
+    if not skipped:
+        return False
+    print(
+        f"SKIPPED {len(skipped)} unreadable or non-suite-shaped file(s) under "
+        f"{results_dir}: {', '.join(skipped)} — every recorded result must be replayable, "
+        "so this run does not pass. If a live measurement was writing during the replay, "
+        "re-run it."
+    )
+    return True
 
 
 if __name__ == "__main__":  # pragma: no cover

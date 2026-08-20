@@ -1,12 +1,11 @@
 """Pins for `loop.calibrate`: measured noise bounds from null (nothing-changed) arms.
 
-Built against the frozen contract (contracts/phase2-calibration-contract.md §2-3):
-five null arms (a full-suite baseline plus four --only supported-set subset runs)
-feed `calibrate()`, which must refuse a fingerprint mismatch, accept filtered/
-subset arms (the whole point — `runner.delta` refuses them), and record what the
-CURRENT, uncalibrated `evaluate()` rule does on every arm pair, including the
-full-suite-vs-subset pairs whose mismatched task sets/attempts make `evaluate()`
-raise.
+Built against the frozen round-1 null-run protocol: five null arms (a full-suite
+baseline plus four --only supported-set subset runs) feed `calibrate()`, which must
+refuse a fingerprint mismatch, accept filtered/subset arms (the whole point —
+`runner.delta` refuses them), and record what the CURRENT, uncalibrated `evaluate()`
+rule does on every arm pair, including the full-suite-vs-subset pairs whose mismatched
+task sets/attempts make `evaluate()` raise.
 """
 
 from __future__ import annotations
@@ -42,7 +41,15 @@ def _arm(
     attempts, passes, pass_fraction}}`, and — when `filtered` — a `filter` key, the
     marker `runner.delta` refuses outright and this tool exists precisely to accept.
     """
-    fp = fingerprint or {"runner_sha": "rsha1", "config_version": 7, "model": "carbon-model"}
+    # `dirty_sha` is present and None: a CLEAN tree, which is what these fabricated
+    # arms represent. `calibrate_model` refuses an arm whose fingerprint LACKS the key
+    # (absent is unknown, not clean), so a default without it would not be a legal arm.
+    fp = fingerprint or {
+        "runner_sha": "rsha1",
+        "config_version": 7,
+        "model": "carbon-model",
+        "dirty_sha": None,
+    }
     tasks = {
         name: {
             "split": split,
@@ -120,8 +127,15 @@ def test_dirty_sha_mismatch_across_arms_is_refused(tmp_path):
 
 
 def test_dirty_sha_none_on_both_arms_is_consistent_not_a_mismatch(tmp_path):
-    """A clean tree on both arms (`dirty_sha` absent -> None on both) must not be
-    refused -- None==None IS consistent; only a genuine difference is a mismatch."""
+    """A clean tree on both arms (`dirty_sha` recorded as None on both) must not be
+    refused -- None==None IS consistent; only a genuine difference is a mismatch.
+
+    Round-1 `calibrate()` reads the field with `.get`, so an arm that omits the key
+    entirely reaches the same place. Round-2 `calibrate_model()` does not: it refuses
+    a MISSING key outright, because absent is unknown rather than clean. That is the
+    round-2 behavior, pinned in `tests/test_p2b_closing.py`, and this test is about
+    round-1's unchanged one.
+    """
     arm0 = _arm("arm0", {"A1": (2, 3, "held_in")})
     arm1 = _arm("arm1", {"A1": (2, 3, "held_in")})
     _write(tmp_path, "arm0", arm0)
@@ -370,7 +384,7 @@ def test_main_requires_at_least_one_label(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Round 2 (contracts/phase2b-calibration-contract.md): `calibrate_model()`,
+# Round 2: `calibrate_model()`,
 # the null-MODEL artifact, and the exact-enumeration primitives it is built
 # on. `_arm`/`_write` above are reused unchanged -- they already support a
 # custom `fingerprint` dict (round-2's provenance needs `gemma_sha`, the
@@ -676,7 +690,7 @@ def test_realistic_seven_arm_protocol_is_fit(tmp_path):
     assert result["null_model"]["G5"]["null_rate"] == "31/49"
     assert len(result["provenance"]) == 7
     assert result["fitness"]["fit"] is True
-    assert result["fitness"]["power"]["per_task"].keys() == _MODEL_SUPPORTED
+    assert result["fitness"]["power"]["stage1_only"]["per_task"].keys() == _MODEL_SUPPORTED
     assert result["computed_at_runner_sha"] == "rsha1"
     # Positive proof carbon_sha is actually POPULATED from gemma_sha here, not
     # just consistently None on every arm (the mismatch tests only prove the
@@ -781,7 +795,7 @@ def test_fitness_power_gain_gate_rows_exist_for_both_splits_and_are_exact_fracti
 
     result = calibrate_model(list(arms), tmp_path, _MODEL_SUPPORTED)
 
-    gain_gate = result["fitness"]["power"]["gain_gate"]
+    gain_gate = result["fitness"]["power"]["stage1_only"]["gain_gate"]
     assert gain_gate.keys() == {"held_in", "held_out"}
     for split, row in gain_gate.items():
         for field in ("threshold", "power"):
@@ -938,19 +952,46 @@ def test_null_gain_quantile_is_deterministic_and_exact_type():
     assert first == second
 
 
-def test_null_gain_quantile_is_fast_at_three_tasks_ten_attempts():
-    """Watch-runtime guard: three tasks at ten attempts each (the subset
-    arms' own shape, contract §3) must enumerate well under 2 seconds --
-    the size this module's own fitness checks and a real confirmation gate
-    actually run at."""
+def test_null_gain_quantile_is_not_accidentally_superlinear_in_attempts():
+    """Watch-runtime guard for three tasks at ten attempts each -- the subset arms'
+    own shape, and the size a real confirmation gate runs at.
+
+    A wall-clock ceiling was the first version of this test and it asserted the wrong
+    thing: 2 seconds is a statement about the machine, not about the code. On a loaded
+    CI box or a cold interpreter it goes red on a change that touched nothing, and on
+    a fast one it stays green through a rewrite that made the enumeration ten times
+    slower. Both directions are wrong, and the second is the dangerous one.
+
+    So the check is RELATIVE and about shape: the ten-attempt enumeration must cost no
+    more than a generous multiple of the three-attempt one at the same task count.
+    That ratio is a property of the algorithm (the per-task difference distribution
+    grows as 2n+1 and is convolved across a fixed number of tasks), so it survives a
+    slow machine, and it goes red on a genuine complexity regression -- an accidental
+    return to enumerating count PAIRS rather than differences would blow straight
+    through it. The wall-clock bound is kept only as a deliberately loose backstop
+    against something pathological, at a size no plausible machine takes seconds on.
+    """
     rates = {"A1": Fraction(21, 49), "G4": Fraction(5, 49), "G5": Fraction(30, 49)}
+    small = {"A1": 3, "G4": 3, "G5": 3}
     attempts = {"A1": 10, "G4": 10, "G5": 10}
 
+    # Warm the memoized pmf cache for both sizes first, so this times the enumeration
+    # and not one call's share of a cache that the other call would have populated.
+    null_gain_quantile(rates, small, small, COVERAGE_LEVEL)
+    null_gain_quantile(rates, attempts, attempts, COVERAGE_LEVEL)
+
+    start = time.perf_counter()
+    null_gain_quantile(rates, small, small, COVERAGE_LEVEL)
+    baseline = time.perf_counter() - start
     start = time.perf_counter()
     null_gain_quantile(rates, attempts, attempts, COVERAGE_LEVEL)
     elapsed = time.perf_counter() - start
 
-    assert elapsed < 2.0
+    assert elapsed <= max(baseline, 1e-4) * 200, (
+        f"ten-attempt enumeration took {elapsed:.4f}s against {baseline:.4f}s at three "
+        "attempts -- that ratio is a complexity change, not a slow machine"
+    )
+    assert elapsed < 30.0, "loose backstop: seconds here means something pathological"
 
 
 # ---------------------------------------------------------------------------

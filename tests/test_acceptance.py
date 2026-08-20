@@ -10,6 +10,7 @@ from loop.acceptance import (
     CONFIRM,
     FISHER_ALPHA,
     REJECT,
+    calibration_digest,
     confirmed,
     evaluate,
     fisher_one_sided,
@@ -1110,7 +1111,13 @@ def test_the_round_1_false_accept_reproduction_now_rejects():
         evidence_split="held_in",
         improved_tasks=("A1",),
         confirm_tasks=("A1", "G2", "G4", "G5"),
-        raw={"regime": "section_calibration"},
+        # A hand-built first decision must carry the calibration digest `evaluate()`
+        # writes on every calibrated decision: `confirmed()` binds the two stages to
+        # ONE null model, and an absent digest is a record that never bound itself.
+        raw={
+            "regime": "section_calibration",
+            "calibration_digest": calibration_digest(cal),
+        },
     )
     d = confirmed(first, baseline, candidate, calibration=cal)
     assert d.outcome == REJECT
@@ -1547,7 +1554,13 @@ def test_a_confirmation_missing_a_supported_task_refuses(tmp_path):
         evidence_split="held_out",
         improved_tasks=("G2",),
         confirm_tasks=("A1", "G2", "G5"),  # no G4 — written before the amendment
-        raw={"regime": "section_calibration"},
+        # A hand-built first decision must carry the calibration digest `evaluate()`
+        # writes on every calibrated decision: `confirmed()` binds the two stages to
+        # ONE null model, and an absent digest is a record that never bound itself.
+        raw={
+            "regime": "section_calibration",
+            "calibration_digest": calibration_digest(cal),
+        },
     )
     counts = {n: v for n, v in _CONFIRM_COUNTS.items() if n != "G4"}
     fb, fc = _confirm_pair(stale_record, counts, counts | {"G2": (38, 50, "held_out")})
@@ -1572,7 +1585,13 @@ def test_a_carrier_outside_the_null_model_refuses_rather_than_guessing(tmp_path)
         evidence_split="held_out",
         improved_tasks=("X2",),  # never a supported task
         confirm_tasks=("A1", "G2", "G4", "G5", "X2"),
-        raw={"regime": "section_calibration"},
+        # A hand-built first decision must carry the calibration digest `evaluate()`
+        # writes on every calibrated decision: `confirmed()` binds the two stages to
+        # ONE null model, and an absent digest is a record that never bound itself.
+        raw={
+            "regime": "section_calibration",
+            "calibration_digest": calibration_digest(cal),
+        },
     )
     counts = _confirm_counts(extra={"X2": (2, 4, "held_out")})
     moved = _confirm_counts({"G2": 38}, extra={"X2": (4, 4, "held_out")})

@@ -19,7 +19,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from loop.acceptance import ACCEPT, CONFIRM, Decision, confirmed
+from loop.acceptance import ACCEPT, CONFIRM, Decision, confirmed, decision_digest
 from loop.artifacts import (
     STAGE_PAIRED_CONFIRMATION,
     Candidate,
@@ -136,7 +136,27 @@ def load_first_decision(it_dir: Path, candidate_id: str) -> Decision:
         for k, v in rule.items()
         if k in decision_fields
     }
-    return Decision(**kwargs)
+    decision = Decision(**kwargs)
+    # STAGE BINDING at the reload boundary. Everything above trusts a JSON file on
+    # disk, and the two fields it hands `confirmed()` are the whole exam: every task
+    # in `improved_tasks` must repeat beyond its own null quantile, and `confirm_tasks`
+    # is what gets rerun. Editing three carriers down to one is not a smaller claim,
+    # it is an easier test of a claim that was never made — and nothing else in this
+    # path could see it, because a shorter list is perfectly well-formed. The decision
+    # that made the claim wrote a digest of it; here is where it gets checked.
+    recorded = (decision.raw or {}).get("decision_digest")
+    if recorded is not None:
+        current = decision_digest(decision)
+        if recorded != current:
+            raise SystemExit(
+                f"{rec_path} has been edited since it was written: its recorded decision "
+                f"digest is {recorded!r} and the improved_tasks/confirm_tasks it now "
+                f"carries digest to {current!r}. improved_tasks={list(decision.improved_tasks)}, "
+                f"confirm_tasks={list(decision.confirm_tasks)} — a confirmation run from "
+                "this record would test a different claim than the one that was made. "
+                "Re-validate the candidate rather than repairing the record."
+            )
+    return decision
 
 
 def _run_confirm_arm(
@@ -212,7 +232,7 @@ def run_confirmation(
     """Fresh paired confirmation: a baseline arm (config unedited) against a candidate
     arm (candidate applied), both filtered to the first decision's ``confirm_tasks``
     at ``attempts`` each, judged by ``acceptance.confirmed()``. The only path from a
-    CONFIRM to an ACCEPT (contract §5) — shared infrastructure, not section-specific.
+    CONFIRM to an ACCEPT — shared infrastructure, not section-specific.
     """
     for label in (baseline_label, candidate_label):
         if (results_dir / f"{label}.json").is_file():
@@ -237,7 +257,7 @@ def run_confirmation(
         require_clean_tree(carbon_root)  # the revert must actually have reverted
     log(f"candidate {candidate.id}: confirmation candidate arm {candidate_label!r} done")
     # The section's measured bounds, if it has any that are fresh for THIS pair
-    # (contract §5 amendment). The freshness question is asked of the confirmation
+    # The freshness question is asked of the confirmation
     # BASELINE arm — the run that was just recorded, not the process asking — so a
     # calibration is used only where it is actually a bound for these measurements.
     # For an uncalibrated section (`tool_output`) this is None and nothing changes.
@@ -284,7 +304,7 @@ def run_confirmation(
 def _pr_eligible_record(
     it_dir: Path, candidate: Candidate, record: ValidationRecord
 ) -> ValidationRecord:
-    """PR eligibility (contract §5 amendment): the validation record's own
+    """PR eligibility: the validation record's own
     ``accepted``, OR — for a rule-section candidate whose FIRST decision was
     CONFIRM — a fresh paired confirmation for the SAME candidate whose own outcome
     is ACCEPT.
@@ -334,7 +354,12 @@ def _pr_eligible_record(
             f"candidate {candidate.id!r}'s confirmation outcome is {outcome!r}, not "
             f"{ACCEPT!r} — no PR"
         )
-    return dataclasses.replace(record, accepted=True)
+    # The confirmation rides along onto the record. It is what ACCEPTED this candidate:
+    # its deltas, its quantiles and its attempt counts are the evidence for the merge,
+    # and stage 1's are not. Promoting `accepted` alone left `pr_body` rendering the
+    # first pass's numbers under the word ACCEPTED — the verdict of one measurement
+    # printed beside another one's figures.
+    return dataclasses.replace(record, accepted=True, confirmation=confirmation.to_json())
 
 
 def main() -> None:

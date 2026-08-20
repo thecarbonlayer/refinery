@@ -1,10 +1,26 @@
 """Measured noise from NULL arms: nothing changed between them, so every |Δ| this
 module reports is sampling noise, not signal. Where `runner.delta` computes a Δ
 between a baseline and a candidate and refuses anything partial, this tool exists
-to consume the null-run PROTOCOL itself (contracts/phase2-calibration-contract.md
-§2): one full-suite arm plus several `--only <supported set>` subset arms, all at
-the same harness state, and turn their spread into thresholds a later rule
-extension can use instead of borrowing `one_attempt` wholesale.
+to consume the null-run PROTOCOL itself: one full-suite arm plus several
+`--only <supported set>` subset arms, all at the same harness state, and turn
+their spread into thresholds a later rule extension can use instead of borrowing
+`one_attempt` wholesale.
+
+THE PROTOCOL THIS MODULE ASSUMES, stated here because the code depends on it and
+a citation to a document living somewhere else would be a fact nobody can check
+from this repo:
+
+- Every arm is a run of this suite against the same harness state, with NOTHING
+  edited between arms. An arm therefore measures noise; a Δ across arms measures
+  nothing else.
+- Every arm shares `runner_sha`, `config_version`, `model`, the carbon revision
+  under test, and tree state. A Δ across any of those is a measurement of the
+  thing that changed, not of noise, so a disagreement refuses.
+- Round-2 arm shapes: three full-suite arms at the suite's standard attempt
+  counts (3 held-in, 5 held-out) and five `--only A1 G2 G4 G5 --attempts 10`
+  subset arms. Pooled per-task attempts therefore run to 59 (65 for G2).
+- The section this calibrates is `compaction`; its supported task set is pinned
+  to {A1, G2, G4, G5} (`SUPPORTED` below) and the loader refuses any other set.
 
 Pure computation: no subprocess, no network, no writes except the one analysis
 artifact `main()` produces. Every rate comparison stays exact (`Fraction` of the
@@ -22,20 +38,28 @@ refuses a candidate re-measured at a different sample size. That refusal is not 
 bug to route around: it is recorded as an honest `"outcome": "ERROR"` entry
 rather than allowed to crash the whole analysis.
 
-ROUND 2 (contracts/phase2b-calibration-contract.md): the round-1 threshold shape
-above was measured, then withdrawn -- see iterations/calibration-compaction/
-README.md for why (a bound below a real validation's own grain, an end-to-end
-false ACCEPT reproduced from two of its own null arms, a 3-task-mean bound
-applied to single-task deltas, no stated coverage). `calibrate()` and its output
-shape stay exactly as they were, kept for history; `calibrate_model()` is the
-round-2 replacement, alongside it, not instead of it. It stops storing
-THRESHOLDS and starts storing the null MODEL itself -- per-task pooled pass
-rates, exact fractions, with provenance -- so a rule extension can compute a
-quantile at whatever attempt counts the judgment it is deciding actually used
-(the round-1 defect: a bound measured at n=10 applied at n=3). `null_gain_quantile`
-and `null_task_quantile` are the exact-enumeration primitives that computation
-needs; they are exported so `loop.acceptance` can import them directly rather
-than re-deriving exact binomial quantiles a second time.
+ROUND 2: the round-1 threshold shape above was measured, then withdrawn -- see
+iterations/calibration-compaction/README.md for why (a bound below a real
+validation's own grain, an end-to-end false ACCEPT reproduced from two of its own
+null arms, a 3-task-mean bound applied to single-task deltas, no stated
+coverage). `calibrate()` and its output shape stay exactly as they were, kept for
+history; `calibrate_model()` is the round-2 replacement, alongside it, not
+instead of it. It stops storing THRESHOLDS and starts storing the null MODEL
+itself -- per-task pooled pass rates, exact fractions, with provenance -- so a
+rule extension can compute a quantile at whatever attempt counts the judgment it
+is deciding actually used (the round-1 defect: a bound measured at n=10 applied
+at n=3). `null_gain_quantile` and `null_task_quantile` are the exact-enumeration
+primitives that computation needs; they are exported so `loop.acceptance` can
+import them directly rather than re-deriving exact binomial quantiles a second
+time.
+
+The artifact is also the place this program publishes what its rule CANNOT do:
+end-to-end power across both stages, the false-CONFIRM rate conditional on the
+one baseline arm every real judgment is made against, and the leave-one-out
+margins behind the stability verdict. `recompute_model()` is the other half of
+that honesty -- it re-derives every one of those checks from the artifact's own
+per-arm counts so a reader (and the loader) never has to take the recorded
+verdict's word for itself.
 """
 
 from __future__ import annotations
@@ -44,7 +68,7 @@ import json
 import sys
 from fractions import Fraction
 from functools import cache
-from itertools import combinations
+from itertools import combinations, product
 from math import comb
 from pathlib import Path
 
@@ -54,35 +78,66 @@ EDITOR_ROOT = Path(__file__).resolve().parents[1]
 ANALYSIS_PATH = EDITOR_ROOT / "iterations" / "calibration-compaction" / "analysis.json"
 MODEL_PATH = EDITOR_ROOT / "iterations" / "calibration-compaction" / "model-r2.json"
 
-# Contract §1: A1, G2, G4, G5 (aliases CMP-1..CMP-4) -- the section this phase
-# calibrates. Only `main()`'s CLI default depends on this; `calibrate()`/
+# The `compaction` section's pinned supported set: A1, G2, G4, G5 (aliases
+# CMP-1..CMP-4). Only `main()`'s CLI default depends on this; `calibrate()`/
 # `calibrate_model()` themselves always take `supported` explicitly, so tests
-# never need to touch this. The round-2 contract (phase2b) pins the SAME four
-# tasks as round-1 (phase2), so one constant serves both entry points.
+# never need to touch this. Round 1 and round 2 pin the SAME four tasks, so one
+# constant serves both entry points.
 SUPPORTED = frozenset({"A1", "G2", "G4", "G5"})
 
-# Round-2's declared one-sided coverage (contract §1: "0.975"), as the exact
-# Fraction every quantile in this module is computed at. 975/1000 reduces to
-# 39/40 -- kept spelled out at the contract's own precision rather than
-# hand-simplified, so a reader can see the "97.5%" the contract states.
+# The tasks a confirmation pair must rerun for `compaction` EVEN IF UNMOVED, and
+# which are adjudicated against their own null distribution when it does: the
+# section's known trade-off guards. G4 is the MINER and is deliberately absent --
+# the task a candidate is mined from cannot also be the task that vouches for it.
+# G2 is the held-out member, so the guard set spans both splits.
+#
+# It lives HERE, beside the null model, rather than only in `loop.validate`, for
+# one concrete reason: the end-to-end power rows below enumerate the SECOND stage
+# of the pipeline, and the second stage applies the guard gate. A power number
+# computed against a different guard set than the one the confirmation actually
+# applies would describe a pipeline nobody runs. `loop.validate` imports this
+# constant instead of restating it, so the two cannot drift.
+CONFIRMATION_GUARDS = frozenset({"A1", "G2", "G5"})
+
+# Round-2's one-sided coverage, as the exact Fraction every quantile in this
+# module is computed at. 975/1000 reduces to 39/40 -- kept spelled out at the
+# protocol's own stated precision ("97.5%") rather than hand-simplified, so a
+# reader can see where it came from. The loader pins the installed artifact to
+# exactly this value.
 COVERAGE_LEVEL = Fraction(975, 1000)
 
-# Round-2's power-floor construction (contract §4.4): a true candidate rate of
-# POOLED + 0.2 on the carrier, measured at the subset arms' own attempt count
-# (contract §3's `--attempts 10`) -- the confirmation-shaped count a repeat/
-# guard gate actually judges at, not the standard 3/5 a first pass uses.
+# The power-floor construction: a true candidate rate of POOLED + 0.2 on the
+# carrier, measured at the subset arms' own attempt count (`--attempts 10`) --
+# the confirmation-shaped count a repeat/guard gate actually judges at, not the
+# standard 3/5 a first pass uses.
 POWER_OFFSET = Fraction(1, 5)
 POWER_ATTEMPTS = 10
 
-# The four fields the null-run protocol requires every arm to share (contract
-# §2): a Δ across runner versions, config versions, models, or uncommitted carbon
+# The end-to-end alternatives the artifact publishes a joint detection rate for:
+# +0.2 on ONE carrier (every supported task gets its own row) and +0.3/+0.5
+# applied uniformly across the whole supported set. Three sizes, deliberately --
+# a single number invites the reader to treat it as "the" power, and the shape of
+# the curve is the honest answer.
+END_TO_END_UNIFORM_OFFSETS = (Fraction(3, 10), Fraction(1, 2))
+
+# The DESIGNATED baseline arm: the one recorded run every Phase-2b comparison is
+# actually made against. A human chose it (the first full-suite arm of the
+# protocol) and the choice is recorded in the artifact rather than left implicit,
+# because the false-CONFIRM probability CONDITIONAL on it is a different -- and
+# more relevant -- number than the marginal one averaged over baselines that will
+# never be used again.
+DESIGNATED_BASELINE = "r2-null-full-a"
+
+# The four fields the null-run protocol requires every arm to share (see this
+# module's docstring for the protocol itself): a Δ across runner versions, config
+# versions, models, or uncommitted carbon
 # states is not a measurement of noise, it is a measurement of the thing that
 # changed. `dirty_sha` is None for a clean tree -- None==None across arms is a
 # consistent (both clean) digest, not a mismatch; only a genuine difference (two
 # arms dirty in different, unrelated ways, or one dirty and one clean) refuses.
 _FINGERPRINT_FIELDS = ("runner_sha", "config_version", "model", "dirty_sha")
 
-# Round-2's provenance (contract §1): the same four fields PLUS `carbon_sha` --
+# Round-2's provenance record: the same four fields PLUS `carbon_sha` --
 # carbon is the section under test here, not the verifier, so its identity
 # belongs in the record too. There is no literal `carbon_sha` key in a results
 # JSON's fingerprint; the runner already stamps the model/carbon revision it
@@ -137,8 +192,8 @@ def _check_labels(labels: list[str], who: str) -> None:
 def _fingerprint_field(fp: dict, field: str):
     """One provenance field's value from a raw results `fingerprint` dict.
 
-    `carbon_sha` is not a literal key the runner writes -- contract §1 sources
-    it from `gemma_sha`, the field the runner already stamps with the model/
+    `carbon_sha` is not a literal key the runner writes -- the round-2 provenance
+    record sources it from `gemma_sha`, the field the runner already stamps with the model/
     carbon revision under test.
     """
     if field == "carbon_sha":
@@ -167,15 +222,35 @@ def _check_fingerprint_fields(
 
 
 def _check_fingerprints(arm_results: dict[str, dict], labels: list[str]) -> dict:
-    """contract §2's 4-field check (round-1, unchanged): reuse/extend point for
+    """The round-1 four-field fingerprint check, unchanged: reuse/extend point for
     `_check_fingerprint_fields` below, which `_check_provenance` (round-2)
     shares the same core with."""
     return _check_fingerprint_fields(arm_results, labels, _FINGERPRINT_FIELDS)
 
 
 def _check_provenance(arm_results: dict[str, dict], labels: list[str]) -> dict:
-    """contract §1's 5-field provenance check: round-1's 4 fields plus
-    `carbon_sha`, extending `_check_fingerprints` rather than duplicating it."""
+    """The round-2 five-field provenance check: round-1's 4 fields plus
+    `carbon_sha`, extending `_check_fingerprints` rather than duplicating it.
+
+    Plus one thing round-1's check could not do, because round-1 read every field
+    through `dict.get`: an arm whose fingerprint LACKS the `dirty_sha` key is
+    refused outright, before any comparison. `dirty_sha` is the one field where
+    None is real data -- it is exactly what a CLEAN tree records -- so `.get`
+    reading an ABSENT key as None makes an arm that never stated its tree state
+    compare equal to an arm that stated it was clean. Absent is not clean, it is
+    unknown, and the entire claim this artifact rests on is that nothing differed
+    between the arms. An unknown cannot support that claim, so it refuses here
+    rather than passing silently into the pool.
+    """
+    for label in labels:
+        if "dirty_sha" not in arm_results[label].get("fingerprint", {}):
+            raise ValueError(
+                f"arm {label!r} records no dirty_sha key in its fingerprint -- an absent "
+                "key is not a clean tree. A clean checkout records dirty_sha=None, so an "
+                "unrecorded tree state would compare equal to a recorded-clean one and "
+                "pool as if the two arms provably matched. Re-record the arm with a "
+                "runner that stamps tree state, or leave it out of the pool."
+            )
     return _check_fingerprint_fields(arm_results, labels, _PROVENANCE_FIELDS)
 
 
@@ -192,7 +267,7 @@ def _build_arms(arm_results: dict[str, dict], labels: list[str]) -> list[dict]:
 
 
 def _build_provenance(arm_results: dict[str, dict], labels: list[str]) -> list[dict]:
-    """Per-arm provenance records (contract §1), the round-2 analog of
+    """Per-arm provenance records, the round-2 analog of
     `_build_arms` -- audit trail alongside the consistency check
     `_check_provenance` already ran: every arm's own values are recorded even
     though they are required to already agree."""
@@ -251,7 +326,7 @@ def _section_noise(
     split at a SHARED attempt count.
 
     A full-suite arm (standard 3/5 attempts) and the subset arms (10 attempts,
-    contract §2) never share an attempt count, so a bound mixing them would
+    10 per task) never share an attempt count, so a bound mixing them would
     average fractions of unequal precision -- the same reason `evaluate()`'s own
     parity gate refuses mismatched attempts. Group arms by their (uniform, within
     the arm) attempt count for this split's supported tasks, and use the LARGEST
@@ -352,13 +427,13 @@ def _pairwise_outcomes(arm_results: dict[str, dict], labels: list[str]) -> dict:
 
 
 def calibrate(labels: list[str], results_dir: Path, supported: frozenset[str]) -> dict:
-    """The analysis artifact of contract §3, from the named arms' results JSONs
+    """The round-1 analysis artifact, from the named arms' results JSONs
     under `results_dir`. Refuses (`ValueError` naming the field) on a fingerprint
     mismatch across arms; accepts filtered/subset arms outright -- that is the
     entire point of this tool, where `runner.delta` refuses them.
 
     Round-1 shape, kept intact for history -- see `calibrate_model()` for the
-    round-2 (contracts/phase2b-calibration-contract.md) replacement.
+    round-2 replacement.
     """
     _check_labels(labels, "calibrate")
     arm_results = {label: _load_arm(results_dir, label) for label in labels}
@@ -378,7 +453,7 @@ def calibrate(labels: list[str], results_dir: Path, supported: frozenset[str]) -
 
 
 # ---------------------------------------------------------------------------
-# Round 2 (contracts/phase2b-calibration-contract.md): exact binomial
+# Round 2: exact binomial
 # enumeration -- the primitives, then the null-model artifact built on them.
 # ---------------------------------------------------------------------------
 
@@ -390,8 +465,8 @@ def _binom_pmf(n: int, p: Fraction) -> tuple[Fraction, ...]:
     both rebuild the SAME per-task pmf many times over (stability alone does
     it once per leave-one-arm-out pool), and goodness/power reuse the pooled
     rate across every arm -- memoizing is what keeps the whole artifact fast
-    (contract's own "supported sets are <= 4 tasks at <= 20 attempts --
-    cheap").
+    the protocol's own ceiling of <= 4 supported tasks at <= 20
+    attempts keeps it cheap.
 
     This thin, UNCACHED wrapper is where `p` is checked to be exactly a
     `Fraction`, not merely numerically equal to one (`isinstance`, not `==`).
@@ -465,7 +540,7 @@ def null_gain_quantile(
     level: Fraction,
 ) -> Fraction:
     """The exact null-model quantile that gates a supported-split mean gain
-    (contract §2).
+    at judgment time.
 
     Under H0 (nothing changed), EACH task's pass count on both sides is
     Binomial(attempts, rate) at the SAME pooled `rates[task]` -- there is only
@@ -490,15 +565,15 @@ def null_gain_quantile(
 
     Exact enumeration only -- `Fraction` arithmetic and `math.comb`, never
     floats or sampling. `rates` may carry a denominator far larger than either
-    side's own attempt count (a pooled rate over 49+ null attempts, contract
-    §3): the exact arithmetic is what keeps raising that denominator safe
+    side's own attempt count (the round-2 pool runs to 59 attempts per task,
+    65 for G2): the exact arithmetic is what keeps raising that denominator safe
     (`Fraction(21, 49) ** 10` is exact, not a float that has already lost the
     difference between 21/49 and its neighbors).
 
     Performance note: every real caller (`evaluate()`/`confirmed()`, gated by
     their own `_parity` check) has `attempts_a[t] == attempts_b[t]` for every
     task `t` -- a baseline and candidate always ran the SAME suite config.
-    That symmetric case stays fast even at the contract's stated ceiling (<=4
+    That symmetric case stays fast even at the protocol's ceiling (<=4
     tasks, <=20 attempts: ~60ms measured). Fully asymmetric attempts across
     several multi-attempt tasks at once is supported by this signature but not
     a real call shape, and its per-task diff pmf can carry far more distinct
@@ -540,10 +615,38 @@ def null_gain_quantile(
             f"null_gain_quantile: attempts_a/attempts_b must be positive for every task, "
             f"got a non-positive attempt count for {non_positive}"
         )
+    pmf = _mean_diff_pmf(rates, attempts_a, rates, attempts_b)
+    cdf = Fraction(0)
+    for value in sorted(pmf):
+        cdf += pmf[value]
+        if cdf >= level:
+            return value
+    raise AssertionError(  # pragma: no cover -- a normalized pmf always reaches level<=1
+        "null_gain_quantile: CDF never reached `level` -- the enumerated pmf did not "
+        "sum to 1, which should be impossible"
+    )
+
+
+def _mean_diff_pmf(
+    rates_a: dict[str, Fraction],
+    attempts_a: dict[str, int],
+    rates_b: dict[str, Fraction],
+    attempts_b: dict[str, int],
+) -> dict[Fraction, Fraction]:
+    """Exact pmf of D = mean over `rates_a`'s tasks of each task's own
+    (b_t/attempts_b[t] - a_t/attempts_a[t]).
+
+    The one convolution every enumeration in this module runs, written once.
+    Under the NULL both sides are drawn at the same rates (`rates_a is rates_b`);
+    under an ALTERNATIVE the b-side carries the improved rates. Keeping one
+    function means the null band and the power computed against it can never
+    disagree about how a task's own difference is built.
+    """
+    tasks = sorted(rates_a)
     n = len(tasks)
     total: dict[Fraction, Fraction] = {Fraction(0): Fraction(1)}
     for t in tasks:
-        task_pmf = _task_diff_pmf(attempts_a[t], rates[t], attempts_b[t], rates[t])
+        task_pmf = _task_diff_pmf(attempts_a[t], rates_a[t], attempts_b[t], rates_b[t])
         nxt: dict[Fraction, Fraction] = {}
         for s, sp in total.items():
             if sp == 0:
@@ -553,21 +656,33 @@ def null_gain_quantile(
                     continue
                 nxt[s + d] = nxt.get(s + d, Fraction(0)) + sp * dp
         total = nxt
-    cdf = Fraction(0)
-    for s in sorted(total):
-        cdf += total[s]
-        if cdf >= level:
-            return s / n
-    raise AssertionError(  # pragma: no cover -- a normalized pmf always reaches level<=1
-        "null_gain_quantile: CDF never reached `level` -- the enumerated pmf did not "
-        "sum to 1, which should be impossible"
-    )
+    return {s / n: p for s, p in total.items()}
+
+
+def null_gain_cdf(
+    rates: dict[str, Fraction],
+    attempts_a: dict[str, int],
+    attempts_b: dict[str, int],
+    value: Fraction,
+) -> Fraction:
+    """P(D <= `value`) under the same null construction `null_gain_quantile` takes
+    the quantile of -- the COVERAGE a given threshold actually holds.
+
+    The quantile answers "what bound holds 97.5% coverage?"; this answers "how much
+    coverage does THIS bound hold?", which is the question a stability margin asks:
+    leave an arm out, re-pool, and see how much of the 39/40 the full pool's own
+    threshold still carries. A verdict that passed with a hair of slack and one that
+    passed with room to spare are different facts, and the artifact publishes both
+    rather than only the boolean they collapse into.
+    """
+    pmf = _mean_diff_pmf(rates, attempts_a, rates, attempts_b)
+    return sum((p for d, p in pmf.items() if d <= value), Fraction(0))
 
 
 def null_task_quantile(
     rate: Fraction, attempts_a: int, attempts_b: int, level: Fraction
 ) -> Fraction:
-    """Single-task specialization of `null_gain_quantile` -- contract §2's
+    """Single-task specialization of `null_gain_quantile` -- the
     carrier/guard construction: a repeat gate (per carrier task) and a guard
     adjudication both judge ONE task's own null distribution, never a
     supported-set mean. Implemented as `null_gain_quantile` over a single
@@ -604,7 +719,7 @@ def _pooled_counts(arm_results: dict[str, dict], labels: list[str], task: str) -
 def _check_supported_set(
     arm_results: dict[str, dict], labels: list[str], supported: frozenset[str]
 ) -> None:
-    """contract §1's pin: {A1, G2, G4, G5}, held exactly.
+    """The pinned supported set {A1, G2, G4, G5}, held exactly.
 
     A subset (`--only`, `filter` key present) arm carrying a task OUTSIDE
     `supported` refuses -- a filtered run is a promise that only the
@@ -666,7 +781,7 @@ def _standard_attempts(
     arm_results: dict[str, dict], labels: list[str], supported: frozenset[str]
 ) -> dict[str, int]:
     """The full-suite attempt count per task -- 3 held-in / 5 held-out in the
-    real protocol (contract §3), never the subset arms' 10. Read from EVERY
+    real protocol, never the subset arms' 10. Read from EVERY
     arm that is NOT a `--only` subset run (no `filter` key present): the same
     literal signal `_pairwise_outcomes` already uses to tell a full-suite arm
     apart from a filtered one. Refuses if no such arm is present among
@@ -721,9 +836,9 @@ def _build_null_model(
     supported: frozenset[str],
     null_counts: dict[str, tuple[int, int]],
 ) -> dict:
-    """contract §1's per-task null model: a pooled `null_rate` as an exact,
+    """The per-task null model: a pooled `null_rate` as an exact,
     UNREDUCED "passes/attempts" string -- the denominator IS the pooled
-    attempt count (contract §3's ">= 49 held-in, >= 55 for G2"), so reducing
+    attempt count (59 held-in, 65 for G2 across the eight round-2 arms), so reducing
     it the way `section_noise_exact` reduces a bound would hide exactly the
     count the arm protocol exists to guarantee -- plus the per-arm counts
     behind the pool, for audit and for the goodness check.
@@ -772,7 +887,7 @@ def _check_grain(
     supported: frozenset[str],
     level: Fraction,
 ) -> dict:
-    """Fitness check 1 (contract §4.1): at standard attempt counts, the
+    """Fitness check 1, GRAIN: at standard attempt counts, the
     computed coverage-level gain quantile must EXCEED the split's grain -- a
     threshold sitting at or below the finest movement a real run can even
     produce gates nothing, the round-1 defect that sank the withdrawn artifact
@@ -822,7 +937,7 @@ def _check_goodness(
     supported: frozenset[str],
     null_counts: dict[str, tuple[int, int]],
 ) -> dict:
-    """Fitness check 2 (contract §4.2): for each task, an exact binomial
+    """Fitness check 2, GOODNESS: for each task, an exact binomial
     two-sided tail test of each arm's own count against the SAME pooled rate
     every arm contributed to -- any arm whose tail probability falls below
     0.01 disagrees with a single-rate model badly enough that pooling it in
@@ -859,7 +974,7 @@ def _check_stability(
     standard_attempts: dict[str, int],
     level: Fraction,
 ) -> dict:
-    """Fitness check 3 (contract §4.3): leave-one-arm-out pooled rates must
+    """Fitness check 3, STABILITY: leave-one-arm-out pooled rates must
     not shift a standard-count threshold across a REPRESENTABLE-MOVEMENT
     boundary. Representable movements are multiples of the split's own grain
     (`_split_grain`, the same quantity fitness check 1 gates on): a threshold
@@ -901,6 +1016,7 @@ def _check_stability(
         full_q = null_gain_quantile(full_rates, attempts, attempts, level)
         full_bucket = full_q // grain
         moved: dict[str, str] = {}
+        margins: dict[str, dict] = {}
         if len(labels) > 1:
             for held_out in labels:
                 remaining = [label for label in labels if label != held_out]
@@ -908,6 +1024,23 @@ def _check_stability(
                 loo_q = null_gain_quantile(loo_rates, attempts, attempts, level)
                 if loo_q // grain != full_bucket:
                     moved[held_out] = _fraction_str(loo_q)
+                # The MARGIN, published whether the verdict moved or not: how much
+                # coverage the FULL pool's own threshold still holds once this arm
+                # is removed. `pass` says only whether the bucket changed, which is
+                # a boolean over a continuous quantity -- a pool that passed with
+                # 39/40 to spare and one that passed by a hair read identically. A
+                # negative `slack` is a threshold that has stopped covering its
+                # declared level under the reduced pool even though it stayed in the
+                # same grain bucket, which is exactly the state a reader deciding
+                # whether to append more arms needs to see.
+                coverage = null_gain_cdf(loo_rates, attempts, attempts, full_q)
+                margins[held_out] = {
+                    "quantile": _fraction_str(loo_q),
+                    "bucket": int(loo_q // grain),
+                    "coverage_at_full_quantile": _fraction_str(coverage),
+                    "slack": _fraction_str(coverage - level),
+                    "slack_float": float(coverage - level),
+                }
         ok = not moved
         overall = overall and ok
         result[split] = {
@@ -915,6 +1048,7 @@ def _check_stability(
             "full_quantile": _fraction_str(full_q),
             "grain": _fraction_str(grain),
             "moved_excluding": moved,
+            "leave_one_out": margins,
             "pass": ok,
         }
     result["pass"] = overall
@@ -946,8 +1080,8 @@ def _gain_power(
 ) -> Fraction:
     """P[supported-split mean gain > threshold | `carrier`'s true rate is
     `rates[carrier] + offset` (capped at 1), every OTHER task in `rates`
-    still at its pooled null rate] -- the gain gate's own power (contract
-    §4.4's "each gate", the row `_check_power` was missing: a first-pass
+    still at its pooled null rate] -- the gain gate's own power (fitness
+    check 4 covers "each gate", and this is the row `_check_power` was missing: a first-pass
     `evaluate()` judges the split MEAN, not one task alone, so its power must
     be measured on that same mean, not borrowed from a single-task number).
 
@@ -959,18 +1093,503 @@ def _gain_power(
     coverage-level quantile at the SAME rates/attempts (`_check_grain`'s
     quantity) -- recomputing it here would risk the two silently drifting.
     """
-    tasks = sorted(rates)
-    n = len(tasks)
-    total: dict[Fraction, Fraction] = {Fraction(0): Fraction(1)}
+    alt = {t: (min(Fraction(1), rates[t] + offset) if t == carrier else rates[t]) for t in rates}
+    pmf = _mean_diff_pmf(rates, attempts, alt, attempts)
+    return sum((p for d, p in pmf.items() if d > threshold), Fraction(0))
+
+
+# The two splits this suite has. Spelled out rather than derived, because the
+# end-to-end rows below publish a per-split breakdown that must carry a row for a
+# split even when the alternative never touches it -- a missing key would read as
+# "not applicable" where the truth is "zero".
+SPLITS = ("held_in", "held_out")
+
+
+def _split_means(diffs: dict[str, Fraction], task_split: dict[str, str]) -> dict[str, Fraction]:
+    """Each split's supported-set mean movement -- the exact quantity both stages
+    of the rule judge on (`loop.acceptance._supported_means`, same denominator,
+    same exact arithmetic). A split with no supported task present means 0."""
+    out: dict[str, Fraction] = {}
+    for split in SPLITS:
+        vals = [d for t, d in diffs.items() if task_split.get(t) == split]
+        out[split] = sum(vals) / len(vals) if vals else Fraction(0)
+    return out
+
+
+def _stage1_verdict(
+    diffs: dict[str, Fraction],
+    task_split: dict[str, str],
+    quantiles: dict[str, Fraction],
+) -> tuple[bool, str, tuple[str, ...]]:
+    """STAGE 1 as a pure predicate: does `loop.acceptance.evaluate()` CONFIRM, on
+    which split, carried by which tasks?
+
+    A restatement of `evaluate()`'s calibrated branch over the SUPPORTED tasks
+    alone, so the end-to-end enumeration can be run over count vectors instead of
+    over constructed results dicts (which would make it thousands of times slower
+    and no more true). Every clause below is the same clause `evaluate()` applies:
+
+    - either split's supported-set mean below `-quantile` REJECTs;
+    - a full-pass task collapsing to zero REJECTs -- and that event is exactly
+      `diff == -1`, since (b - a)/n = -1 only when a = n and b = 0;
+    - the evidence split is held-in if its mean strictly exceeds its quantile,
+      else held-out on the same test, else there is no gain and the verdict is
+      REJECT;
+    - the carriers are the evidence split's tasks that moved up.
+
+    What it deliberately does NOT model, because the enumeration covers only the
+    supported set: the whole-suite protections `evaluate()` keeps reading (a
+    collapse or a mechanical security rise on a task OUTSIDE the supported set).
+    Those can only ever turn a CONFIRM into a REJECT, so every published
+    detection rate is an UPPER bound on the real one. `tests/test_p2b_closing.py`
+    checks this predicate against the real `evaluate()` on sampled vectors, which
+    is the only reason it is safe to enumerate against instead of the function.
+    """
+    means = _split_means(diffs, task_split)
+    for split in SPLITS:
+        if means[split] < -quantiles.get(split, Fraction(0)):
+            return False, "", ()
+    if any(d == -1 for d in diffs.values()):
+        return False, "", ()
+    evidence = ""
+    for split in SPLITS:
+        if means[split] > quantiles.get(split, Fraction(0)):
+            evidence = split
+            break
+    if not evidence:
+        return False, "", ()
+    carriers = tuple(sorted(t for t, d in diffs.items() if task_split.get(t) == evidence and d > 0))
+    return True, evidence, carriers
+
+
+def _stage2_accepts(
+    diffs: dict[str, Fraction],
+    task_split: dict[str, str],
+    quantiles: dict[str, Fraction],
+    task_quantiles: dict[str, Fraction],
+    carriers: tuple[str, ...] | frozenset[str],
+    guards: frozenset[str],
+) -> bool:
+    """STAGE 2 as a pure predicate: does `loop.acceptance.confirmed()` ACCEPT?
+
+    The same restatement, for the second gate: no split regressed past its own
+    quantile, no collapse, EVERY named carrier beat its OWN per-task quantile
+    (strictly -- a carrier that merely ties is not a repeat), no guard dropped
+    past its own quantile, and both supported-set means are non-negative. A first
+    decision naming no carrier has nothing to reproduce and cannot ACCEPT.
+
+    Same modeling limitation as `_stage1_verdict`, same direction: the whole-suite
+    vetoes and the behavioral Fisher comparison are not enumerated, so the number
+    published is an upper bound.
+    """
+    means = _split_means(diffs, task_split)
+    for split in SPLITS:
+        if means[split] < -quantiles.get(split, Fraction(0)):
+            return False
+    if any(d == -1 for d in diffs.values()):
+        return False
+    if not carriers:
+        return False
+    for t in carriers:
+        if diffs[t] <= task_quantiles[t]:
+            return False
+    for g in sorted(guards):
+        if g in diffs and diffs[g] < -task_quantiles[g]:
+            return False
+    return all(means[split] >= 0 for split in SPLITS)
+
+
+def _diff_grid(
+    rates_a: dict[str, Fraction],
+    attempts_a: dict[str, int],
+    rates_b: dict[str, Fraction],
+    attempts_b: dict[str, int],
+    tasks: tuple[str, ...],
+):
+    """Every joint per-task difference vector and its exact probability.
+
+    Enumerated over each task's own DIFFERENCE distribution (2n+1 values) rather
+    than over both sides' count pairs ((n+1)^2 of them): the predicates above read
+    only the differences, and 21 values per task at ten attempts beats 121 pairs
+    by a factor that decides whether this artifact takes seconds or minutes to
+    build.
+    """
+    per_task = []
     for t in tasks:
-        p_b = min(Fraction(1), rates[t] + offset) if t == carrier else rates[t]
-        task_pmf = _task_diff_pmf(attempts[t], rates[t], attempts[t], p_b)
-        nxt: dict[Fraction, Fraction] = {}
-        for s, sp in total.items():
-            for d, dp in task_pmf.items():
-                nxt[s + d] = nxt.get(s + d, Fraction(0)) + sp * dp
-        total = nxt
-    return sum((p for s, p in total.items() if s / n > threshold), Fraction(0))
+        pmf = _task_diff_pmf(attempts_a[t], rates_a[t], attempts_b[t], rates_b[t])
+        per_task.append(tuple((d, p) for d, p in sorted(pmf.items()) if p))
+    for combo in product(*per_task):
+        prob = Fraction(1)
+        for _, p in combo:
+            prob *= p
+        yield {t: d for t, (d, _) in zip(tasks, combo, strict=True)}, prob
+
+
+def _stage1_mass(
+    rates: dict[str, Fraction],
+    attempts: dict[str, int],
+    alt_rates: dict[str, Fraction],
+    task_split: dict[str, str],
+    quantiles: dict[str, Fraction],
+) -> dict[tuple[str, tuple[str, ...]], Fraction]:
+    """{(evidence split, carriers): probability} over every stage-1 CONFIRM shape.
+
+    Keyed by the two things a first decision hands the second stage, because those
+    are exactly what stage 2's answer depends on."""
+    mass: dict[tuple[str, tuple[str, ...]], Fraction] = {}
+    tasks = tuple(sorted(rates))
+    for diffs, prob in _diff_grid(rates, attempts, alt_rates, attempts, tasks):
+        ok, split, carriers = _stage1_verdict(diffs, task_split, quantiles)
+        if ok:
+            key = (split, carriers)
+            mass[key] = mass.get(key, Fraction(0)) + prob
+    return mass
+
+
+def _stage2_split_mass(
+    rates: dict[str, Fraction],
+    attempts: dict[str, int],
+    alt_rates: dict[str, Fraction],
+    tasks: tuple[str, ...],
+    quantile: Fraction,
+    task_quantiles: dict[str, Fraction],
+    guards: frozenset[str],
+) -> dict[frozenset[str], Fraction]:
+    """{carriers on this split: P(this split's half of an ACCEPT holds)}.
+
+    Stage 2's predicate FACTORS across splits -- every clause in it is either
+    per-task or per-split-mean, and the two splits' draws are independent -- so
+    the joint acceptance probability for a carrier set is the product of the two
+    splits' masses. That factoring is what keeps the enumeration at 21^3 + 21
+    vectors instead of 21^4, and it is exact, not an approximation.
+    """
+    subsets = [
+        frozenset(combo) for size in range(len(tasks) + 1) for combo in combinations(tasks, size)
+    ]
+    out: dict[frozenset[str], Fraction] = dict.fromkeys(subsets, Fraction(0))
+    n = len(tasks)
+    for diffs, prob in _diff_grid(rates, attempts, alt_rates, attempts, tasks):
+        if any(d == -1 for d in diffs.values()):
+            continue
+        mean = sum(diffs.values()) / n
+        if mean < -quantile or mean < 0:
+            continue
+        if any(t in guards and diffs[t] < -task_quantiles[t] for t in tasks):
+            continue
+        passing = frozenset(t for t in tasks if diffs[t] > task_quantiles[t])
+        for subset in subsets:
+            if subset <= passing:
+                out[subset] += prob
+    return out
+
+
+def _end_to_end_row(
+    kind: str,
+    offset: Fraction,
+    carrier: str | None,
+    rates: dict[str, Fraction],
+    standard_attempts: dict[str, int],
+    task_split: dict[str, str],
+    stage1_quantiles: dict[str, Fraction],
+    stage2_quantiles: dict[str, Fraction],
+    task_quantiles: dict[str, Fraction],
+    split_tasks: dict[str, tuple[str, ...]],
+    guards: frozenset[str],
+    attempts: int,
+) -> dict:
+    """One published joint detection rate: P(stage 1 CONFIRMs AND stage 2 ACCEPTs).
+
+    `carrier` names the single task the improvement lands on, or None for a
+    uniform improvement across the whole supported set. Stage 1 is judged at the
+    suite's STANDARD attempt counts (that is what a first validation runs) and
+    stage 2 at the confirmation's own, higher count.
+    """
+    alt = {
+        t: min(Fraction(1), rates[t] + (offset if carrier in (None, t) else Fraction(0)))
+        for t in rates
+    }
+    stage1 = _stage1_mass(rates, standard_attempts, alt, task_split, stage1_quantiles)
+    per_split_mass = {
+        split: _stage2_split_mass(
+            {t: rates[t] for t in tasks},
+            {t: attempts for t in tasks},
+            {t: alt[t] for t in tasks},
+            tasks,
+            stage2_quantiles.get(split, Fraction(0)),
+            task_quantiles,
+            guards,
+        )
+        for split, tasks in split_tasks.items()
+        if tasks
+    }
+
+    def accept_probability(carriers: tuple[str, ...]) -> Fraction:
+        p = Fraction(1)
+        for split, mass in per_split_mass.items():
+            on_split = frozenset(t for t in carriers if task_split.get(t) == split)
+            p *= mass.get(on_split, Fraction(0))
+        return p
+
+    by_split = {split: {"stage1_confirm": Fraction(0), "joint": Fraction(0)} for split in SPLITS}
+    for (split, carriers), prob in stage1.items():
+        row = by_split.setdefault(split, {"stage1_confirm": Fraction(0), "joint": Fraction(0)})
+        row["stage1_confirm"] += prob
+        row["joint"] += prob * accept_probability(carriers)
+    stage1_total = sum((v["stage1_confirm"] for v in by_split.values()), Fraction(0))
+    joint_total = sum((v["joint"] for v in by_split.values()), Fraction(0))
+    return {
+        "kind": kind,
+        "offset": _fraction_str(offset),
+        "carrier": carrier,
+        "improved_tasks": sorted(rates) if carrier is None else [carrier],
+        "stage1_attempts": {t: standard_attempts[t] for t in sorted(rates)},
+        "stage2_attempts": attempts,
+        "stage1_confirm": _fraction_str(stage1_total),
+        "stage1_confirm_float": float(stage1_total),
+        "joint": _fraction_str(joint_total),
+        "joint_float": float(joint_total),
+        "by_evidence_split": {
+            split: {
+                "stage1_confirm": _fraction_str(v["stage1_confirm"]),
+                "stage1_confirm_float": float(v["stage1_confirm"]),
+                "joint": _fraction_str(v["joint"]),
+                "joint_float": float(v["joint"]),
+            }
+            for split, v in sorted(by_split.items())
+        },
+    }
+
+
+def _check_end_to_end(
+    null_counts: dict[str, tuple[int, int]],
+    supported: frozenset[str],
+    task_split: dict[str, str],
+    standard_attempts: dict[str, int],
+    level: Fraction,
+    guards: frozenset[str],
+    *,
+    offset: Fraction = POWER_OFFSET,
+    attempts: int = POWER_ATTEMPTS,
+    uniform_offsets: tuple[Fraction, ...] = END_TO_END_UNIFORM_OFFSETS,
+) -> dict:
+    """The rows nobody could compute from the stage-1 numbers alone.
+
+    A published stage-1 power says what fraction of a real improvement earns a
+    CONFIRM. It does NOT say what fraction gets SHIPPED, and the difference is
+    large: the confirmation re-tests every carrier against its own distribution,
+    adjudicates every guard, and requires both supported-set means to be
+    non-negative -- three more ways for a true improvement to die. Publishing only
+    the first factor is how a weak pipeline reads as a strong one.
+
+    Three alternatives, so the reader gets a curve rather than a number: +0.2 on
+    one carrier at a time (the same offset the stage-1 rows use, one row per
+    supported task) and +0.3/+0.5 applied uniformly across the supported set.
+    """
+    rates = {t: Fraction(*null_counts[t]) for t in sorted(supported)}
+    split_tasks = {
+        split: tuple(sorted(t for t in supported if task_split.get(t) == split)) for split in SPLITS
+    }
+    stage1_quantiles = {
+        split: (
+            null_gain_quantile(
+                {t: rates[t] for t in tasks},
+                {t: standard_attempts[t] for t in tasks},
+                {t: standard_attempts[t] for t in tasks},
+                level,
+            )
+            if tasks
+            else Fraction(0)
+        )
+        for split, tasks in split_tasks.items()
+    }
+    stage2_quantiles = {
+        split: (
+            null_gain_quantile(
+                {t: rates[t] for t in tasks},
+                {t: attempts for t in tasks},
+                {t: attempts for t in tasks},
+                level,
+            )
+            if tasks
+            else Fraction(0)
+        )
+        for split, tasks in split_tasks.items()
+    }
+    task_quantiles = {
+        t: null_task_quantile(rates[t], attempts, attempts, level) for t in sorted(supported)
+    }
+    rows = [
+        _end_to_end_row(
+            "single_carrier",
+            offset,
+            carrier,
+            rates,
+            standard_attempts,
+            task_split,
+            stage1_quantiles,
+            stage2_quantiles,
+            task_quantiles,
+            split_tasks,
+            guards,
+            attempts,
+        )
+        for carrier in sorted(supported)
+    ]
+    rows += [
+        _end_to_end_row(
+            "uniform",
+            uniform,
+            None,
+            rates,
+            standard_attempts,
+            task_split,
+            stage1_quantiles,
+            stage2_quantiles,
+            task_quantiles,
+            split_tasks,
+            guards,
+            attempts,
+        )
+        for uniform in uniform_offsets
+    ]
+    return {
+        "confirmation_attempts": attempts,
+        "guards": sorted(guards),
+        "stage1_quantiles": {s: _fraction_str(q) for s, q in sorted(stage1_quantiles.items())},
+        "stage2_quantiles": {s: _fraction_str(q) for s, q in sorted(stage2_quantiles.items())},
+        "task_quantiles": {t: _fraction_str(q) for t, q in sorted(task_quantiles.items())},
+        "note": (
+            "P(stage-1 CONFIRM and stage-2 ACCEPT), enumerated exactly over both "
+            "stages' binomial outcomes at the supported set alone. The whole-suite "
+            "vetoes (a collapse or a security rise on an unsupported task) and the "
+            "behavioral Fisher comparison are NOT modeled, and can only lower a real "
+            "detection rate, so every number here is an upper bound."
+        ),
+        "rows": rows,
+    }
+
+
+def _check_false_confirm(
+    arm_results: dict[str, dict],
+    null_counts: dict[str, tuple[int, int]],
+    supported: frozenset[str],
+    task_split: dict[str, str],
+    standard_attempts: dict[str, int],
+    level: Fraction,
+    *,
+    baseline_arm: str = DESIGNATED_BASELINE,
+) -> dict:
+    """The probability a first pass CONFIRMs when NOTHING changed -- twice.
+
+    `marginal` draws both arms from the null: the average false-CONFIRM rate over
+    every pair of runs that could have happened. `conditional` fixes the DESIGNATED
+    baseline arm at the counts it actually recorded and draws only the candidate
+    side. The second is the number that describes this pipeline, because every
+    Phase-2b judgment is made against that one recorded baseline and no other --
+    and a baseline that happened to land low makes a false CONFIRM likelier for
+    every candidate that will ever be compared against it. Publishing only the
+    marginal averages that away.
+    """
+    rates = {t: Fraction(*null_counts[t]) for t in sorted(supported)}
+    split_tasks = {
+        split: tuple(sorted(t for t in supported if task_split.get(t) == split)) for split in SPLITS
+    }
+    quantiles = {
+        split: (
+            null_gain_quantile(
+                {t: rates[t] for t in tasks},
+                {t: standard_attempts[t] for t in tasks},
+                {t: standard_attempts[t] for t in tasks},
+                level,
+            )
+            if tasks
+            else Fraction(0)
+        )
+        for split, tasks in split_tasks.items()
+    }
+
+    def summarize(mass: dict[tuple[str, tuple[str, ...]], Fraction]) -> tuple[Fraction, dict]:
+        by_split = {split: Fraction(0) for split in SPLITS}
+        for (split, _carriers), prob in mass.items():
+            by_split[split] = by_split.get(split, Fraction(0)) + prob
+        return sum(by_split.values(), Fraction(0)), by_split
+
+    marginal_mass = _stage1_mass(rates, standard_attempts, rates, task_split, quantiles)
+    marginal, marginal_split = summarize(marginal_mass)
+
+    out: dict = {
+        "baseline_arm": None,
+        "quantiles": {s: _fraction_str(q) for s, q in sorted(quantiles.items())},
+        "marginal": _fraction_str(marginal),
+        "marginal_float": float(marginal),
+        "note": (
+            "P(evaluate() returns CONFIRM) with nothing changed. `marginal` draws "
+            "both arms from the null model; `conditional` fixes the designated "
+            "baseline arm's own recorded counts and draws only the candidate arm, "
+            "which is the comparison this pipeline actually makes."
+        ),
+    }
+    baseline = arm_results.get(baseline_arm)
+    if baseline is None:
+        out["conditional"] = None
+        out["conditional_float"] = None
+        out["by_evidence_split"] = {
+            s: {"marginal": _fraction_str(p), "conditional": None}
+            for s, p in sorted(marginal_split.items())
+        }
+        out["baseline_note"] = (
+            f"no arm labeled {baseline_arm!r} is in this pooling, so the conditional "
+            "rate has no designated baseline to be conditional on"
+        )
+        return out
+    counts = {}
+    for t in sorted(supported):
+        row = baseline["tasks"][t]
+        if int(row["attempts"]) != standard_attempts[t]:
+            out["conditional"] = None
+            out["conditional_float"] = None
+            out["by_evidence_split"] = {
+                s: {"marginal": _fraction_str(p), "conditional": None}
+                for s, p in sorted(marginal_split.items())
+            }
+            out["baseline_note"] = (
+                f"arm {baseline_arm!r} ran {t} at {row['attempts']} attempts, not the "
+                f"suite's standard {standard_attempts[t]} -- a designated baseline must "
+                "be a full-suite arm for the conditional rate to describe a real judgment"
+            )
+            return out
+        counts[t] = int(row["passes"])
+
+    tasks = tuple(sorted(supported))
+    conditional_mass: dict[tuple[str, tuple[str, ...]], Fraction] = {}
+    pmfs = {t: _binom_pmf(standard_attempts[t], rates[t]) for t in tasks}
+    for combo in product(*(range(standard_attempts[t] + 1) for t in tasks)):
+        prob = Fraction(1)
+        diffs = {}
+        for t, k in zip(tasks, combo, strict=True):
+            prob *= pmfs[t][k]
+            diffs[t] = Fraction(k - counts[t], standard_attempts[t])
+        if prob == 0:
+            continue
+        ok, split, carriers = _stage1_verdict(diffs, task_split, quantiles)
+        if ok:
+            key = (split, carriers)
+            conditional_mass[key] = conditional_mass.get(key, Fraction(0)) + prob
+    conditional, conditional_split = summarize(conditional_mass)
+    out["baseline_arm"] = baseline_arm
+    out["baseline_counts"] = {t: [counts[t], standard_attempts[t]] for t in tasks}
+    out["conditional"] = _fraction_str(conditional)
+    out["conditional_float"] = float(conditional)
+    out["by_evidence_split"] = {
+        split: {
+            "marginal": _fraction_str(marginal_split[split]),
+            "marginal_float": float(marginal_split[split]),
+            "conditional": _fraction_str(conditional_split[split]),
+            "conditional_float": float(conditional_split[split]),
+        }
+        for split in SPLITS
+    }
+    return out
 
 
 def _check_power(
@@ -980,16 +1599,27 @@ def _check_power(
     standard_attempts: dict[str, int],
     level: Fraction,
     *,
+    guards: frozenset[str] = CONFIRMATION_GUARDS,
     offset: Fraction = POWER_OFFSET,
     attempts: int = POWER_ATTEMPTS,
 ) -> dict:
-    """Fitness check 4 (contract §4.4): recorded, never gating -- "each gate",
-    not one. Two shapes of gate, two shapes of row:
+    """Fitness check 4, POWER: recorded, never gating -- "each gate",
+    not one, and then the whole PIPELINE.
+
+    Three blocks, and the third is a different question from the first two.
+    `stage1_only` answers "what does each individual gate detect?"; `end_to_end`
+    answers "what actually ships?", which is the product of both stages and the
+    only number a reader should compare against a claim that this loop can find
+    improvements. The stage-1 rows are labeled as such rather than left unlabeled,
+    because an unlabeled power number beside a two-stage pipeline reads as the
+    pipeline's power and is several times too high.
+
+    The two stage-1 shapes:
 
     - `per_task`: for each supported task (any of which can be a
       confirmation's carrier or guard), the probability that a TRUE candidate
       rate of pooled + 0.2 clears that task's OWN null quantile at
-      `attempts` v `attempts` (contract §3's subset attempt count, the
+      `attempts` v `attempts` (the subset arms' own attempt count, the
       confirmation-shaped one) -- the repeat/guard gate's power.
     - `gain_gate`: for each split with supported tasks, the probability that
       the SAME true improvement clears the split's supported-set-MEAN quantile
@@ -1051,14 +1681,23 @@ def _check_power(
     return {
         "offset": _fraction_str(offset),
         "attempts": attempts,
-        "per_task": per_task,
-        "gain_gate": gain_gate,
+        "stage1_only": {"per_task": per_task, "gain_gate": gain_gate},
+        "end_to_end": _check_end_to_end(
+            null_counts,
+            supported,
+            task_split,
+            standard_attempts,
+            level,
+            guards,
+            offset=offset,
+            attempts=attempts,
+        ),
     }
 
 
 def calibrate_model(labels: list[str], results_dir: Path, supported: frozenset[str]) -> dict:
-    """The round-2 null-MODEL artifact (contracts/phase2b-calibration-contract.md
-    §1+§4), from the named arms' results JSONs under `results_dir`.
+    """The round-2 null-MODEL artifact, from the named arms' results JSONs
+    under `results_dir`.
 
     Refuses (`ValueError`, naming what's wrong) on: no labels; a duplicate
     label; a provenance mismatch across arms (the round-1 4 fields plus
@@ -1068,8 +1707,8 @@ def calibrate_model(labels: list[str], results_dir: Path, supported: frozenset[s
     the SUITE, not of one arm's run); a non-positive recorded attempt count;
     or no un-filtered arm to read standard attempt counts from at all. It
     does NOT refuse on a failed fitness check -- `fitness.fit` is computed
-    and recorded either way (contract §4: "the artifact is written with
-    `fit: false`"), and it is the LOADER's job, not this function's, to
+    and recorded either way (an unfit pooling is written out with
+    `fit: false` rather than raising), and it is the LOADER's job, not this function's, to
     refuse installing an unfit artifact.
 
     Round-1's `calibrate()` and its output shape are untouched; this is a
@@ -1092,6 +1731,9 @@ def calibrate_model(labels: list[str], results_dir: Path, supported: frozenset[s
         arm_results, labels, supported, task_split, standard_attempts, COVERAGE_LEVEL
     )
     power = _check_power(null_counts, supported, task_split, standard_attempts, COVERAGE_LEVEL)
+    false_confirm = _check_false_confirm(
+        arm_results, null_counts, supported, task_split, standard_attempts, COVERAGE_LEVEL
+    )
     fit = bool(grain["pass"] and goodness["pass"] and stability["pass"])
 
     return {
@@ -1103,10 +1745,186 @@ def calibrate_model(labels: list[str], results_dir: Path, supported: frozenset[s
             "goodness": goodness,
             "stability": stability,
             "power": power,
+            "false_confirm": false_confirm,
             "fit": fit,
         },
         "computed_at_runner_sha": provenance[0]["runner_sha"],
     }
+
+
+def recompute_model(
+    model: dict, level: Fraction = COVERAGE_LEVEL
+) -> tuple[dict[str, Fraction], list[str]]:
+    """Re-derive an artifact's rates and re-run its fitness checks from its OWN
+    per-arm counts, and report every disagreement with what it recorded.
+
+    The hole this closes: `fitness.fit` was computed by the tool that wrote the
+    file and then READ OFF that same file by the loader. Editing the rates and
+    leaving the verdict alone therefore installed a null model nothing had ever
+    checked -- the reviewer's reproduction was to set every `null_rate` to
+    "1/1000", which passes every recorded check because no check re-ran. A
+    self-certifying artifact certifies nothing; the reader has to do the checking.
+
+    What is re-derived, and from what:
+
+    - Each task's pooled `null_rate`, summed from `per_arm` -- the raw counts the
+      artifact carries for audit, which a rate-only tamper leaves untouched.
+    - Each task's split and the suite's standard attempt counts, read from the
+      recorded `fitness.grain` rows (they carry both), so no extra field has to be
+      trusted or added.
+    - GRAIN, GOODNESS and STABILITY, re-run by the very functions that wrote them,
+      against the re-derived rates, and compared to the recorded blocks whole.
+
+    Returns `(rates, problems)`. A non-empty `problems` means REFUSE: the rates
+    are still returned so a caller can report them, never so it can install them.
+    """
+    problems: list[str] = []
+    null_model = model.get("null_model") or {}
+    fitness = model.get("fitness") or {}
+    supported = frozenset(null_model)
+    if not supported:
+        return {}, ["the artifact carries no null_model, so there is nothing to recompute"]
+
+    task_split: dict[str, str] = {}
+    standard_attempts: dict[str, int] = {}
+    for split, row in (fitness.get("grain") or {}).items():
+        if split == "pass" or not isinstance(row, dict):
+            continue
+        for task in row.get("tasks") or []:
+            task_split[task] = split
+        for task, value in (row.get("attempts") or {}).items():
+            try:
+                standard_attempts[task] = int(value)
+            except (TypeError, ValueError):
+                problems.append(
+                    f"recomputation cannot proceed: the recorded grain row for {split} "
+                    f"gives task {task} a non-integer attempt count ({value!r})"
+                )
+    missing = sorted(supported - set(task_split)) + sorted(supported - set(standard_attempts))
+    if missing or problems:
+        problems.append(
+            "recomputation cannot proceed: the recorded grain rows do not state a split "
+            "and a standard attempt count for every supported task (missing "
+            f"{sorted(set(missing))})"
+        )
+        return {}, problems
+
+    rates: dict[str, Fraction] = {}
+    labels: list[str] | None = None
+    counts: dict[str, dict[str, tuple[int, int]]] = {}
+    for task in sorted(supported):
+        per_arm = (null_model[task] or {}).get("per_arm") or {}
+        if not per_arm:
+            problems.append(
+                f"recomputation cannot proceed: {task} carries no per_arm counts, so its "
+                "recorded null_rate cannot be re-derived from anything"
+            )
+            return {}, problems
+        arm_labels = sorted(per_arm)
+        if labels is None:
+            labels = arm_labels
+        elif arm_labels != labels:
+            problems.append(
+                f"recomputation cannot proceed: {task}'s per_arm names {arm_labels}, which "
+                f"is not the arm set {labels} the other tasks pooled over -- one pool, or "
+                "the rates are not comparable"
+            )
+            return {}, problems
+        try:
+            task_counts = {
+                label: (int(per_arm[label][0]), int(per_arm[label][1])) for label in arm_labels
+            }
+        except (TypeError, ValueError, IndexError, KeyError):
+            problems.append(
+                f"recomputation cannot proceed: {task}'s per_arm is not a "
+                "{arm: [passes, attempts]} map"
+            )
+            return {}, problems
+        counts[task] = task_counts
+        passes = sum(p for p, _ in task_counts.values())
+        attempts = sum(n for _, n in task_counts.values())
+        if attempts <= 0:
+            problems.append(
+                f"recomputation cannot proceed: {task} pooled {attempts} attempts across "
+                "its arms, so it has no rate at all"
+            )
+            return {}, problems
+        derived = f"{passes}/{attempts}"
+        recorded = (null_model[task] or {}).get("null_rate")
+        if recorded != derived:
+            problems.append(
+                f"recomputing {task}'s null_rate from the artifact's own per_arm counts "
+                f"gives {derived!r}, but the artifact records {recorded!r} -- the rate every "
+                "quantile is computed from does not match the counts it claims to come from"
+            )
+        rates[task] = Fraction(passes, attempts)
+    if problems:
+        return rates, problems
+
+    arm_results = {
+        label: {
+            "tasks": {
+                task: {
+                    "split": task_split[task],
+                    "attempts": counts[task][label][1],
+                    "passes": counts[task][label][0],
+                }
+                for task in sorted(supported)
+            }
+        }
+        for label in (labels or [])
+    }
+    null_counts = {
+        task: (
+            sum(p for p, _ in counts[task].values()),
+            sum(n for _, n in counts[task].values()),
+        )
+        for task in sorted(supported)
+    }
+    try:
+        recomputed = {
+            "grain": _check_grain(null_counts, task_split, standard_attempts, supported, level),
+            "goodness": _check_goodness(arm_results, labels or [], supported, null_counts),
+            "stability": _check_stability(
+                arm_results, labels or [], supported, task_split, standard_attempts, level
+            ),
+        }
+    except (ValueError, ZeroDivisionError, KeyError) as exc:
+        return rates, [
+            f"recomputing the fitness checks from the artifact's own counts raised: {exc}"
+        ]
+    for name, value in recomputed.items():
+        where = _first_disagreement(fitness.get(name), value, name)
+        if where:
+            problems.append(
+                f"recomputing the {name} check from the artifact's own counts disagrees with "
+                f"the recorded {name} block at {where}"
+            )
+    return rates, problems
+
+
+def _first_disagreement(recorded, recomputed, path: str) -> str:
+    """The first place two recorded/recomputed blocks differ, as a dotted path and
+    both values -- never the whole block.
+
+    A refusal that dumps two nested dictionaries side by side is a refusal nobody
+    reads. The useful fact is WHICH number stopped being true, and the fitness
+    blocks are small trees, so walking them costs nothing and the message stays one
+    line a person can act on.
+    """
+    if isinstance(recorded, dict) and isinstance(recomputed, dict):
+        for key in sorted(set(recorded) | set(recomputed)):
+            if key not in recorded:
+                return f"{path}.{key} (recomputed only: {recomputed[key]!r})"
+            if key not in recomputed:
+                return f"{path}.{key} (recorded only: {recorded[key]!r})"
+            deeper = _first_disagreement(recorded[key], recomputed[key], f"{path}.{key}")
+            if deeper:
+                return deeper
+        return ""
+    if recorded != recomputed:
+        return f"{path}: recorded {recorded!r}, recomputed {recomputed!r}"
+    return ""
 
 
 def main(argv: list[str] | None = None) -> None:
