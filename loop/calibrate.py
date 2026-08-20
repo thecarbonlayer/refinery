@@ -48,7 +48,6 @@ from itertools import combinations
 from math import comb
 from pathlib import Path
 
-from loop.acceptance import evaluate
 from runner.suite import RESULTS_DIR
 
 EDITOR_ROOT = Path(__file__).resolve().parents[1]
@@ -318,7 +317,20 @@ def _pairwise_outcomes(arm_results: dict[str, dict], labels: list[str]) -> dict:
     attempt counts differ even on the shared tasks) or otherwise raise -- that is
     caught and recorded as an honest ERROR entry rather than allowed to crash the
     whole analysis, exactly as the design calls for.
+
+    `evaluate` is imported HERE rather than at module scope, and the reason is a
+    real one: since Task 3, `loop.acceptance` imports `null_gain_quantile` and
+    `null_task_quantile` from this module to compute its judgment-time thresholds.
+    A module-level import in both directions is a cycle Python cannot resolve in
+    either order (whichever module is imported first hits a half-initialized
+    partner and the `from ... import` name does not exist yet). Only this one
+    round-1 legacy function needs `evaluate`, and it runs once per artifact build,
+    so the deferred import is paid nowhere that matters -- and it keeps the rule
+    module's own import list at module scope, where an import error surfaces at
+    import time instead of inside a judgment.
     """
+    from loop.acceptance import evaluate
+
     outcomes: dict[str, dict] = {}
     for a, b in combinations(labels, 2):
         key = f"{a}::{b}"
@@ -855,7 +867,29 @@ def _check_stability(
     real, quantized observation clears it, so only a bucket CROSSING counts
     as instability. `floor(quantile / grain)` is that bucket index, computed
     with exact `Fraction` floor division.
+
+    Guards its own inputs first (Task 2 review): a leave-one-arm-out pool whose
+    REMAINING arms all recorded zero attempts for a task divides by zero, and
+    `Fraction(passes, 0)` raises a bare `ZeroDivisionError` naming nothing --
+    no arm, no task, no hint that a result file is truncated. `_standard_attempts`
+    only ever inspects the un-filtered arms, so a subset arm carrying a
+    zero-attempt row reaches here unchecked. Every arm, filtered or not, must
+    record positive attempts for every supported task; the refusal names the arm
+    and the task, the way every other refusal in this module does.
     """
+    for label in labels:
+        for task in sorted(supported):
+            row = arm_results[label]["tasks"].get(task)
+            if row is None:
+                continue  # `_check_supported_set` already refuses a missing task
+            attempts = int(row["attempts"])
+            if attempts <= 0:
+                raise ValueError(
+                    f"calibrate_model: arm {label!r} records {attempts} attempts for "
+                    f"supported task {task!r} -- every arm must contribute a positive "
+                    "attempt count to the pool, or a leave-one-arm-out pooled rate "
+                    "divides by zero"
+                )
     result: dict = {}
     overall = True
     for split in _present_splits(task_split, supported):
@@ -887,16 +921,20 @@ def _check_stability(
     return result
 
 
-def _split_carrier(tasks: list[str]) -> str:
-    """Which of a split's tasks stands in for "the carrier" in a per-split
-    power row (contract §4.4 names a single carrier, not a per-task fan-out).
-    Alphabetically first of the already-sorted split task list -- the same
-    convention this module uses everywhere a deterministic single choice is
-    needed from a task set (`_split_grain`'s own `sorted(...)`), so held_in's
-    carrier is `A1` (the split's real order: `A1`, `G4`, `G5`) and held_out's
-    is trivially its only task, `G2`.
+def _weakest_carrier(per_carrier: dict[str, Fraction]) -> str:
+    """The carrier whose power is the FLOOR of a split's gain gate (Task 2
+    review). Contract §4.4 publishes power so nobody mistakes a weak test for a
+    strong one, and a split's gain gate has as many powers as it has tasks that
+    could carry the improvement -- publishing one of them (round 2 published the
+    alphabetically first) states the power of the case that happened to be named,
+    not the power of the gate. The gate is only as strong as its weakest carrier,
+    so that is the number the split-level row reports; the per-carrier rows stay
+    beside it, so the floor never hides the spread it came from.
+
+    Ties break on the task name, so the choice is deterministic for a reader
+    comparing two artifacts.
     """
-    return tasks[0]
+    return min(sorted(per_carrier), key=lambda t: per_carrier[t])
 
 
 def _gain_power(
@@ -954,12 +992,15 @@ def _check_power(
       `attempts` v `attempts` (contract §3's subset attempt count, the
       confirmation-shaped one) -- the repeat/guard gate's power.
     - `gain_gate`: for each split with supported tasks, the probability that
-      the SAME true improvement on `_split_carrier`'s task clears the split's
-      supported-set-MEAN quantile at STANDARD attempt counts -- the first-pass
-      evaluate() gain gate's own power, the weakest of the two shapes (a mean
-      over several tasks dilutes one task's movement, and standard attempts
-      are fewer than the confirmation's 10) and the one this artifact must not
-      omit just because a single-task number already exists nearby.
+      the SAME true improvement clears the split's supported-set-MEAN quantile
+      at STANDARD attempt counts -- the first-pass evaluate() gain gate's own
+      power, the weakest of the two shapes (a mean over several tasks dilutes
+      one task's movement, and standard attempts are fewer than the
+      confirmation's 10) and the one this artifact must not omit just because a
+      single-task number already exists nearby. Every task on the split is
+      enumerated as the carrier (`per_carrier`) and the row's headline `power`
+      is the MINIMUM across them -- a floor, not a sample: a gate advertised at
+      its luckiest carrier's power overstates what it can actually detect.
 
     Both enumerated exactly over both sides' binomial outcomes, published so
     nobody mistakes a weak test for a strong one (this module's whole reason
@@ -991,8 +1032,9 @@ def _check_power(
         rates = {t: Fraction(*null_counts[t]) for t in tasks}
         split_attempts = {t: standard_attempts[t] for t in tasks}
         threshold = null_gain_quantile(rates, split_attempts, split_attempts, level)
-        carrier = _split_carrier(tasks)
-        power = _gain_power(rates, split_attempts, carrier, offset, threshold)
+        per_carrier = {t: _gain_power(rates, split_attempts, t, offset, threshold) for t in tasks}
+        carrier = _weakest_carrier(per_carrier)
+        power = per_carrier[carrier]
         gain_gate[split] = {
             "tasks": tasks,
             "carrier": carrier,
@@ -1000,6 +1042,10 @@ def _check_power(
             "threshold": _fraction_str(threshold),
             "power": _fraction_str(power),
             "power_float": float(power),
+            "per_carrier": {
+                t: {"power": _fraction_str(p), "power_float": float(p)}
+                for t, p in per_carrier.items()
+            },
         }
 
     return {

@@ -305,74 +305,91 @@ def test_the_real_gate_refuses_to_recurse_into_pytest():
         run_harness_gates()
 
 
-# --- section calibration: the loader and the rule's section gate (contract §4) ----
+# --- the null-model loader and the rule's section gate (contract §1/§2) -----------
 
 
-def _analysis(
+_SPLIT_OF = {"A1": "held_in", "G4": "held_in", "G5": "held_in", "G2": "held_out"}
+_STANDARD_ATTEMPTS = {t: (5 if s == "held_out" else 3) for t, s in _SPLIT_OF.items()}
+
+# Contract §3's arm protocol: three full-suite arms at standard attempts, four
+# `--only A1 G2 G4 G5 --attempts 10` subset arms, nothing changed between any of them.
+_FULL_ARMS = {
+    "r2-null-full-a": {"A1": 2, "G4": 1, "G5": 2, "G2": 3},
+    "r2-null-full-b": {"A1": 2, "G4": 1, "G5": 2, "G2": 2},
+    "r2-null-full-c": {"A1": 1, "G4": 0, "G5": 3, "G2": 3},
+}
+_SUBSET_ARMS = {
+    "r2-null-cmp-a": {"A1": 5, "G4": 2, "G5": 6, "G2": 5},
+    "r2-null-cmp-b": {"A1": 6, "G4": 1, "G5": 7, "G2": 6},
+    "r2-null-cmp-c": {"A1": 5, "G4": 2, "G5": 6, "G2": 4},
+    "r2-null-cmp-d": {"A1": 6, "G4": 1, "G5": 5, "G2": 7},
+}
+
+
+def _model(
     tmp_path,
     *,
     stamped_sha,
-    name="analysis.json",
+    name="model-r2.json",
     config_version=None,
     model=None,
-    supported_extra=frozenset(),
+    carbon_sha=None,
+    dirty_sha=None,
+    mutate=None,
 ):
-    """A calibration artifact of contract §3's shape, MEASURED by `loop.calibrate`
-    from four fabricated null arms — nothing here is a hand-written threshold.
+    """A round-2 null-model artifact, MEASURED by `loop.calibrate.calibrate_model`
+    from the seven fabricated null arms above — nothing here is a hand-written rate.
 
-    The arms' fingerprint is what freshness is judged against (contract §4, amendment
-    2026-08-19): it defaults to the provenance `FP` carries, so an artifact built with
-    no overrides is fresh for results stamped `FP`. Override any of the three fields to
-    build one measured under a different verifier, config version, or model.
+    The arms' provenance is what freshness is judged against (contract §1): it defaults
+    to what `FP` carries, so an artifact built with no overrides is fresh for results
+    stamped `FP`. Override any field to build one measured in a different world;
+    `mutate` edits the computed artifact before it is written, which is how the unfit
+    and malformed cases are built without hand-authoring an artifact.
     """
-    from loop.calibrate import SUPPORTED, calibrate
+    from loop.calibrate import SUPPORTED, calibrate_model
 
-    results_dir = tmp_path / f"results-{name}"
+    results_dir = tmp_path / f"arms-{name}"
     results_dir.mkdir()
     fp = {
         "runner_sha": stamped_sha,
         "config_version": FP["config_version"] if config_version is None else config_version,
         "model": FP["model"] if model is None else model,
+        "gemma_sha": FP["gemma_sha"] if carbon_sha is None else carbon_sha,
+        "dirty_sha": FP["dirty_sha"] if dirty_sha is None else dirty_sha,
     }
-    arms = {
-        "null-cmp-a": {"A1": 7, "G4": 8, "G5": 9, "G2": 6},
-        "null-cmp-b": {"A1": 7, "G4": 8, "G5": 9, "G2": 6},
-        "null-cmp-c": {"A1": 8, "G4": 8, "G5": 9, "G2": 7},
-        "null-cmp-d": {"A1": 7, "G4": 8, "G5": 9, "G2": 6},
-    }
-    for label, passes in arms.items():
-        (results_dir / f"{label}.json").write_text(
-            json.dumps(
-                {
-                    "fingerprint": fp,
-                    "filter": sorted(passes),
-                    "tasks": {
-                        n: {
-                            "split": "held_out" if n == "G2" else "held_in",
-                            "attempts": 10,
-                            "passes": p,
-                            "pass_fraction": round(p / 10, 4),
-                        }
-                        for n, p in passes.items()
-                    },
+    for arms, subset in ((_FULL_ARMS, False), (_SUBSET_ARMS, True)):
+        for label, passes in arms.items():
+            tasks = {}
+            for task, p in passes.items():
+                attempts = 10 if subset else _STANDARD_ATTEMPTS[task]
+                tasks[task] = {
+                    "split": _SPLIT_OF[task],
+                    "attempts": attempts,
+                    "passes": p,
+                    "pass_fraction": round(p / attempts, 4),
                 }
-            )
-        )
+            arm = {"fingerprint": dict(fp), "tasks": tasks}
+            if subset:
+                arm["filter"] = sorted(passes)
+            (results_dir / f"{label}.json").write_text(json.dumps(arm))
+    labels = sorted({**_FULL_ARMS, **_SUBSET_ARMS})
+    artifact = calibrate_model(labels, results_dir, SUPPORTED)
+    if mutate is not None:
+        mutate(artifact)
     path = tmp_path / name
-    path.write_text(
-        json.dumps(calibrate(sorted(arms), results_dir, SUPPORTED | frozenset(supported_extra)))
-    )
+    path.write_text(json.dumps(artifact))
     return path
 
 
-# Supported set (A1/G4/G5 held-in, G2 held-out) plus ballast the bound was never
-# measured on. X1 moves in the candidate and is the evidence-grade exclusion.
+# The supported set (A1/G4/G5 held-in, G2 held-out) at confirmation-shaped attempt
+# counts, plus ballast the null model was never measured on. X1 moves in the candidate
+# and is the evidence-grade exclusion.
 _CMP = {
-    "A1": ("held_in", 10, 8),
-    "G4": ("held_in", 10, 8),
-    "G5": ("held_in", 10, 8),
-    "G2": ("held_out", 20, 10),
-    "X1": ("held_in", 20, 10),
+    "A1": ("held_in", 50, 27),
+    "G4": ("held_in", 50, 8),
+    "G5": ("held_in", 50, 31),
+    "G2": ("held_out", 50, 27),
+    "X1": ("held_in", 3, 2),
     "X2": ("held_out", 4, 2),
 }
 
@@ -416,66 +433,183 @@ def _cmp_candidate(fields):
 def test_an_absent_calibration_artifact_leaves_the_section_uncalibrated(tmp_path):
     from loop.validate import section_calibration
 
-    assert section_calibration("compaction", analysis_path=tmp_path / "nothing.json") is None
+    assert section_calibration("compaction", model_path=tmp_path / "nothing.json") is None
 
 
 def test_a_calibration_measured_by_a_different_verifier_is_not_a_calibration(tmp_path):
-    """Stale = uncalibrated. `runner_sha` is the verifier's content identity: a bound
-    measured by a different verifier is not a measurement of this one."""
+    """Stale = uncalibrated. `runner_sha` is the verifier's content identity: a null
+    model measured by a different verifier is not a model of this one."""
     from loop.validate import section_calibration
 
-    stale = _analysis(tmp_path, stamped_sha="0" * 64)
+    stale = _model(tmp_path, stamped_sha="0" * 64)
     assert json.loads(stale.read_text())["computed_at_runner_sha"] == "0" * 64
-    assert section_calibration("compaction", FP, analysis_path=stale) is None
+    assert section_calibration("compaction", FP, model_path=stale) is None
 
 
-def test_a_fresh_calibration_loads_exactly_what_the_artifact_measured(tmp_path):
+def test_a_fresh_calibration_loads_exactly_the_null_model_the_artifact_measured(tmp_path):
+    from fractions import Fraction
+
     from loop.validate import _SECTION_CONFIRM_GUARDS, section_calibration
 
-    path = _analysis(tmp_path, stamped_sha=FP["runner_sha"])
-    cal = section_calibration("compaction", FP, analysis_path=path)
-    analysis = json.loads(path.read_text())
+    path = _model(tmp_path, stamped_sha=FP["runner_sha"])
+    cal = section_calibration("compaction", FP, model_path=path)
+    artifact = json.loads(path.read_text())
     assert cal is not None
     assert cal.section == "compaction"
-    assert cal.supported == frozenset(analysis["per_task"])
-    assert cal.noise_in == analysis["section_noise"]["held_in"]
-    assert cal.noise_ho == analysis["section_noise"]["held_out"]
+    assert cal.supported == frozenset(artifact["null_model"])
+    assert cal.null_rates == {
+        task: Fraction(*(int(x) for x in row["null_rate"].split("/")))
+        for task, row in artifact["null_model"].items()
+    }
+    assert cal.coverage_level == Fraction(artifact["coverage_level"])
     assert cal.guards == _SECTION_CONFIRM_GUARDS["compaction"] == frozenset({"A1", "G2", "G5"})
 
 
-def test_compaction_enters_the_rule_only_through_a_fresh_calibration(tmp_path, monkeypatch):
-    """The gate the whole phase turns on, in its three states."""
+def test_an_unfit_artifact_refuses_to_install_itself_and_says_which_check_failed(tmp_path):
+    """Contract §4: "ALL must pass or the artifact is written with `fit: false` and the
+    loader refuses it". The refusal must name the failed check — an artifact that is
+    merely "not calibrated" tells nobody whether to re-run the arms or fix the tool."""
+    from loop.validate import calibration_status
+
+    def fail_grain(artifact):
+        artifact["fitness"]["grain"]["pass"] = False
+        artifact["fitness"]["fit"] = False
+
+    path = _model(tmp_path, stamped_sha=FP["runner_sha"], mutate=fail_grain)
+    cal, why = calibration_status("compaction", FP, model_path=path)
+    assert cal is None
+    assert "not calibrated" in why and "grain" in why
+    assert "goodness" not in why, "only the checks that actually failed get named"
+
+
+def test_a_missing_provenance_value_is_a_mismatch_never_a_match(tmp_path):
+    """The None==None hole, closed. `arm.get(field) != fingerprint.get(field)` calls an
+    artifact with NO recorded model fresh for measurements with no recorded model —
+    two absences comparing equal and passing a freshness check neither side could
+    answer. Absence on either side is a refusal."""
+    from loop.validate import calibration_status
+
+    def blank_model(artifact):
+        for entry in artifact["provenance"]:
+            entry["model"] = None
+
+    path = _model(tmp_path, stamped_sha=FP["runner_sha"], mutate=blank_model)
+    blind_fp = {k: v for k, v in FP.items() if k != "model"}
+    cal, why = calibration_status("compaction", blind_fp, model_path=path)
+    assert cal is None, "two absences must not be read as a match"
+    assert "model" in why
+
+
+def test_freshness_is_judged_against_the_measurements_on_every_provenance_field(tmp_path):
+    """Five ways an artifact can fail to be a null model for THESE measurements, each
+    naming the field that mismatched.
+
+    `runner_sha` alone was the old test and is the weakest of the five: a null model
+    measured under a different MODEL, a different carbon revision, a different config
+    version, or against a dirty tree is not a model for this comparison either — those
+    are exactly the fields the protocol (§1) makes every arm share.
+    """
+    from loop.validate import calibration_status
+
+    fresh, why = calibration_status(
+        "compaction", FP, model_path=_model(tmp_path, stamped_sha=FP["runner_sha"])
+    )
+    assert fresh is not None and why == ""
+
+    fine = {"stamped_sha": FP["runner_sha"]}
+    for kwargs, field in (
+        ({"stamped_sha": "0" * 64, "name": "sha.json"}, "runner_sha"),
+        ({**fine, "name": "cfg.json", "config_version": 99}, "config_version"),
+        ({**fine, "name": "mdl.json", "model": "other"}, "model"),
+        ({**fine, "name": "carbon.json", "carbon_sha": "another-carbon"}, "carbon_sha"),
+        ({**fine, "name": "dirty.json", "dirty_sha": "uncommitted"}, "dirty_sha"),
+    ):
+        cal, reason = calibration_status("compaction", FP, model_path=_model(tmp_path, **kwargs))
+        assert cal is None, f"{field} mismatch must not be judged fresh"
+        assert field in reason and "not calibrated" in reason
+
+
+def test_the_loader_refuses_a_supported_set_other_than_the_pinned_four(tmp_path):
+    """Contract §1 pins {A1, G2, G4, G5} and says the loader refuses any other set. A
+    model covering a different set is a model of a different section's evidence, and
+    silently judging against it would put an unmeasured name in the denominator."""
+    from loop.validate import calibration_status
+
+    def drop_g4(artifact):
+        del artifact["null_model"]["G4"]
+
+    path = _model(tmp_path, stamped_sha=FP["runner_sha"], mutate=drop_g4)
+    cal, why = calibration_status("compaction", FP, model_path=path)
+    assert cal is None
+    assert "G4" in why and "not calibrated" in why
+
+
+def test_a_malformed_null_rate_refuses_instead_of_falling_back(tmp_path):
+    """Round 1's loader fell back to a lossy float when an exact field was malformed.
+    There is nothing to fall back TO here: a rate that cannot be parsed exactly has no
+    null distribution, so the artifact is refused rather than approximated."""
+    from loop.validate import calibration_status
+
+    def corrupt(artifact):
+        artifact["null_model"]["A1"]["null_rate"] = "27 over 49"
+
+    path = _model(tmp_path, stamped_sha=FP["runner_sha"], mutate=corrupt)
+    cal, why = calibration_status("compaction", FP, model_path=path)
+    assert cal is None
+    assert "A1" in why and "null_rate" in why
+
+
+def test_compaction_enters_the_rule_only_through_a_fresh_fit_calibration(tmp_path, monkeypatch):
+    """ATTACK CASE (f): the gate the whole phase turns on, in its four states. Every
+    failure falls back to the CAUSAL verdict, loudly — `applied: False` with a reason
+    that names the cause, never a silent re-decision on a weaker bar."""
     import loop.validate as validate_mod
     from loop.validate import rule_disposition
 
-    base, cand = _cmp_results(), _cmp_results({"G2": 14, "X1": 9})
+    base, cand = _cmp_results(), _cmp_results({"G2": 38, "X1": 1})
     candidate = _cmp_candidate(["compaction"])
 
-    monkeypatch.setitem(validate_mod._SECTION_ANALYSIS, "compaction", tmp_path / "absent.json")
+    monkeypatch.setitem(validate_mod._SECTION_MODEL, "compaction", tmp_path / "absent.json")
     missing = rule_disposition(candidate, base, cand, _COVERAGE)
     assert missing["applied"] is False
     assert "not calibrated" in missing["why"]
 
     monkeypatch.setitem(
-        validate_mod._SECTION_ANALYSIS,
+        validate_mod._SECTION_MODEL,
         "compaction",
-        _analysis(tmp_path, stamped_sha="0" * 64, name="stale.json"),
+        _model(tmp_path, stamped_sha="0" * 64, name="stale.json"),
     )
     stale = rule_disposition(candidate, base, cand, _COVERAGE)
     assert stale["applied"] is False
     assert "not calibrated" in stale["why"] and "stale" in stale["why"].lower()
 
+    def unfit(artifact):
+        artifact["fitness"]["stability"]["pass"] = False
+        artifact["fitness"]["fit"] = False
+
     monkeypatch.setitem(
-        validate_mod._SECTION_ANALYSIS,
+        validate_mod._SECTION_MODEL,
         "compaction",
-        _analysis(tmp_path, stamped_sha=FP["runner_sha"], name="fresh.json"),
+        _model(tmp_path, stamped_sha=FP["runner_sha"], name="unfit.json", mutate=unfit),
+    )
+    refused = rule_disposition(candidate, base, cand, _COVERAGE)
+    assert refused["applied"] is False
+    assert "stability" in refused["why"]
+
+    monkeypatch.setitem(
+        validate_mod._SECTION_MODEL,
+        "compaction",
+        _model(tmp_path, stamped_sha=FP["runner_sha"], name="fresh.json"),
     )
     fresh = rule_disposition(candidate, base, cand, _COVERAGE)
     assert fresh["applied"] is True
     assert fresh["outcome"] == "CONFIRM"
     assert fresh["improved_tasks"] == ["G2"]
     assert fresh["calibration"]["section"] == "compaction"
+    assert fresh["calibration"]["null_rates"]["A1"] == "27/49"
+    assert fresh["calibration"]["coverage_level"] == "39/40"
     assert set(fresh["calibration"]["guards"]) <= set(fresh["confirm_tasks"])
+    assert fresh["raw"]["null_quantiles"]["held_out"]["quantile"] == "1/5"
     # The evidence-grade exclusion is context, never a subtraction.
     assert fresh["raw"]["unreachable_probable"] == ["X1"]
     assert fresh["raw"]["full_split_delta_in"] < 0
@@ -487,12 +621,12 @@ def test_compaction_prompt_reaches_the_rule_through_the_same_section(tmp_path, m
 
     assert _FIELD_SECTION["compaction_prompt"] == _FIELD_SECTION["compaction"] == "compaction"
     monkeypatch.setitem(
-        validate_mod._SECTION_ANALYSIS,
+        validate_mod._SECTION_MODEL,
         "compaction",
-        _analysis(tmp_path, stamped_sha=FP["runner_sha"]),
+        _model(tmp_path, stamped_sha=FP["runner_sha"]),
     )
     out = rule_disposition(
-        _cmp_candidate(["compaction_prompt"]), _cmp_results(), _cmp_results({"G2": 14}), _COVERAGE
+        _cmp_candidate(["compaction_prompt"]), _cmp_results(), _cmp_results({"G2": 38}), _COVERAGE
     )
     assert out["applied"] is True and out["calibration"]["section"] == "compaction"
 
@@ -505,14 +639,14 @@ def test_an_edit_spanning_two_sections_gets_no_rule_even_when_both_are_calibrate
     from loop.validate import rule_disposition
 
     monkeypatch.setitem(
-        validate_mod._SECTION_ANALYSIS,
+        validate_mod._SECTION_MODEL,
         "compaction",
-        _analysis(tmp_path, stamped_sha=FP["runner_sha"]),
+        _model(tmp_path, stamped_sha=FP["runner_sha"]),
     )
     out = rule_disposition(
         _cmp_candidate(["compaction", "tool_output"]),
         _cmp_results(),
-        _cmp_results({"G2": 14}),
+        _cmp_results({"G2": 38}),
         _COVERAGE,
     )
     assert out["applied"] is False
@@ -527,9 +661,9 @@ def test_tool_output_decides_without_consulting_any_calibration_artifact(tmp_pat
     from loop.validate import rule_disposition, section_calibration
 
     assert section_calibration("tool_output") is None
-    monkeypatch.setitem(validate_mod._SECTION_ANALYSIS, "compaction", tmp_path / "absent.json")
+    monkeypatch.setitem(validate_mod._SECTION_MODEL, "compaction", tmp_path / "absent.json")
     out = rule_disposition(
-        _cmp_candidate(["tool_output"]), _cmp_results(), _cmp_results({"G2": 14}), _COVERAGE
+        _cmp_candidate(["tool_output"]), _cmp_results(), _cmp_results({"G2": 38}), _COVERAGE
     )
     assert out["applied"] is True
     assert "calibration" not in out
@@ -565,41 +699,9 @@ def test_module_docstring_names_the_two_actual_decision_paths():
     assert "CONFIRM" in doc and "REJECT" in doc
 
 
-# --- freshness against the measurements' own provenance (§4 amendment) ------------
-
-
-def test_freshness_is_judged_against_the_measurements_not_the_live_process(tmp_path):
-    """Three ways an artifact can fail to be a bound for THESE measurements, and each
-    one names the field that mismatched.
-
-    `runner_sha` alone was the old test, and it is the weakest of the three: a noise
-    floor measured under a different MODEL, or a different carbon config version, is
-    not a floor for this comparison either — those are exactly the two things the null
-    protocol (§2) makes every arm share, so an artifact whose arms disagree with the
-    results being judged is measuring a different world.
-    """
-    from loop.validate import calibration_status
-
-    fresh, why = calibration_status(
-        "compaction", FP, analysis_path=_analysis(tmp_path, stamped_sha=FP["runner_sha"])
-    )
-    assert fresh is not None and why == ""
-
-    for kwargs, field in (
-        ({"stamped_sha": "0" * 64, "name": "sha.json"}, "runner_sha"),
-        ({"stamped_sha": FP["runner_sha"], "name": "cfg.json", "config_version": 99}, "config_"),
-        ({"stamped_sha": FP["runner_sha"], "name": "mdl.json", "model": "other"}, "model"),
-    ):
-        cal, reason = calibration_status(
-            "compaction", FP, analysis_path=_analysis(tmp_path, **kwargs)
-        )
-        assert cal is None, f"{field} mismatch must not be judged fresh"
-        assert field in reason and "not calibrated" in reason
-
-
 def test_an_unreadable_calibration_artifact_scrubs_the_machine_path(tmp_path):
     """`str(OSError)` embeds the absolute path it failed on (e.g. `[Errno 21] Is a
-    directory: '/private/var/.../analysis.json'`) — a machine path landing in a
+    directory: '/private/var/.../model-r2.json'`) — a machine path landing in a
     recorded reason is exactly the leak AGENTS.md calls out, and this reason reaches
     `rule_disposition()`'s `why` and from there a committed iteration record. A
     directory in place of the file reproduces an unreadable path portably (no
@@ -610,31 +712,30 @@ def test_an_unreadable_calibration_artifact_scrubs_the_machine_path(tmp_path):
 
     if os.getuid() == 0:
         pytest.skip("root bypasses the permission bits this fixture relies on")
-    bogus = tmp_path / "some" / "nested" / "analysis.json"
+    bogus = tmp_path / "some" / "nested" / "model-r2.json"
     bogus.parent.mkdir(parents=True)
     bogus.write_text("{}")
     bogus.chmod(0o000)
-    fp = {"runner_sha": "r1", "config_version": 1, "model": "m"}
     try:
-        cal, why = calibration_status("compaction", fp, analysis_path=bogus)
+        cal, why = calibration_status("compaction", FP, model_path=bogus)
     finally:
         bogus.chmod(0o644)  # tmp_path cleanup needs to be able to remove it
 
     assert cal is None
     assert "unreadable" in why
-    assert "analysis.json" in why
+    assert "model-r2.json" in why
     assert str(tmp_path) not in why
     for leak in ("/Users/", "/home/", "/private/var", "/tmp"):
         assert leak not in why, f"{leak!r} leaked into the recorded reason: {why!r}"
 
 
 def test_no_fingerprint_means_uncalibrated_never_unchecked(tmp_path):
-    """Fail closed. A caller with no measurements in hand cannot be told a bound is
-    fresh — there is nothing for it to be fresh FOR."""
+    """Fail closed. A caller with no measurements in hand cannot be told a null model
+    is fresh — there is nothing for it to be fresh FOR."""
     from loop.validate import calibration_status
 
-    path = _analysis(tmp_path, stamped_sha=FP["runner_sha"])
-    cal, why = calibration_status("compaction", None, analysis_path=path)
+    path = _model(tmp_path, stamped_sha=FP["runner_sha"])
+    cal, why = calibration_status("compaction", None, model_path=path)
     assert cal is None and "fingerprint" in why
 
 
@@ -645,36 +746,19 @@ def test_rule_disposition_judges_freshness_against_the_baseline_it_was_handed(
     from loop.validate import rule_disposition
 
     monkeypatch.setitem(
-        validate_mod._SECTION_ANALYSIS,
+        validate_mod._SECTION_MODEL,
         "compaction",
-        _analysis(tmp_path, stamped_sha=FP["runner_sha"]),
+        _model(tmp_path, stamped_sha=FP["runner_sha"]),
     )
     other = dict(FP, model="a-model-the-arms-never-ran")
     base = {**_cmp_results(), "fingerprint": other}
-    cand = {**_cmp_results({"G2": 14}), "fingerprint": other}
+    cand = {**_cmp_results({"G2": 38}), "fingerprint": other}
     out = rule_disposition(_cmp_candidate(["compaction"]), base, cand, _COVERAGE)
     assert out["applied"] is False
     assert "model" in out["why"]
 
 
-def test_a_supported_task_no_arm_measured_is_not_in_the_supported_set(tmp_path):
-    """`loop.calibrate` writes a `per_task` entry for every task it was ASKED about,
-    with an empty `passes_by_arm` when no arm carried it. Reading that as a supported
-    task would put a name in the denominator that nothing was ever measured on — and
-    then refuse every comparison for missing it."""
-    from loop.validate import section_calibration
-
-    path = _analysis(tmp_path, stamped_sha=FP["runner_sha"], supported_extra={"NEVER_RAN"})
-    analysis = json.loads(path.read_text())
-    assert analysis["per_task"]["NEVER_RAN"]["passes_by_arm"] == {}
-
-    cal = section_calibration("compaction", FP, analysis_path=path)
-    assert cal is not None
-    assert "NEVER_RAN" not in cal.supported
-    assert cal.supported == {"A1", "G2", "G4", "G5"}
-
-
-# --- the confirm CLI passes the calibration through (contract §5 amendment) -------
+# --- the confirm CLI passes the calibration through (contract §5) -----------------
 
 
 def _calibrated_first_record(it_dir, candidate_id, cal):
@@ -683,7 +767,7 @@ def _calibrated_first_record(it_dir, candidate_id, cal):
     from loop.acceptance import evaluate
 
     decision = evaluate(
-        _cmp_results(), _cmp_results({"G2": 14}), calibration=cal, always_confirm=cal.guards
+        _cmp_results(), _cmp_results({"G2": 38}), calibration=cal, always_confirm=cal.guards
     )
     assert decision.outcome == "CONFIRM" and decision.raw["regime"] == "section_calibration"
     (it_dir / f"validation-{candidate_id}.json").write_text(
@@ -692,19 +776,19 @@ def _calibrated_first_record(it_dir, candidate_id, cal):
     return decision
 
 
-def test_confirm_cli_judges_a_calibrated_claim_against_its_measured_bound(
+def test_confirm_cli_judges_a_calibrated_claim_against_its_computed_quantile(
     tmp_path, monkeypatch, fake_carbon
 ):
-    """Contract §5 amendment. Without the wiring the CLI hands `confirmed()` no
-    calibration, which now REFUSES a calibrated first decision — so the same run that
-    would silently have been judged against the weaker one-attempt bar instead fails
-    loudly with nothing written."""
+    """Contract §5. Without the wiring the CLI hands `confirmed()` no calibration,
+    which REFUSES a calibrated first decision — so the same run that would silently
+    have been judged against the weaker one-attempt bar instead fails loudly with
+    nothing written."""
     import loop.cli as cli_mod
     import loop.validate as validate_mod
     from loop.cli import run_confirmation
 
-    artifact = _analysis(tmp_path, stamped_sha=FP["runner_sha"])
-    cal = validate_mod.section_calibration("compaction", FP, analysis_path=artifact)
+    artifact = _model(tmp_path, stamped_sha=FP["runner_sha"])
+    cal = validate_mod.section_calibration("compaction", FP, model_path=artifact)
     it_dir = tmp_path / "iter-cmp"
     it_dir.mkdir()
     candidate = _cmp_candidate(["compaction"])
@@ -716,12 +800,12 @@ def test_confirm_cli_judges_a_calibrated_claim_against_its_measured_bound(
 
     def arms(gain: int):
         def run(label, only, attempts):
-            passes = {"A1": 40, "G4": 40, "G5": 40, "G2": 25 if label == "b" else gain}
+            passes = {"A1": 27, "G4": 8, "G5": 31, "G2": 27 if label == "b" else gain}
             return {
                 "fingerprint": dict(FP),
                 "tasks": {
                     n: {
-                        "split": "held_out" if n == "G2" else "held_in",
+                        "split": _SPLIT_OF[n],
                         "attempts": 50,
                         "passes": passes[n],
                         "pass_fraction": round(passes[n] / 50, 4),
@@ -734,7 +818,7 @@ def test_confirm_cli_judges_a_calibrated_claim_against_its_measured_bound(
         return run
 
     # Unwired (no artifact reachable): the calibrated claim cannot be judged at all.
-    monkeypatch.setitem(validate_mod._SECTION_ANALYSIS, "compaction", tmp_path / "absent.json")
+    monkeypatch.setitem(validate_mod._SECTION_MODEL, "compaction", tmp_path / "absent.json")
     with pytest.raises(SystemExit, match="confirmation could not be measured"):
         run_confirmation(
             candidate,
@@ -743,7 +827,7 @@ def test_confirm_cli_judges_a_calibrated_claim_against_its_measured_bound(
             "c",
             50,
             carbon_root=fake_carbon,
-            run_runner=arms(34),
+            run_runner=arms(38),
             log=lambda *_: None,
         )
     # `run_confirmation` itself never writes a file on ANY path, success or refusal
@@ -753,8 +837,8 @@ def test_confirm_cli_judges_a_calibrated_claim_against_its_measured_bound(
     # returns) is exercised directly in
     # `test_main_confirm_writes_the_record_only_when_run_confirmation_succeeds`.
 
-    # Wired: the repeat is judged against the MEASURED bound, not a one-attempt grain.
-    monkeypatch.setitem(validate_mod._SECTION_ANALYSIS, "compaction", artifact)
+    # Wired: the repeat is judged against the quantile computed at 50v50, not a grain.
+    monkeypatch.setitem(validate_mod._SECTION_MODEL, "compaction", artifact)
     weak = run_confirmation(
         candidate,
         it_dir,
@@ -762,11 +846,10 @@ def test_confirm_cli_judges_a_calibrated_claim_against_its_measured_bound(
         "c",
         50,
         carbon_root=fake_carbon,
-        run_runner=arms(28),
+        run_runner=arms(30),
         log=lambda *_: None,
     )
-    assert 0 < 28 / 50 - 25 / 50 < cal.noise_ho
-    assert weak.confirmation["outcome"] == "REJECT", "0.06 is inside the measured noise"
+    assert weak.confirmation["outcome"] == "REJECT", "+0.06 is inside G2's own null band"
 
     strong = run_confirmation(
         candidate,
@@ -775,11 +858,12 @@ def test_confirm_cli_judges_a_calibrated_claim_against_its_measured_bound(
         "c",
         50,
         carbon_root=fake_carbon,
-        run_runner=arms(34),
+        run_runner=arms(38),
         log=lambda *_: None,
     )
     assert strong.confirmation["outcome"] == "ACCEPT"
     assert strong.confirmation["raw"]["regime"] == "section_calibration"
+    assert strong.confirmation["raw"]["carrier_quantiles"]["G2"]["quantile"] == "1/5"
 
 
 def test_main_confirm_writes_the_record_only_when_run_confirmation_succeeds(tmp_path, monkeypatch):

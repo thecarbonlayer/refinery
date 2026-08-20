@@ -789,15 +789,36 @@ def test_fitness_power_gain_gate_rows_exist_for_both_splits_and_are_exact_fracti
             frac = Fraction(int(num), int(den))
             assert Fraction(0) <= frac <= Fraction(1), (split, field, frac)
         assert row["carrier"] in row["tasks"]
-    # Held-in's carrier is A1 (alphabetically first of A1/G4/G5); held-out's
-    # only task, G2, is trivially its own carrier.
-    assert gain_gate["held_in"]["carrier"] == "A1"
+        assert set(row["per_carrier"]) == set(row["tasks"]), (
+            "every task on the split can carry the improvement, so every one gets a row"
+        )
+        floor = min(Fraction(row["per_carrier"][t]["power"]) for t in row["tasks"])
+        assert Fraction(row["power"]) == floor, (
+            "the published power is the FLOOR across carriers -- a gate advertised at "
+            "its luckiest carrier's power overstates what it can detect"
+        )
+        assert Fraction(row["per_carrier"][row["carrier"]]["power"]) == floor
+    # Held-out's only task, G2, is trivially its own carrier. Held-in's three
+    # carriers do NOT share a power: G4's near-floor pooled rate makes a +0.2
+    # candidate easiest to see there and G5's near-ceiling rate makes it hardest,
+    # so the split's headline number is G5's -- the weakest, not the alphabetically
+    # first, which is what round 2 published and what this rider corrects.
     assert gain_gate["held_out"]["carrier"] == "G2"
+    assert gain_gate["held_in"]["carrier"] == "G5"
+    assert (
+        Fraction(gain_gate["held_in"]["per_carrier"]["G5"]["power"])
+        < Fraction(gain_gate["held_in"]["per_carrier"]["A1"]["power"])
+        < Fraction(gain_gate["held_in"]["per_carrier"]["G4"]["power"])
+    )
     # Pinned to the review's own reproduction of this exact fraction from
     # this exact pooled pool -- a regression guard on the actual number, not
-    # just its shape.
-    assert gain_gate["held_in"]["power"] == (
+    # just its shape. A1's per-carrier row is that same number, unchanged by
+    # the rider: only which row is published as the split's headline moved.
+    assert gain_gate["held_in"]["per_carrier"]["A1"]["power"] == (
         "778070204904630956396140097536/47352336533208097710339703242875"
+    )
+    assert gain_gate["held_in"]["power"] == (
+        "738354301393030840236197035008/47352336533208097710339703242875"
     )
     assert gain_gate["held_in"]["threshold"] == "4/9"
 
@@ -1046,3 +1067,35 @@ def test_zero_standard_attempts_is_refused_naming_the_arm(tmp_path):
     _write(tmp_path, "full-a", zero)
     with pytest.raises(ValueError, match="full-a"):
         calibrate_model(["full-a"], tmp_path, frozenset({"A1"}))
+
+
+def test_a_subset_arm_with_zero_attempts_is_refused_before_it_divides_by_zero(tmp_path):
+    """The Task 2 review's other rider. `_standard_attempts` only ever inspects the
+    UN-filtered arms, so a subset arm recording zero attempts for a supported task
+    walks past it. It then reaches `_check_stability`, where a leave-one-arm-out pool
+    whose remaining arms all recorded zero attempts builds `Fraction(0, 0)` -- a bare
+    `ZeroDivisionError` naming no arm, no task, and nothing a reader could act on.
+
+    Three zero-attempt subset arms plus one real full-suite arm is the smallest shape
+    that reproduces it: leaving the full arm out empties the pool. The refusal must
+    name the arm and the task instead.
+    """
+    fp = {"runner_sha": "rsha1", "config_version": 7, "model": "carbon-model", "dirty_sha": None}
+    _write(tmp_path, "full-a", _arm("full-a", {"A1": (2, 3, "held_in")}, fingerprint=fp))
+    for label in ("cmp-a", "cmp-b", "cmp-c"):
+        _write(
+            tmp_path,
+            label,
+            {
+                "fingerprint": dict(fp),
+                "filter": ["A1"],
+                "tasks": {
+                    "A1": {"split": "held_in", "attempts": 0, "passes": 0, "pass_fraction": 0.0}
+                },
+            },
+        )
+    labels = ["full-a", "cmp-a", "cmp-b", "cmp-c"]
+    with pytest.raises(ValueError, match="cmp-a") as exc:
+        calibrate_model(labels, tmp_path, frozenset({"A1"}))
+    assert "A1" in str(exc.value)
+    assert "0 attempts" in str(exc.value)

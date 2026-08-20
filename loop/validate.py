@@ -37,7 +37,8 @@ from pathlib import Path
 from loop.acceptance import ACCEPT, SectionCalibration
 from loop.acceptance import evaluate as rule_evaluate
 from loop.artifacts import Candidate, ValidationRecord
-from loop.calibrate import ANALYSIS_PATH as COMPACTION_ANALYSIS_PATH
+from loop.calibrate import MODEL_PATH as COMPACTION_MODEL_PATH
+from loop.calibrate import _fingerprint_field as _provenance_value
 from loop.config_edit import CONFIG_REL, apply_candidate
 from loop.observed_coverage import activity_from_rows, partition_deltas, select_attempts
 from loop.surface_sweep import sweep as run_sweep
@@ -287,10 +288,11 @@ def causal_verdict(d: dict, coverage: dict, baseline: dict) -> dict:
 # false-reject, and its exclusions can never be proof-grade — `trigger_fraction`
 # belongs to the knob, so the knob can CREATE the activity whose absence would be the
 # exclusion. It therefore enters ONLY through a fresh `SectionCalibration`: a supported
-# task set and bounds measured by null arms whose PROVENANCE — runner_sha, config
-# version, model — matches the measurements being judged. No artifact, or one measured
-# in a different world, and the section falls back to the causal verdict exactly as
-# before (contract §4 and its 2026-08-19 amendment).
+# task set and a null MODEL measured by null arms whose PROVENANCE — runner_sha, config
+# version, model, carbon revision, tree state — matches the measurements being judged,
+# and whose own fitness checks passed. No artifact, one that refused to certify itself,
+# or one measured in a different world, and the section falls back to the causal
+# verdict exactly as before (phase2b contract §1/§4).
 RULE_SECTIONS = frozenset({"tool_output", "compaction"})
 
 # Sections whose entry into the rule is CONDITIONAL on that fresh calibration. A
@@ -314,11 +316,28 @@ _FIELD_SECTION = {
     "compaction_prompt": "compaction",
 }
 
-# Where each calibrated section's artifact lives. `loop.calibrate` WRITES this path;
-# importing the constant rather than re-spelling it means the writer and the reader
-# cannot drift apart — a divergence would silently leave the section uncalibrated
-# forever, with a perfectly good artifact sitting on disk.
-_SECTION_ANALYSIS = {"compaction": COMPACTION_ANALYSIS_PATH}
+# Where each calibrated section's null-model artifact lives. `loop.calibrate --model`
+# WRITES this path; importing the constant rather than re-spelling it means the writer
+# and the reader cannot drift apart — a divergence would silently leave the section
+# uncalibrated forever, with a perfectly good artifact sitting on disk. The round-1
+# `analysis.json` load path is GONE, not merely unused: that shape stored thresholds,
+# and there is no longer any code that could read one (see
+# `iterations/calibration-compaction/README.md` for why it was withdrawn).
+_SECTION_MODEL = {"compaction": COMPACTION_MODEL_PATH}
+
+# The task set each section's model must cover, exactly (phase2b contract §1: "pinned
+# here, the loader refuses any other set"). `calibrate_model` pins it on the way in;
+# this pins it on the way out, so an artifact that was hand-edited, truncated, or built
+# for some other section's evidence cannot install itself as this one's. A supported set
+# that silently loses a task also silently changes the denominator of every mean the
+# rule judges — the exact failure `_require_supported` exists to refuse downstream.
+_SECTION_SUPPORTED = {"compaction": frozenset({"A1", "G2", "G4", "G5"})}
+
+# The provenance fields whose value must be PRESENT and EQUAL on both sides. `dirty_sha`
+# is deliberately absent from this tuple and checked separately below: None is a real,
+# meaningful value there (a clean tree), where None anywhere here means "this artifact
+# does not say", which is never evidence of a match.
+_REQUIRED_PROVENANCE = ("config_version", "model", "carbon_sha")
 
 # Tasks a confirmation pair must rerun for a section EVEN IF UNMOVED — the section's
 # known trade-off guards and its reachable security checks. Movement-only selection
@@ -371,47 +390,87 @@ def _scrub_os_error(exc: Exception, path: Path) -> str:
     return str(exc)
 
 
-def _provenance_mismatch(analysis: dict, fingerprint: dict, where: str) -> str:
+def _provenance_mismatch(model: dict, fingerprint: dict, where: str) -> str:
     """The first way this artifact's provenance differs from the measurements', or "".
 
     Freshness is a question about the RESULTS being judged, not about the process doing
-    the judging (contract §4, amendment 2026-08-19). The null protocol (§2) forces every
-    arm to share `runner_sha`, `config_version` and `model` precisely because a Δ across
-    any of them is not a measurement of noise — so a noise floor whose arms disagree
-    with the baseline being judged was measured in a different world. Checking the LIVE
-    process instead would pass an artifact that matches today's checkout while the
-    results predate it, and fail one that matches the results perfectly after an
-    unrelated `runner/` edit.
+    the judging (contract §4, amendment 2026-08-19). The null protocol forces every arm
+    to share `runner_sha`, `config_version`, `model`, `carbon_sha` and `dirty_sha`
+    precisely because a Δ across any of them is not a measurement of noise — so a null
+    model whose arms disagree with the baseline being judged was measured in a different
+    world. Checking the LIVE process instead would pass an artifact that matches today's
+    checkout while the results predate it, and fail one that matches the results
+    perfectly after an unrelated `runner/` edit.
+
+    A MISSING or None value on either side is a MISMATCH, never a match. The Phase-2
+    check was a bare `arm.get(field) != fingerprint.get(field)`, which reads two
+    absences as agreement: an artifact recording no model, judged against results
+    recording no model, passed a freshness check neither side could actually answer.
+    "Could not check" must never render as "checked" — that is the same fail-closed
+    rule the no-fingerprint branch below already applies, applied per field.
+
+    `dirty_sha` is the one field where None is REAL data rather than an absence: it is
+    what a clean tree records, and clean-vs-clean is a genuine match. So its KEY must be
+    present on both sides (an artifact that never recorded tree state still cannot be
+    checked) while its VALUE may be None on both.
     """
-    computed = analysis.get("computed_at_runner_sha")
-    if computed != fingerprint.get("runner_sha"):
+    computed = model.get("computed_at_runner_sha")
+    observed = fingerprint.get("runner_sha")
+    if computed is None or observed is None:
+        return (
+            f"{where} cannot be checked for freshness on runner_sha — the artifact "
+            f"records {computed!r} and the measurements record {observed!r}; a missing "
+            "value is a mismatch, never a match"
+        )
+    if computed != observed:
         return (
             f"{where} is STALE on runner_sha — computed at {str(computed)[:12]}, the "
-            f"measurements were recorded at {str(fingerprint.get('runner_sha'))[:12]}"
+            f"measurements were recorded at {str(observed)[:12]}"
         )
-    arms = analysis.get("arms") or []
+    arms = model.get("provenance") or []
     if not arms:
-        return f"{where} records no arms — there is no provenance to check it against"
+        return f"{where} records no arm provenance — there is nothing to check it against"
     for arm in arms:
-        for field in ("config_version", "model"):
-            if arm.get(field) != fingerprint.get(field):
+        label = arm.get("label")
+        for field in _REQUIRED_PROVENANCE:
+            theirs, ours = arm.get(field), _provenance_value(fingerprint, field)
+            if theirs is None or ours is None:
                 return (
-                    f"{where} is STALE on {field} — arm {arm.get('label')!r} measured at "
-                    f"{arm.get(field)!r}, the measurements were recorded at "
-                    f"{fingerprint.get(field)!r}"
+                    f"{where} cannot be checked for freshness on {field} — arm {label!r} "
+                    f"records {theirs!r} and the measurements record {ours!r}; a missing "
+                    "value is a mismatch, never a match"
                 )
+            if theirs != ours:
+                return (
+                    f"{where} is STALE on {field} — arm {label!r} measured at {theirs!r}, "
+                    f"the measurements were recorded at {ours!r}"
+                )
+        if "dirty_sha" not in arm or "dirty_sha" not in fingerprint:
+            return (
+                f"{where} cannot be checked for freshness on dirty_sha — arm {label!r} "
+                f"{'records' if 'dirty_sha' in arm else 'does not record'} a tree state and "
+                f"the measurements "
+                f"{'do' if 'dirty_sha' in fingerprint else 'do not'}; an unrecorded tree "
+                "state is a mismatch, never a match"
+            )
+        if arm["dirty_sha"] != fingerprint["dirty_sha"]:
+            return (
+                f"{where} is STALE on dirty_sha — arm {label!r} measured at "
+                f"{arm['dirty_sha']!r}, the measurements were recorded at "
+                f"{fingerprint['dirty_sha']!r}"
+            )
     return ""
 
 
 def _parse_exact_fraction(raw: str | None) -> Fraction | None:
-    """A `"numerator/denominator"` string (`loop.calibrate`'s `section_noise_exact`)
-    as an exact `Fraction`, or None when there is nothing to parse.
+    """A `"numerator/denominator"` string (`loop.calibrate`'s `null_rate`) as an exact
+    `Fraction`, or None when it is absent or malformed.
 
-    None is also the answer for a malformed string: an artifact this module cannot
-    trust to be well-formed must not raise here (a legacy or hand-edited analysis.json
-    should not crash loading), it must fall back — `SectionCalibration.__post_init__`
-    is exactly the fallback, deriving the same `Fraction(float)` this module compared
-    against before the exact field existed.
+    None means REFUSE at every call site below, which is the whole difference from the
+    round-1 loader: that one fell back to a float view of the same bound when the exact
+    string was unusable. There is nothing to fall back to now — a rate that cannot be
+    read exactly has no null distribution, and approximating one would put a threshold
+    into a judgment that no measurement produced.
     """
     if not raw:
         return None
@@ -419,29 +478,41 @@ def _parse_exact_fraction(raw: str | None) -> Fraction | None:
         if "/" in raw:
             num, den = raw.split("/", 1)
             return Fraction(int(num), int(den))
-        return Fraction(int(raw))
-    except (ValueError, ZeroDivisionError):
+        return Fraction(str(raw))
+    except (ValueError, ZeroDivisionError, ArithmeticError):
         return None
 
 
+def _failed_fitness(model: dict) -> list[str]:
+    """The named fitness checks that did NOT pass, in the artifact's own words."""
+    fitness = model.get("fitness") or {}
+    return [
+        name
+        for name in ("grain", "goodness", "stability")
+        if (fitness.get(name) or {}).get("pass") is not True
+    ]
+
+
 def calibration_status(
-    section: str, fingerprint: dict | None, *, analysis_path: Path | None = None
+    section: str, fingerprint: dict | None, *, model_path: Path | None = None
 ) -> tuple[SectionCalibration | None, str]:
     """`section_calibration()` plus the reason it came back empty.
 
     Public, and returning the reason, because "not calibrated" is a fact every caller
-    must be able to EXPLAIN: missing artifact, artifact from other provenance, and
-    unmeasured bound are three different states of the world, only one of which is
-    fixed by re-running the null protocol. A bare None makes them one mystery.
+    must be able to EXPLAIN: a missing artifact, an artifact that refused to certify
+    itself, one measured under other provenance, and one whose rates cannot be read
+    exactly are four different states of the world, and they are fixed four different
+    ways. A bare None makes them one mystery.
     """
-    path = analysis_path or _SECTION_ANALYSIS.get(section)
+    path = model_path or _SECTION_MODEL.get(section)
     if path is None:
         return None, f"section {section!r} has no calibration artifact to load"
     where = _repo_relative(path)
     if not path.is_file():
         return None, (
             f"section {section!r} is not calibrated: no calibration artifact at {where} — "
-            "run the null-arm protocol and `python -m loop.calibrate <arm labels>` first"
+            "run the null-arm protocol and `python -m loop.calibrate --model <arm labels>` "
+            "first"
         )
     if not fingerprint:
         # Fail CLOSED. Without the measurements' provenance there is nothing for the
@@ -452,77 +523,98 @@ def calibration_status(
             "compared, never against the live process alone"
         )
     try:
-        analysis = json.loads(path.read_text())
+        model = json.loads(path.read_text())
     except (OSError, ValueError) as exc:
         return None, (
             f"section {section!r} is not calibrated: {where} is unreadable "
             f"({_scrub_os_error(exc, path)})"
         )
-    drift = _provenance_mismatch(analysis, fingerprint, where)
+    # Contract §4: the artifact refuses to install itself. `fit` is computed by the tool
+    # that wrote it and recorded either way; the loader's job is to honor the refusal and
+    # say which check produced it, because "re-run the arms" and "the tool is wrong" are
+    # different remedies. `is not True` rather than falsiness: a missing `fit` is not a
+    # pass, and neither is a truthy string somebody hand-edited in.
+    if (model.get("fitness") or {}).get("fit") is not True:
+        failed = _failed_fitness(model)
+        return None, (
+            f"section {section!r} is not calibrated: {where} records fitness.fit="
+            f"{(model.get('fitness') or {}).get('fit')!r} — the artifact refuses to install "
+            f"itself ({'failed: ' + ', '.join(failed) if failed else 'no fitness recorded'}). "
+            "A null model that does not pass its own checks gates nothing; re-run the arms."
+        )
+    drift = _provenance_mismatch(model, fingerprint, where)
     if drift:
         return None, (
-            f"section {section!r} is not calibrated: {drift}. A bound measured under "
-            "other provenance is not a measurement of this comparison, so the section "
-            "falls back to the causal verdict until the arms are re-run."
+            f"section {section!r} is not calibrated: {drift}. A null model measured under "
+            "other provenance is not a model of this comparison, so the section falls back "
+            "to the causal verdict until the arms are re-run."
         )
-    noise = analysis.get("section_noise") or {}
-    # A split named in `section_noise` with fewer than two arms behind it carries a
-    # bound of 0.0 by construction — no pair, no spread. That is an ABSENCE of
-    # measurement, and installing it as a threshold would give the section a floor of
-    # zero, where any movement at all reads as evidence. `section_noise_arms` is what
-    # tells the two apart; a genuine measured zero names its arms.
-    arms = analysis.get("section_noise_arms") or {}
-    # A `per_task` entry with no arm behind it is a task the tool was ASKED about and
-    # no arm carried — `loop.calibrate` still writes the row, with an empty
-    # `passes_by_arm`. Reading it as supported would put a name in the denominator
-    # nothing was ever measured on, and then refuse every comparison for not having it.
-    per_task = {
-        name: row
-        for name, row in (analysis.get("per_task") or {}).items()
-        if (row or {}).get("passes_by_arm")
-    }
-    unmeasured = [s for s in ("held_in", "held_out") if s not in noise or len(arms.get(s, ())) < 2]
-    if unmeasured or not per_task:
+    null_model = model.get("null_model") or {}
+    if not null_model:
         return None, (
-            f"section {section!r} is not calibrated: {where} carries no measured bound for "
-            f"{', '.join(unmeasured) or 'any supported task'} — fewer than two arms covered "
-            "it, and a bound no pair of arms produced is an absence, not a measurement of zero"
+            f"section {section!r} is not calibrated: {where} carries no null_model — there "
+            "are no rates to compute a quantile from"
         )
-    noise_exact = analysis.get("section_noise_exact") or {}
+    pinned = _SECTION_SUPPORTED.get(section)
+    if pinned is not None and set(null_model) != set(pinned):
+        return None, (
+            f"section {section!r} is not calibrated: {where} covers "
+            f"{sorted(null_model) or 'nothing'}, and this section's supported set is pinned "
+            f"to {sorted(pinned)} — missing {sorted(pinned - set(null_model))}, unexpected "
+            f"{sorted(set(null_model) - pinned)}. A model over a different set of tasks is "
+            "a model of different evidence."
+        )
+    rates: dict[str, Fraction] = {}
+    for task in sorted(null_model):
+        rate = _parse_exact_fraction((null_model[task] or {}).get("null_rate"))
+        if rate is None or not 0 <= rate <= 1:
+            return None, (
+                f"section {section!r} is not calibrated: {where} carries an unreadable "
+                f"null_rate for {task} "
+                f"({(null_model[task] or {}).get('null_rate')!r}) — a rate that cannot be "
+                "read exactly has no null distribution, and this loader approximates nothing"
+            )
+        rates[task] = rate
+    level = _parse_exact_fraction(model.get("coverage_level"))
+    if level is None or not 0 < level <= 1:
+        return None, (
+            f"section {section!r} is not calibrated: {where} carries an unreadable "
+            f"coverage_level ({model.get('coverage_level')!r}) — every quantile this model "
+            "produces is a quantile AT some coverage, and an unstated one is not a bound"
+        )
     return (
         SectionCalibration(
             section=section,
-            supported=frozenset(per_task),
-            noise_in=float(noise["held_in"]),
-            noise_ho=float(noise["held_out"]),
+            supported=frozenset(rates),
+            null_rates=rates,
+            coverage_level=level,
             guards=_SECTION_CONFIRM_GUARDS.get(section, frozenset()),
             source=where,
-            noise_in_exact=_parse_exact_fraction(noise_exact.get("held_in")),
-            noise_ho_exact=_parse_exact_fraction(noise_exact.get("held_out")),
         ),
         "",
     )
 
 
 def section_calibration(
-    section: str, fingerprint: dict | None = None, *, analysis_path: Path | None = None
+    section: str, fingerprint: dict | None = None, *, model_path: Path | None = None
 ) -> SectionCalibration | None:
-    """The section's measured bounds for THESE measurements, or None.
+    """The section's measured null model for THESE measurements, or None.
 
     None means the section stays on the causal verdict. It is returned for a section
     with no artifact at all (`tool_output`, which does not want one), for an artifact
-    that has not been written yet, for one whose provenance differs from the results
-    being judged, and for one whose bounds no pair of arms actually produced.
+    that has not been written yet, for one that failed its own fitness checks, for one
+    whose provenance differs from the results being judged, and for one whose rates
+    cannot be read exactly.
 
     `fingerprint` is the BASELINE results' fingerprint — the provenance freshness is
     judged against (contract §4, amendment 2026-08-19). Omitting it is not a way to
     skip the check: with nothing to be fresh FOR, the answer is None. Callers that
     need to know WHY should use `calibration_status()`, which returns the reason.
 
-    `analysis_path` is a test seam, mirroring `run_runner=`/`run_gates=` elsewhere in
-    this module; production reads `_SECTION_ANALYSIS`.
+    `model_path` is a test seam, mirroring `run_runner=`/`run_gates=` elsewhere in
+    this module; production reads `_SECTION_MODEL`.
     """
-    return calibration_status(section, fingerprint, analysis_path=analysis_path)[0]
+    return calibration_status(section, fingerprint, model_path=model_path)[0]
 
 
 def candidate_section(candidate: Candidate) -> str | None:
