@@ -40,13 +40,16 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from runner.judge import JUDGE_PROMPT_SHA, judged_equivalent
+from runner.judge import AGREEMENT_PATH, JUDGE_PROMPT_SHA, judged_equivalent
 from runner.suite import RESULTS_DIR
 from runner.tasks.cluster_a import A1_SENTINEL
 from runner.tasks.cluster_g import G2_FACT_A, G2_FACT_B, G4_FILES, G4_NEXT, G4_REJECTED, G5_FILES
 
-EDITOR_ROOT = Path(__file__).resolve().parents[1]
-AGREEMENT_PATH = EDITOR_ROOT / "iterations" / "judge-validation" / "agreement.json"
+# The artifact's path is defined in ``runner.judge`` beside the gate that READS
+# it (CMP-6's activation check): the reader may not import this package, so a
+# second definition here could drift into naming a different file — a judge
+# gated on an artifact nobody writes, or one written where nothing looks.
+__all__ = ["AGREEMENT_PATH", "build_corpus", "main", "pairs_from_record", "run_validation"]
 
 # The eleven committed files the corpus is built from (contract §4). Sorted
 # for a deterministic corpus order run to run.

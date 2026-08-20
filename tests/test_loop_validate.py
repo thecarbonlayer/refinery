@@ -1033,3 +1033,39 @@ def test_a_single_arm_disagreeing_on_runner_sha_is_stale(tmp_path):
     cal, why = calibration_status("compaction", FP, model_path=path)
     assert cal is None
     assert "runner_sha" in why and "STALE" in why
+
+
+def test_every_declared_compaction_guard_has_a_rate_in_the_installed_null_model():
+    """The invariant that ties the guard set to the calibration, and the reason the
+    two must move together.
+
+    `SectionCalibration` refuses a guard outside the model's supported set, because a
+    guard with no null rate cannot be adjudicated and would be silently skipped. So a
+    guard may only be DECLARED once the null model carries a rate for it. Phase 2c
+    adds CMP-5/6/7 to `loop.calibrate.MODEL_TASKS` — the coverage the next campaign
+    must measure — and this test is what forces the guard-set extension to wait for
+    that campaign instead of landing first and refusing every artifact on disk.
+
+    If this goes red, the fix is not to edit the assertion: it is to finish the
+    recalibration, extend `_SECTION_SUPPORTED` alongside the guards, and re-run the
+    arms.
+    """
+    import json
+
+    from loop.calibrate import MODEL_TASKS
+    from loop.validate import _SECTION_CONFIRM_GUARDS, _SECTION_MODEL, _SECTION_SUPPORTED
+
+    guards = _SECTION_CONFIRM_GUARDS["compaction"]
+    pinned = _SECTION_SUPPORTED["compaction"]
+    assert guards <= pinned, (
+        f"guard(s) {sorted(guards - pinned)} are declared but outside the section's "
+        "pinned supported set — the loader would build a calibration that cannot judge "
+        "them"
+    )
+    installed = json.loads(_SECTION_MODEL["compaction"].read_text())
+    assert set(installed["null_model"]) == pinned, (
+        "the installed artifact no longer covers the pinned set; recalibrate before changing either"
+    )
+    # ...and the coverage the NEXT campaign must measure is a superset of both, so the
+    # guard set can grow only after the arms that rate it have been recorded.
+    assert pinned <= MODEL_TASKS and guards <= MODEL_TASKS

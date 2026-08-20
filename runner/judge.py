@@ -26,7 +26,9 @@ ever changing to say so.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
+from pathlib import Path
 
 JUDGE_PROMPT = """You judge whether an ANSWER conveys the same meaning as an EXPECTED FACT.
 
@@ -56,6 +58,56 @@ QUOTE: <the exact span of ANSWER that contradicts it, or its closest attempt>
 # exact prompt. Changing JUDGE_PROMPT without re-running validation must be a
 # visible, deliberate act, never a silent drift.
 JUDGE_PROMPT_SHA = hashlib.sha256(JUDGE_PROMPT.encode()).hexdigest()
+
+
+# The validation artifact (contract §4) and, with it, the judge's ACTIVATION
+# gate. The path lives here rather than in ``loop.judge_validate`` — which
+# writes the file — because the reader is a TASK (``runner/tasks/cluster_g.py``
+# CMP-6) and ``runner/`` may not import ``loop/``: that package's ``__init__``
+# runs the carbon-base guard and the dependency would invert the layering. One
+# constant, imported by the writer, so the two can never name different files.
+AGREEMENT_PATH = (
+    Path(__file__).resolve().parents[1] / "iterations" / "judge-validation" / "agreement.json"
+)
+
+
+def validation_status(path: Path | None = None) -> tuple[bool, str]:
+    """Is this judge validated for THIS prompt? ``(ok, reason)``.
+
+    Contract §4: CMP-6's activation is gated on
+    ``iterations/judge-validation/agreement.json`` existing, recording
+    ``pass: true``, AND carrying the CURRENT ``JUDGE_PROMPT_SHA``. Any other
+    state returns False with the reason, and CMP-6 turns that into an
+    ``error`` outcome — never a mechanical fallback, which would silently
+    replace a meaning check with a substring check and report the result under
+    the same task name.
+
+    The sha comparison is the half that is easy to forget and the one that
+    matters most: the artifact is a measurement of a SPECIFIC prompt's
+    agreement with mechanical ground truth, and a prompt edit leaves the file
+    on disk, passing, describing a judge that no longer exists.
+
+    Fails CLOSED on every unreadable state (missing file, bad JSON, an OSError)
+    — the same discipline as ``_parse_judgment``.
+    """
+    path = AGREEMENT_PATH if path is None else path
+    if not path.is_file():
+        return False, "no validation artifact on disk (run `python -m loop.judge_validate`)"
+    try:
+        artifact = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        return False, f"validation artifact unreadable ({type(exc).__name__})"
+    if not isinstance(artifact, dict):
+        return False, "validation artifact is not a JSON object"
+    recorded_sha = artifact.get("judge_prompt_sha")
+    if recorded_sha != JUDGE_PROMPT_SHA:
+        return False, (
+            f"validation artifact was measured for judge_prompt_sha={str(recorded_sha)[:12]!r}, "
+            f"this judge is {JUDGE_PROMPT_SHA[:12]!r} — re-run the validation"
+        )
+    if artifact.get("pass") is not True:
+        return False, f"validation artifact records pass={artifact.get('pass')!r}"
+    return True, ""
 
 
 @dataclass(frozen=True)

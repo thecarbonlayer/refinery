@@ -236,12 +236,33 @@ KNOB_COVERAGE: dict[str, dict[str, tuple[str, ...]]] = {
     # So: observer and GUARD on both rows. That is the real coverage this table gained —
     # a compaction candidate that loses the file list drops G5 from 1.00, and nothing
     # was watching that before. A weak guard, on the `uncertain` prior, exactly like D3.
+    #
+    # CMP-5/6/7 added 2026-08-20 (phase2c-guards-contract.md §6). Observers on the
+    # same argument G2/G4/G5 already carry — each drives repeated compaction and
+    # grades what came back through it, so every sub-field of this object (strategy,
+    # keep_head, keep_tail, trigger_fraction, summary_max_tokens) can move their
+    # verdicts. GUARDS, never miners, and that asymmetry is the point of the phase:
+    # they exist to catch a compaction fix mined from G4 that generalizes only to
+    # G4's shape. Mining against them would tune the candidate on the very tasks
+    # that are supposed to be able to refuse it.
+    #
+    # Each covers an axis the existing rows cannot: CMP-5 a SUPERSEDED decision (both
+    # G2 and G4 grade retention alone, so a summarizer that keeps every decision and
+    # loses their status passes both); CMP-6 MEANING with no sentinel to match on;
+    # CMP-7 a fact competing with bulky tool output at the DEFAULT window rather than
+    # a pinned small one.
     "compaction": {
-        "observers": ("A1", "G2", "G4", "G5"),
+        "observers": ("A1", "G2", "G4", "G5", "CMP-5", "CMP-6", "CMP-7"),
         "miners": ("G4",),
-        "guards": ("A1", "G2", "G5"),
+        "guards": ("A1", "G2", "G5", "CMP-5", "CMP-6", "CMP-7"),
     },
-    # Same observers, and for a sharper reason: H2 detects the summarizer by
+    # Same observers as compaction had BEFORE the Phase 2c guards, and deliberately
+    # not extended with them: this row is about the summarizer's PROMPT text, and the
+    # three new tasks have not been measured against a rewritten prompt at all. The
+    # contract extends `compaction` only, and a coverage row is an authored claim
+    # about carbon's internals — copying it across because the two rows have always
+    # matched would be exactly the padding the module docstring warns about.
+    # H2 stays out for the sharper reason: it detects the summarizer by
     # payload SHAPE precisely so that rewriting this knob cannot fool it, which by
     # construction makes it blind to the knob. `tests/test_registry.py` asserts
     # that invariance directly.

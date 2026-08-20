@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 from pathlib import Path
 
 from runner.spec import ATTEMPTS
@@ -42,13 +43,20 @@ PRIMITIVES = frozenset(
 
 ALIAS_RE = re.compile(r"^[A-Z]{3,4}-\d+$")
 
-# The 28 fixed (primitive, alias) assignments from the frozen contract's §6 table.
+# The 31 fixed (primitive, alias) assignments: the 28 from the Phase 1 measurement
+# contract's §6 table, plus the three Phase 2c scenario guards (CMP-5/6/7, frozen
+# in contracts/phase2c-guards-contract.md §1-§3).
 # A2/A3 were originally delegated to the implementer reading cluster_a.py; the
 # 2026-08-19 audit-finding-4 amendment resolved both explicitly (A2's original
 # assignment was itself wrong — its oracle measures tool_output truncation
 # survival of an oversized TOOL result, not @path delivery — and A3 was confirmed
-# as-implemented), so all 28 are now pinned the same way: by literal equality
+# as-implemented), so all of them are now pinned the same way: by literal equality
 # against this frozen copy, never a loop-editable value.
+#
+# CMP-5/6/7 carry `alias=None` for a reason worth stating: the alias column is a
+# short mnemonic for a task whose NAME is a cluster id (G2 is also CMP-2). These
+# three are named for the primitive already — the name IS the mnemonic — so an
+# alias would be a second id for the same thing.
 CONTRACT_PRIMITIVE_ALIAS = {
     "A1": ("compaction", "CMP-1"),
     "A2": ("tool-output", None),
@@ -78,6 +86,9 @@ CONTRACT_PRIMITIVE_ALIAS = {
     "H1": ("retry", "RET-1"),
     "H2": ("retry", "RET-2"),
     "H3": ("retry", "RET-3"),
+    "CMP-5": ("compaction", None),
+    "CMP-6": ("compaction", None),
+    "CMP-7": ("compaction", None),
 }
 
 
@@ -107,6 +118,11 @@ def test_contract_primitive_alias_assignments_hold():
 def test_registry_shape():
     names = [t.name for t in TASKS]
     assert len(names) == len(set(names)), "duplicate task names"
+    # 28 through Phase 2b, 31 once the Phase 2c scenario guards landed. A literal
+    # count is the one assertion that catches a task added to a cluster's SPECS and
+    # nowhere else — the membership set below would have to be edited to hide it,
+    # which is a deliberate act rather than an omission.
+    assert len(names) == 31
     for t in TASKS:
         assert t.split in ATTEMPTS
         assert t.cluster in CLUSTERS
@@ -144,6 +160,9 @@ def test_registry_membership():
         "H1",
         "H2",
         "H3",
+        "CMP-5",
+        "CMP-6",
+        "CMP-7",
     }
     held_in = {t.name for t in TASKS if t.split == "held_in"}
     held_out = {t.name for t in TASKS if t.split == "held_out"}
@@ -166,8 +185,10 @@ def test_registry_membership():
         "G5",
         "H1",
         "H3",
+        "CMP-5",
+        "CMP-7",
     }
-    assert held_out == {"A3", "A4", "B3", "C3", "D3", "E2", "E4", "F2", "G2", "H2"}
+    assert held_out == {"A3", "A4", "B3", "C3", "D3", "E2", "E4", "F2", "G2", "H2", "CMP-6"}
 
 
 def test_e_fixtures_are_hidden_by_carbons_own_truncation():
@@ -1932,4 +1953,384 @@ def test_c1_grants_the_allowance_to_the_sessions_scratch_root_specifically():
         assert isinstance(kw.value, ast.Attribute) and kw.value.attr == "scratch_root", (
             "also_allow must be <env>.scratch_root; anything else is a no-op allowance "
             f"that no behavioural test can distinguish (got {ast.dump(kw.value)[:80]})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Phase 2c scenario guards — CMP-5 (supersession), CMP-6 (judged meaning),
+# CMP-7 (buried facts) — and G2's outcome decomposition.
+# ---------------------------------------------------------------------------
+
+
+def test_cmp5_is_position_balanced_so_recency_alone_cannot_answer_it():
+    """The load-bearing property of CMP-5, and the one a reader has to be able to
+    check without running a model.
+
+    The point of the task is that a compaction fix which simply favours the LATEST
+    mention must not pass it. That only holds if the CURRENT code appears in BOTH
+    the early message and the supersession message, while the RETIRED code appears
+    ONLY in the supersession one — the later message then carries both codes, so
+    "take whichever was said last" is not a rule that can separate them. If the
+    current code ever drifts out of the early message, the task quietly becomes
+    "repeat the most recent code", which is exactly the fix it is supposed to
+    resist.
+    """
+    from runner.tasks.cluster_g import (
+        CMP5_CURRENT,
+        CMP5_EARLY,
+        CMP5_QUESTION,
+        CMP5_RETIRED,
+        CMP5_SUPERSESSION,
+    )
+
+    assert CMP5_CURRENT in CMP5_EARLY
+    assert CMP5_CURRENT in CMP5_SUPERSESSION
+    assert CMP5_RETIRED not in CMP5_EARLY
+    assert CMP5_RETIRED in CMP5_SUPERSESSION
+    # ...and framed as retired where it does appear, before the approved one.
+    assert CMP5_SUPERSESSION.index(CMP5_RETIRED) < CMP5_SUPERSESSION.index(CMP5_CURRENT)
+    assert "is retired" in CMP5_SUPERSESSION
+    # The question never names either code — it asks for the approved one by role.
+    assert CMP5_CURRENT not in CMP5_QUESTION and CMP5_RETIRED not in CMP5_QUESTION
+
+
+def test_cmp5_requires_a_compaction_after_the_supersession_not_merely_two():
+    """The other half of the same property, and the one a constant cannot express.
+
+    If both compactions fire BEFORE the supersession message, that message is still
+    sitting raw in the tail when the question is asked, and every strategy answers it
+    alike. The balance in the wording only measures anything once the superseding
+    statement has itself been through the door, so the setup guard counts compactions
+    after it and reports `error` when none fired.
+    """
+    import inspect
+
+    from runner.tasks import cluster_g
+
+    source = inspect.getsource(cluster_g.run_cmp5)
+    assert "after_supersession" in source
+    assert "if compactions < 2 or after_supersession < 1:" in source, (
+        "CMP-5's setup guard no longer requires a compaction after the supersession; "
+        "the task would pass on recency alone whenever both fired early"
+    )
+
+
+def test_cmp5_passes_only_on_the_current_code_with_the_retired_one_absent():
+    """Contract §1's verifier, as a truth table. Naming BOTH codes is not a pass:
+    a reply that hedges by listing the retired approach too has not carried the
+    decision, it has carried the transcript."""
+    from runner.tasks.cluster_g import CMP5_CURRENT, CMP5_RETIRED, cmp5_verdict
+
+    assert cmp5_verdict(f"{CMP5_CURRENT}")[0] is True
+    assert cmp5_verdict(f"the approved approach is {CMP5_CURRENT.lower()}.")[0] is True
+    assert cmp5_verdict(f"{CMP5_CURRENT} (which superseded {CMP5_RETIRED})")[0] is False
+    assert cmp5_verdict(f"{CMP5_RETIRED}")[0] is False
+    assert cmp5_verdict("I do not have that decision.")[0] is False
+    ok, current, retired = cmp5_verdict(f"{CMP5_RETIRED} and {CMP5_CURRENT}")
+    assert (ok, current, retired) == (False, True, True)
+
+
+def test_cmp6_states_its_fact_in_plain_words_with_no_sentinel_to_match_on():
+    """CMP-6 exists to measure MEANING preservation, so its fact must not be
+    answerable by copying a token. A sentinel-shaped code anywhere in the stated
+    fact or the pinned expectation would let a substring check stand in for the
+    judge — the mechanical fallback contract §2 forbids."""
+    from runner.tasks.cluster_g import CMP6_EXPECTED, CMP6_FACT, CMP6_QUESTION
+
+    sentinel_shaped = re.compile(r"\b[A-Z]{3,}(?:-[A-Z0-9]+){2,}\b")
+    for text in (CMP6_FACT, CMP6_EXPECTED, CMP6_QUESTION):
+        assert not sentinel_shaped.search(text), f"sentinel-shaped token in {text!r}"
+    # The pinned expectation carries the constraint AND its reason: a reply giving
+    # only the number is a partial match the judge is told to refuse.
+    assert "30" in CMP6_EXPECTED and "45" in CMP6_EXPECTED and "because" in CMP6_EXPECTED
+
+
+def test_cmp6_refuses_loudly_when_the_judge_has_no_validation_artifact(monkeypatch, tmp_path):
+    """Contract §2/§4: with no agreement artifact the task returns ``error``,
+    never a mechanical fallback and never a live run.
+
+    The agent stand-in raises: if the gate were checked after setup, an attempt
+    would burn a live model run before discovering the judge was never validated.
+    """
+    import runner.judge as judge_mod
+    from runner.tasks import cluster_g
+
+    def _no_agent(**kwargs):
+        raise AssertionError("CMP-6 built an agent before checking the judge gate")
+
+    monkeypatch.setattr(judge_mod, "AGREEMENT_PATH", tmp_path / "absent.json")
+    monkeypatch.setattr(cluster_g, "_plain_agent", _no_agent)
+
+    attempt = cluster_g.run_cmp6()
+    assert attempt.passed is False
+    assert attempt.outcome == "error"
+    assert "judge not validated" in attempt.detail
+
+
+def test_cmp6_refuses_a_stale_prompt_sha_and_a_failing_artifact(monkeypatch, tmp_path):
+    """The two states that are NOT "missing file", and the sha one is the subtle
+    half: a passing artifact stays on disk after a prompt edit, describing the
+    agreement of a judge that no longer exists."""
+    import runner.judge as judge_mod
+    from runner.tasks import cluster_g
+
+    def _no_agent(**kwargs):
+        raise AssertionError("CMP-6 built an agent before checking the judge gate")
+
+    monkeypatch.setattr(cluster_g, "_plain_agent", _no_agent)
+
+    stale = tmp_path / "stale.json"
+    stale.write_text(json.dumps({"pass": True, "judge_prompt_sha": "0" * 64}))
+    monkeypatch.setattr(judge_mod, "AGREEMENT_PATH", stale)
+    assert cluster_g.run_cmp6().outcome == "error"
+
+    failing = tmp_path / "failing.json"
+    failing.write_text(json.dumps({"pass": False, "judge_prompt_sha": judge_mod.JUDGE_PROMPT_SHA}))
+    monkeypatch.setattr(judge_mod, "AGREEMENT_PATH", failing)
+    attempt = cluster_g.run_cmp6()
+    assert attempt.outcome == "error" and "pass=False" in attempt.detail
+
+
+def test_judge_validation_status_accepts_only_a_passing_artifact_at_this_prompt(tmp_path):
+    from runner.judge import JUDGE_PROMPT_SHA, validation_status
+
+    good = tmp_path / "agreement.json"
+    good.write_text(json.dumps({"pass": True, "judge_prompt_sha": JUDGE_PROMPT_SHA}))
+    assert validation_status(good) == (True, "")
+
+    for artifact in (
+        {"pass": True, "judge_prompt_sha": "deadbeef"},
+        {"pass": False, "judge_prompt_sha": JUDGE_PROMPT_SHA},
+        {"judge_prompt_sha": JUDGE_PROMPT_SHA},
+        [],
+    ):
+        path = tmp_path / "candidate.json"
+        path.write_text(json.dumps(artifact))
+        ok, why = validation_status(path)
+        assert ok is False and why
+
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json")
+    assert validation_status(broken)[0] is False
+    assert validation_status(tmp_path / "nothing.json")[0] is False
+
+
+def test_cmp7_noise_fixture_is_bulky_opaque_and_never_carries_the_ticket(tmp_path):
+    """The fixture is authoring-time pinned (cluster_e's discipline: the script's
+    exact bytes come from a function a test can assert on), and three properties
+    have to hold together or the task measures something else:
+
+    - it emits roughly 3000 characters, so the fact competes with real bulk;
+    - the ticket appears NOWHERE in the script or its output, so the only route to
+      the answer is the conversation the compaction door has to carry;
+    - the output arrives INTACT at carbon's shipped `tool_output` budget — a
+      fixture large enough to be truncated at the door would make CMP-7 a
+      tool_output task wearing a compaction task's name.
+    """
+    from harness.harness_config import CONFIG
+
+    from runner.tasks.cluster_g import CMP7_SCRIPT, CMP7_SENTINEL, cmp7_noise_script
+
+    script = tmp_path / CMP7_SCRIPT
+    script.write_text(cmp7_noise_script())
+    out = subprocess.run(
+        [sys.executable, CMP7_SCRIPT, "1"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        check=True,
+    )
+    assert 2500 <= len(out.stdout) <= 3500, f"noise is {len(out.stdout)} chars, wanted ~3000"
+    assert CMP7_SENTINEL not in cmp7_noise_script()
+    assert CMP7_SENTINEL not in out.stdout
+    assert len(out.stdout) < CONFIG.tool_output.budget, (
+        "the noise must survive the tool_output door intact — otherwise CMP-7 grades "
+        "truncation policy rather than what compaction carried"
+    )
+
+
+def test_cmp7_states_the_ticket_in_the_same_turn_that_asks_for_the_bulk():
+    """Contract §3: the fact is stated ADJACENT to the bulky tool output, not in a
+    quiet turn of its own. A fact on its own line in its own turn is the easy case
+    the suite already measures (G2/G4); this one has to compete."""
+    from runner.tasks.cluster_g import (
+        CMP7_QUESTION,
+        CMP7_RUN_AND_NOTE,
+        CMP7_SCRIPT,
+        CMP7_SENTINEL,
+        cmp7_rerun_prompt,
+    )
+
+    assert CMP7_SENTINEL in CMP7_RUN_AND_NOTE
+    assert CMP7_SCRIPT in CMP7_RUN_AND_NOTE
+    # The two follow-up bulk turns never restate it.
+    for n in (2, 3):
+        assert CMP7_SENTINEL not in cmp7_rerun_prompt(n)
+        assert CMP7_SCRIPT in cmp7_rerun_prompt(n)
+    assert CMP7_SENTINEL not in CMP7_QUESTION
+
+
+def test_cmp7_takes_the_default_context_window_rather_than_pinning_a_tiny_one():
+    """G2 pins ``context_limit=700`` and 36 of its 95 recorded replies came back as
+    nothing but carbon's truncation marker — a runaway-generation confound baked
+    into the fixture. CMP-7 must not inherit it: it reaches repeated compaction
+    through real bulk at the SHIPPED window, which is also the only window a
+    candidate config's ``default_context_limit`` can move.
+    """
+    import inspect
+
+    from runner.tasks import cluster_g
+
+    tree = ast.parse(inspect.getsource(cluster_g.run_cmp7))
+    pinned = [
+        kw.arg
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        for kw in node.keywords
+        if kw.arg == "context_limit"
+    ]
+    assert not pinned, (
+        "CMP-7 must run at carbon's default context limit; a self-pinned window "
+        "makes the task blind to the knob and invites G2's truncation confound"
+    )
+    # ...and the sibling tasks that DO pin one are still pinning it, so this check is
+    # reading a real difference rather than a predicate that never fires.
+    for run in (cluster_g.run_g2, cluster_g.run_g4, cluster_g.run_g5):
+        assert "context_limit=" in inspect.getsource(run)
+
+
+def test_g2_non_answers_are_their_own_outcome_and_never_a_pass():
+    """Contract §5's decomposition, as a truth table. ``passed`` is False in every
+    failing branch — the decomposition renames WHY, never WHETHER."""
+    from runner.tasks.cluster_g import G2_FACT_A, G2_FACT_B, G2_TRUNCATION_MARKER, g2_verdict
+
+    assert g2_verdict(f"{G2_FACT_A} then {G2_FACT_B}", True, True) == (True, "pass", None)
+    assert g2_verdict("EARLY-something LATE-something", False, True)[:2] == (False, "fail")
+    assert g2_verdict("I do not have those codes.", False, False)[:2] == (False, "fail")
+
+    truncated = g2_verdict(f"\n\n{G2_TRUNCATION_MARKER}", False, False)
+    assert truncated == (False, "not_attempted", "generation truncated before answer")
+
+    leaked = g2_verdict("<|tool_call>call:list_files()<tool_call|>", False, False)
+    assert leaked == (False, "not_attempted", "tool-syntax leak instead of answer")
+
+    # A real answer that HAPPENS to be cut off after producing prose still attempted
+    # an answer — only a reply that is nothing but the marker is a non-answer.
+    prose_then_cut = g2_verdict(f"The codes are{G2_TRUNCATION_MARKER}", False, False)
+    assert prose_then_cut[:2] == (False, "fail")
+
+
+def test_g2_decomposition_replays_every_recorded_pass_fraction_unchanged():
+    """The byte-identity claim, proved by REPLAY rather than by argument.
+
+    Every G2 attempt in the eleven committed round-2 null files is re-verified
+    through the new ``g2_verdict``, using the per-fact booleans that attempt
+    already recorded. Each attempt's ``passed`` must come back identical, and each
+    arm's pooled (passes, attempts) and rounded ``pass_fraction`` must reproduce
+    what the summary recorded — the numbers the whole calibration is built on.
+
+    The final assertion is what keeps this from being a test that cannot go red:
+    the replayed outcomes must actually contain both new classes, so the corpus
+    really did exercise the branches whose semantics are being pinned.
+    """
+    from loop.judge_validate import _extract_bool, _extract_reply
+    from runner.tasks.cluster_g import g2_verdict
+
+    seen: dict[str, int] = {}
+    files = sorted((REPO_ROOT / "results").glob("r2-null-*.jsonl"))
+    assert files, "no committed round-2 null runs to replay"
+    for path in files:
+        summary = json.loads(path.with_suffix(".json").read_text())
+        passes = attempts = 0
+        for line in path.read_text().splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if record.get("task") != "G2":
+                continue
+            attempts += 1
+            detail = record.get("detail", "")
+            reply = _extract_reply(detail)
+            if reply is None:  # a setup guard fired; there is no reply to re-verify
+                passes += int(record["passed"])
+                continue
+            early = _extract_bool(detail, "early_recalled")
+            late = _extract_bool(detail, "late_recalled")
+            ok, outcome, _why = g2_verdict(reply, bool(early), bool(late))
+            assert ok is bool(record["passed"]), (
+                f"{path.name} attempt {record.get('attempt')}: replay says passed={ok}, "
+                f"the record says {record['passed']}"
+            )
+            seen[outcome] = seen.get(outcome, 0) + 1
+            passes += int(ok)
+        recorded = summary["tasks"]["G2"]
+        assert (passes, attempts) == (recorded["passes"], recorded["attempts"]), path.name
+        assert round(passes / attempts, 4) == recorded["pass_fraction"], path.name
+
+    assert seen.get("fail"), "no plain failures replayed — the fail branch is untested"
+    assert seen.get("not_attempted"), (
+        "no non-answers replayed — the decomposition's own branches never fired, so "
+        "this replay could not have detected a semantic change in them"
+    )
+
+
+def test_g2_publishes_whether_the_attempt_produced_an_answer_at_all():
+    """Contract §5's metric. ``attempted`` is emitted on EVERY G2 attempt, including
+    the setup-guard error, or its mean would be a fraction of whichever attempts
+    happened to report it rather than of the attempts the task made."""
+    import inspect
+
+    from runner.tasks import cluster_g
+
+    source = inspect.getsource(cluster_g.run_g2)
+    returns = source.count("return Attempt(")
+    assert returns == 2, f"run_g2 has {returns} exits; every one must publish `attempted`"
+    assert source.count('"attempted"') == returns
+
+
+def test_no_scenario_guards_fact_lands_in_the_verbatim_head_window():
+    """The failure that would make all three guards decorative at once.
+
+    Compaction keeps the first ``keep_head`` messages VERBATIM (carbon's
+    ``harness/compaction.py``: ``head = messages[:head_end]``). A fact stated in the
+    opening message is therefore never summarized at any setting, so every strategy
+    answers the question and the task can only ever read 1.000 — a guard that cannot
+    go red. The greeting turn each of these tasks opens with is what spends that
+    protected slot, and nothing else in the file says so.
+
+    Derived from carbon's live config, never a hardcoded 2: `keep_head` is an
+    editable knob, and a candidate that raises it is exactly the case this has to
+    keep tracking. Each ``send`` contributes at least two messages (the user turn and
+    the assistant's reply), so the Nth send starts at message index ``2 * N``.
+    """
+    import inspect
+
+    from harness.harness_config import CONFIG
+
+    from runner.tasks import cluster_g
+
+    keep_head = CONFIG.compaction.keep_head
+    for run, fact_const in (
+        (cluster_g.run_cmp5, "CMP5_EARLY"),
+        (cluster_g.run_cmp6, "CMP6_FACT"),
+        (cluster_g.run_cmp7, "CMP7_RUN_AND_NOTE"),
+    ):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(run)))
+        sends = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "send"
+        ]
+        carrying = [
+            i
+            for i, node in enumerate(sends)
+            if node.args and isinstance(node.args[0], ast.Name) and node.args[0].id == fact_const
+        ]
+        assert carrying, f"{run.__name__} never sends {fact_const}"
+        assert 2 * carrying[0] >= keep_head, (
+            f"{run.__name__} states its fact in send #{carrying[0]}, inside carbon's "
+            f"verbatim head window (keep_head={keep_head}) — the fact would never be "
+            "summarized and the task could not fail"
         )

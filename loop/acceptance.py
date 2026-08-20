@@ -36,8 +36,10 @@ pair instead, where the higher attempt counts feed a predeclared one-sided Fishe
 exact test (``FISHER_ALPHA``) before any block is possible. A critical outcome with no
 recorded class (a legacy row) counts as behavioral — the routed direction is always
 MORE measurement, never a silently skipped veto. One extra MECHANICAL leak still must
-not disappear into a mean of twenty-eight numbers; that half of the guarantee is
-unchanged.
+not disappear into a suite-wide mean; that half of the guarantee is unchanged. (The
+count is deliberately not stated here: it moved from 28 to 31 when the Phase 2c
+scenario guards landed, and a prose number that has to be edited by every task
+addition is a fact that goes stale silently.)
 
 Thresholds are DERIVED from the suite the results actually ran — one attempt on the
 largest-grained task of each split — never hard-coded decimals. All arithmetic on the

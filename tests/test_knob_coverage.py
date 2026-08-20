@@ -237,3 +237,23 @@ def test_exemption_tables_are_current_minimal_and_argued():
             f"{knob} is declared unguardable, so its one observer must be the miner"
         )
         assert not coverage["guards"], f"{knob} is declared unguardable but names guards"
+
+
+def test_the_scenario_guards_watch_compaction_without_becoming_miners():
+    """Phase 2c contract §6. CMP-5/6/7 join `compaction`'s observers and guards; the
+    miner stays G4 alone.
+
+    The mining rule is the reason the second half matters: a candidate is mined
+    against ONE task and then has to survive the guards. Filing the new guards as
+    miners as well would let a compaction fix be tuned against the very tasks that
+    exist to catch it overfitting — which is the whole failure this phase is built
+    to make mechanical.
+    """
+    compaction = KNOB_COVERAGE["compaction"]
+    scenario = {"CMP-5", "CMP-6", "CMP-7"}
+    assert scenario <= set(compaction["observers"])
+    assert scenario <= set(compaction["guards"])
+    assert set(compaction["miners"]) == {"G4"}
+    # G2 stays a guard and G4 stays out of the guard set (a task cannot vouch for a
+    # candidate mined from it).
+    assert "G2" in compaction["guards"] and "G4" not in compaction["guards"]

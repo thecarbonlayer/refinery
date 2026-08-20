@@ -849,6 +849,11 @@ def test_main_model_flag_writes_model_json(tmp_path, monkeypatch):
     out_path = tmp_path / "out" / "model-r2.json"
     monkeypatch.setattr(calibrate_mod, "RESULTS_DIR", tmp_path)
     monkeypatch.setattr(calibrate_mod, "SUPPORTED", supported)
+    # `main()` now reads TWO sets: the gain set (`SUPPORTED`) and the model's task
+    # coverage (`MODEL_TASKS` = supported ∪ guards). This one-task fixture has to
+    # stand in for both, or the coverage pin refuses arms that never measured the
+    # real guards.
+    monkeypatch.setattr(calibrate_mod, "MODEL_TASKS", supported)
     monkeypatch.setattr(calibrate_mod, "MODEL_PATH", out_path)
 
     calibrate_mod.main(["--model", "full-a", "cmp-a"])
@@ -1140,3 +1145,128 @@ def test_a_subset_arm_with_zero_attempts_is_refused_before_it_divides_by_zero(tm
         calibrate_model(labels, tmp_path, frozenset({"A1"}))
     assert "A1" in str(exc.value)
     assert "0 attempts" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2c: the null model's task coverage becomes supported ∪ guards
+# (phase2c-guards-contract.md §6). The rule's gain judgment stays on the four
+# supported tasks; the guards need a rate each so they can be judged per-task.
+# ---------------------------------------------------------------------------
+
+
+def test_the_null_models_coverage_pin_is_supported_union_guards():
+    """`MODEL_TASKS` is the set the next campaign must measure, and it is DERIVED
+    from the two sets it unions rather than typed out again — a hand-listed copy
+    would let a guard be added in one place and silently missed by the campaign
+    that has to produce its rate."""
+    from loop.calibrate import CONFIRMATION_GUARDS, MODEL_TASKS, SCENARIO_GUARDS, SUPPORTED
+
+    assert SCENARIO_GUARDS == frozenset({"CMP-5", "CMP-6", "CMP-7"})
+    assert MODEL_TASKS == frozenset({"A1", "G2", "G4", "G5", "CMP-5", "CMP-6", "CMP-7"})
+    assert MODEL_TASKS == SUPPORTED | CONFIRMATION_GUARDS | SCENARIO_GUARDS
+    # The gain judgment is unchanged: still the four supported tasks.
+    assert SUPPORTED == frozenset({"A1", "G2", "G4", "G5"})
+    # G4 is the miner, so it is covered but is never a guard.
+    assert "G4" not in CONFIRMATION_GUARDS | SCENARIO_GUARDS
+
+
+def _seven_task_arm(label: str, *, filtered: bool, attempts: int) -> dict:
+    """An arm covering the whole Phase 2c coverage set at one attempt count."""
+    held_out = {"G2", "CMP-6"}
+    return _arm(
+        label,
+        {
+            task: (
+                attempts // 2,
+                attempts,
+                "held_out" if task in held_out else "held_in",
+            )
+            for task in ("A1", "G2", "G4", "G5", "CMP-5", "CMP-6", "CMP-7")
+        },
+        filtered=filtered,
+    )
+
+
+def test_an_arm_missing_a_scenario_guard_is_refused_by_the_extended_pin(tmp_path):
+    """The pin that makes the coverage real: an arm that measured only the four
+    supported tasks cannot pool into a model whose guards need rates. Without this
+    the campaign silently produces a model that gates nothing on CMP-5/6/7."""
+    from loop.calibrate import MODEL_TASKS, SUPPORTED
+
+    short = _seven_task_arm("full-a", filtered=False, attempts=4)
+    del short["tasks"]["CMP-5"]
+    _write(tmp_path, "full-a", short)
+    with pytest.raises(ValueError, match="CMP-5"):
+        calibrate_model(["full-a"], tmp_path, SUPPORTED, coverage=MODEL_TASKS)
+
+
+def test_coverage_defaults_to_the_supported_set_so_the_round2_shape_is_unchanged(tmp_path):
+    """Byte-identity for every caller that predates the coverage split: omitting
+    `coverage=` must produce exactly the artifact `calibrate_model` produced
+    before it existed."""
+    from loop.calibrate import SUPPORTED
+
+    for label, filtered in (("full-a", False), ("cmp-a", True), ("cmp-b", True)):
+        arm = _arm(
+            label,
+            {
+                "A1": (2, 3, "held_in") if not filtered else (5, 10, "held_in"),
+                "G2": (3, 5, "held_out") if not filtered else (4, 10, "held_out"),
+                "G4": (1, 3, "held_in") if not filtered else (3, 10, "held_in"),
+                "G5": (2, 3, "held_in") if not filtered else (6, 10, "held_in"),
+            },
+            filtered=filtered,
+        )
+        _write(tmp_path, label, arm)
+    labels = ["full-a", "cmp-a", "cmp-b"]
+    assert calibrate_model(labels, tmp_path, SUPPORTED) == calibrate_model(
+        labels, tmp_path, SUPPORTED, coverage=SUPPORTED
+    )
+
+
+def test_the_model_rates_every_guard_while_fitness_stays_on_the_supported_set(tmp_path):
+    """Contract §6, both halves at once. The null model must carry a pooled rate for
+    every covered task (a guard with no rate cannot be adjudicated), and the fitness
+    checks — grain, goodness, stability, power — must still be computed over the FOUR
+    supported tasks, because those are the tasks the gain judgment averages over. A
+    grain row that quietly grew to seven tasks would change the denominator of every
+    mean the rule judges without anything saying so."""
+    from loop.calibrate import MODEL_TASKS, SUPPORTED
+
+    _write(tmp_path, "full-a", _seven_task_arm("full-a", filtered=False, attempts=4))
+    _write(tmp_path, "cmp-a", _seven_task_arm("cmp-a", filtered=True, attempts=10))
+    _write(tmp_path, "cmp-b", _seven_task_arm("cmp-b", filtered=True, attempts=6))
+    labels = ["full-a", "cmp-a", "cmp-b"]
+
+    model = calibrate_model(labels, tmp_path, SUPPORTED, coverage=MODEL_TASKS)
+
+    assert set(model["null_model"]) == MODEL_TASKS
+    for task in sorted(MODEL_TASKS):
+        assert model["null_model"][task]["null_rate"] == "10/20"
+    assert model["fitness"]["power"]["stage1_only"]["per_task"].keys() == SUPPORTED
+    graded = {
+        t
+        for split, row in model["fitness"]["grain"].items()
+        if split != "pass"
+        for t in row["tasks"]
+    }
+    assert graded == SUPPORTED
+    assert set(model["fitness"]["goodness"]["per_task"]) == SUPPORTED
+
+
+def test_recompute_reads_the_gain_set_from_the_grain_rows_not_from_the_rates(tmp_path):
+    """The loader re-derives an artifact's fitness from its own counts and refuses on
+    any disagreement. With coverage wider than the supported set, re-deriving the gain
+    set from the RATES would re-run grain over seven tasks, disagree with the recorded
+    four-task rows, and refuse a perfectly good model. The grain rows themselves name
+    the tasks the gain judgment was computed over, so that is where the set comes
+    from."""
+    from loop.calibrate import MODEL_TASKS, SUPPORTED, recompute_model
+
+    _write(tmp_path, "full-a", _seven_task_arm("full-a", filtered=False, attempts=4))
+    _write(tmp_path, "cmp-a", _seven_task_arm("cmp-a", filtered=True, attempts=10))
+    model = calibrate_model(["full-a", "cmp-a"], tmp_path, SUPPORTED, coverage=MODEL_TASKS)
+
+    rates, problems = recompute_model(model)
+    assert problems == []
+    assert set(rates) == MODEL_TASKS, "every covered task's rate must survive recomputation"

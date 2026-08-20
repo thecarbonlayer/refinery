@@ -1,6 +1,22 @@
-"""Cluster G — incomplete answers, repeated compaction, and workspace inheritance."""
+"""Cluster G — incomplete answers, repeated compaction, and workspace inheritance.
+
+The compaction half of this module now covers three axes a fix aimed at "remember
+the recent thing" could otherwise overfit straight past, and each is a separate
+task rather than a variant of G2/G4 because each fails for a different reason:
+
+- CMP-5 (supersession): the CURRENT decision is stated TWICE — early and again in
+  the message that retires the old one — so recency alone cannot tell the approved
+  code from the retired one. Position-balanced by construction.
+- CMP-6 (meaning): the fact carries no sentinel at all, so nothing can be matched
+  on; the verdict comes from the pinned judge, and refuses outright when that
+  judge has no committed validation behind it.
+- CMP-7 (buried facts): the fact competes with bulky tool output at carbon's
+  DEFAULT window, which is the shape a real coding session has.
+"""
 
 from __future__ import annotations
+
+import re
 
 from runner.carbon_env import make_provider
 from runner.helpers import (
@@ -9,7 +25,9 @@ from runner.helpers import (
     scripted_approver,
     tool_call_args,
     tool_texts,
+    workspace_kwargs,
 )
+from runner.judge import judged_equivalent, validation_status
 from runner.spec import Attempt, TaskSpec
 
 G1_SENTINEL = "END-OF-HANDOFF-G1-8VR"
@@ -36,6 +54,54 @@ G4_NEXT = "NEXT-ACTION-G4-5HB"
 # realistic path is what a real session would carry. Distinct from G4's paths so a
 # checkpoint carrying one cannot be mistaken for carrying the other.
 G5_FILES = ("reconcile_flags.py", "audit_flags.py")
+
+# --- CMP-5: supersession (contract §1) ------------------------------------------
+# The CURRENT code appears in BOTH the early message and the supersession message;
+# the RETIRED code appears ONLY in the supersession one, framed as retired. That
+# balance is the task: the later message carries both codes, so a strategy that
+# simply favours whatever was said most recently cannot separate them, and neither
+# can one that favours whatever was said first.
+CMP5_CURRENT = "CURRENT-PATH-C5-4RQ"
+CMP5_RETIRED = "OLD-PATH-C5-9ZK"
+CMP5_EARLY = (
+    f"Decision: reconciliation uses approach {CMP5_CURRENT}... wait, correction "
+    "pending review. Acknowledge briefly."
+)
+CMP5_SUPERSESSION = (
+    f"Final decision: approach {CMP5_RETIRED} is retired; the approved approach is "
+    f"{CMP5_CURRENT}. Acknowledge briefly."
+)
+CMP5_QUESTION = "Name the approved approach code for reconciliation. Reply with the code only."
+
+# --- CMP-6: semantic preservation, judged (contract §2) -------------------------
+# No sentinel anywhere, deliberately: the fact is ordinary prose with a number and
+# a reason, so the only way to answer is to have kept its MEANING. `CMP6_EXPECTED`
+# is the pinned statement the judge compares an answer against — it never sees the
+# transcript or this task's instructions (runner/judge.py).
+CMP6_FACT = (
+    "Constraint: retry backoff must never exceed 30 seconds, because the upstream "
+    "gateway times out at 45 and we need headroom for one full retry before it "
+    "fires. Acknowledge briefly."
+)
+CMP6_EXPECTED = (
+    "Retry backoff must never exceed 30 seconds, because the upstream gateway times "
+    "out at 45 seconds and we need headroom for one full retry before it fires."
+)
+CMP6_QUESTION = "What is the constraint on retry backoff, and why?"
+
+# --- CMP-7: buried facts (contract §3) ------------------------------------------
+CMP7_SENTINEL = "INCIDENT-C7-7TN"
+CMP7_SCRIPT = "service_log.py"
+# Tuned so one run emits ~3,000 characters: bulky enough to dominate the turn it
+# arrives in, and comfortably under carbon's shipped `tool_output` budget so the
+# result lands INTACT. A fixture large enough to be cut at the door would make this
+# a tool_output task wearing a compaction task's name.
+CMP7_NOISE_LINES = 26
+CMP7_RUN_AND_NOTE = (
+    f"Run `python3 {CMP7_SCRIPT} 1` with the bash tool and tell me the last line it "
+    f"printed. Note for later: the incident ticket is {CMP7_SENTINEL}."
+)
+CMP7_QUESTION = "What is the incident ticket? Code only."
 
 
 def _plain_agent(**kwargs):
@@ -90,6 +156,55 @@ def _filler(i: int) -> str:
     return f"Operational notes: {notes} Acknowledge in one short sentence."
 
 
+# carbon's own marker for a generation cut off at the output limit
+# (harness/agent.py appends it to whatever prose was produced). In 36 of G2's 95
+# recorded round-2 replies the prose was EMPTY, so the whole reply is this marker
+# and nothing else — an attempt that never reached an answer, recorded until now
+# as an ordinary compaction failure.
+G2_TRUNCATION_MARKER = "[incomplete: the model reached its output limit before finishing]"
+# Tool-call syntax leaking into a prose turn (4 of the same 95). The model emitted
+# a call the harness never executed instead of answering — again not a statement
+# about what compaction carried.
+_TOOL_SYNTAX_RE = re.compile(r"<\|tool_call")
+
+
+def g2_verdict(reply: str, early: bool, late: bool) -> tuple[bool, str, str | None]:
+    """G2's whole verdict: ``(passed, outcome, non_answer_detail)``.
+
+    Contract §5's decomposition, ADDITIVE by construction. ``passed`` is exactly
+    what it always was — both codes recalled — and every failing branch returns
+    False, so the pass fraction this task contributes is byte-identical to what the
+    same replies produced before (``tests/test_registry.py`` replays all 95 recorded
+    replies through this function to prove it, rather than arguing it).
+
+    What changes is only WHY a failure is recorded. Two shapes were being counted
+    as "compaction lost the codes" when they are nothing of the kind:
+
+    - a reply that is nothing but carbon's truncation marker — the generation was
+      cut off before it produced anything, which is a harness defect G1 owns the
+      primitive for;
+    - a reply that is a tool-call fragment — the model tried to call a tool instead
+      of answering.
+
+    Both become ``not_attempted``. The starts-with test is deliberately strict: a
+    reply that produced real prose AND THEN hit the limit did attempt an answer, and
+    stays a plain ``fail``.
+
+    Exclusion from the denominator was considered and rejected: it would break
+    attempt parity between arms (``runner.delta`` refuses mismatched attempt
+    counts), the truncations are real defects rather than measurement noise, and the
+    calibrated rule already carries attribution. So the count stays, and the outcome
+    says what it was.
+    """
+    if early and late:
+        return True, "pass", None
+    if reply.lstrip().startswith(G2_TRUNCATION_MARKER):
+        return False, "not_attempted", "generation truncated before answer"
+    if _TOOL_SYNTAX_RE.search(reply):
+        return False, "not_attempted", "tool-syntax leak instead of answer"
+    return False, "fail", None
+
+
 def run_g2() -> Attempt:
     a = _plain_agent(context_limit=700)
     try:
@@ -111,7 +226,12 @@ def run_g2() -> Attempt:
                 "error",
                 f"repeated-compaction setup did not fire twice (count={compactions})",
                 turns=len(a.messages),
-                metrics=agent_metrics(a),
+                # `attempted` is published on EVERY exit, this one included: a metric
+                # absent from some attempts is averaged over only the attempts that
+                # reported it (runner/suite.py `_collect`), so omitting it here would
+                # make the mean a fraction of the attempts that got far enough rather
+                # than of the attempts the task made.
+                metrics={**agent_metrics(a), "attempted": 0.0},
             )
         result = a.run(
             "Reply with the two exact release decision codes, early first and late second."
@@ -119,16 +239,21 @@ def run_g2() -> Attempt:
         reply = result.text
         has_a = G2_FACT_A.lower() in reply.lower()
         has_b = G2_FACT_B.lower() in reply.lower()
-        ok = has_a and has_b
+        ok, outcome, non_answer = g2_verdict(reply, has_a, has_b)
     finally:
         a.close()  # the storage contract says close ends the scratch lifecycle
     return Attempt(
         passed=ok,
-        outcome="pass" if ok else "fail",
+        outcome=outcome,
         detail=f"compactions={compactions} early_recalled={has_a} "
-        f"late_recalled={has_b} reply={reply[:240]!r}",
+        f"late_recalled={has_b} "
+        + (f"non_answer={non_answer!r} " if non_answer else "")
+        # `reply=` stays LAST: `loop.judge_validate._extract_reply` reads it with a
+        # greedy match to end-of-string, so any field added after it would be swallowed
+        # into the reply the judge corpus is built from.
+        + f"reply={reply[:240]!r}",
         turns=len(a.messages),
-        metrics=agent_metrics(a, result=result),
+        metrics={**agent_metrics(a, result=result), "attempted": float(outcome != "not_attempted")},
     )
 
 
@@ -356,10 +481,276 @@ def run_g3() -> Attempt:
     )
 
 
+def cmp5_verdict(reply: str) -> tuple[bool, bool, bool]:
+    """``(passed, current_present, retired_present)`` — contract §1's verifier.
+
+    Naming both codes is NOT a pass. A reply that lists the retired approach
+    alongside the approved one has carried the transcript rather than the decision,
+    and the next turn acting on it would have to guess which one is live — which is
+    the failure the task exists to detect.
+    """
+    low = reply.lower()
+    current = CMP5_CURRENT.lower() in low
+    retired = CMP5_RETIRED.lower() in low
+    return (current and not retired), current, retired
+
+
+def run_cmp5() -> Attempt:
+    """A superseded decision must not come back out of the compaction door.
+
+    G2 and G4 ask whether a stated fact SURVIVES. This one asks whether the right
+    one survives when two of them compete: an early decision, later explicitly
+    retired, and the approved one that replaced it. A summarizer that keeps "the
+    decisions discussed" without their status passes G2 and fails here, and so does
+    a strategy that resolves conflicts by recency — the approved code was stated
+    both early AND late, so recency cannot pick it out.
+
+    The setup guard is stricter than the other compaction tasks' and has to be. Two
+    compactions somewhere in the trajectory is not enough here: if BOTH fire before
+    the supersession message, that message is still sitting raw in the tail when the
+    question is asked, and every strategy alike answers it. So the premise this task
+    needs is two compactions AND at least one of them after the supersession — the
+    superseding statement must itself have been through the door.
+    """
+    a = _plain_agent(context_limit=900)
+    try:
+        a.send("We are beginning a reconciliation review. Acknowledge briefly.")
+        a.send(CMP5_EARLY)
+        compactions = int(a.just_compacted)
+        for i in range(1, 4):
+            a.send(_filler(i))
+            compactions += int(a.just_compacted)
+        a.send(CMP5_SUPERSESSION)
+        after_supersession = int(a.just_compacted)
+        compactions += after_supersession
+        for i in range(4, 18):
+            a.send(_filler(i))
+            fired = int(a.just_compacted)
+            compactions += fired
+            after_supersession += fired
+            if compactions >= 2 and after_supersession >= 1:
+                break
+        if compactions < 2 or after_supersession < 1:
+            return Attempt(
+                False,
+                "error",
+                f"repeated-compaction setup did not fire twice after the supersession "
+                f"(count={compactions} after_supersession={after_supersession})",
+                turns=len(a.messages),
+                metrics=agent_metrics(a),
+            )
+        result = a.run(CMP5_QUESTION)
+        reply = result.text
+        ok, current, retired = cmp5_verdict(reply)
+    finally:
+        a.close()  # the storage contract says close ends the scratch lifecycle
+    return Attempt(
+        passed=ok,
+        outcome="pass" if ok else "fail",
+        detail=f"compactions={compactions} after_supersession={after_supersession} "
+        f"approved_recalled={current} "
+        f"retired_resurfaced={retired} reply={reply[:240]!r}",
+        turns=len(a.messages),
+        metrics=agent_metrics(a, result=result),
+    )
+
+
+def run_cmp6() -> Attempt:
+    """Compaction must preserve MEANING, not just tokens — judged, never matched.
+
+    Every other compaction task in this suite plants a sentinel, which makes the
+    verifier mechanical and the answer copyable. That is the right trade for a
+    guard, and it also means the whole cluster measures one thing: whether an exact
+    string came back. A summarizer could keep every sentinel and paraphrase away the
+    constraint they were attached to, and nothing here would notice.
+
+    So this task states an ordinary constraint with an ordinary reason, asks for it
+    back in the model's own words, and hands the pinned expectation and the answer —
+    and NOTHING else — to the judge (runner/judge.py, contract §4).
+
+    The gate comes FIRST, before a single model call: with no committed validation
+    artifact for THIS judge prompt, the task returns ``error`` and says so. It never
+    falls back to a substring check. A silent fallback would publish a mechanical
+    measurement under a judged task's name, which is the one failure that would make
+    every number this task produces uninterpretable.
+    """
+    validated, why = validation_status()
+    if not validated:
+        return Attempt(
+            False,
+            "error",
+            f"judge not validated: {why}",
+            metrics={},
+        )
+    a = _plain_agent(context_limit=900)
+    try:
+        a.send("We are reviewing the gateway integration. Acknowledge briefly.")
+        a.send(CMP6_FACT)
+        compactions = int(a.just_compacted)
+        for i in range(1, 18):
+            a.send(_filler(i))
+            compactions += int(a.just_compacted)
+            if compactions >= 2:
+                break
+        if compactions < 2:
+            return Attempt(
+                False,
+                "error",
+                f"repeated-compaction setup did not fire twice (count={compactions})",
+                turns=len(a.messages),
+                metrics=agent_metrics(a),
+            )
+        result = a.run(CMP6_QUESTION)
+        reply = result.text
+        judgment = judged_equivalent(CMP6_EXPECTED, reply, make_provider())
+        ok = judgment.verdict
+    finally:
+        a.close()  # the storage contract says close ends the scratch lifecycle
+    return Attempt(
+        passed=ok,
+        outcome="pass" if ok else "fail",
+        detail=f"compactions={compactions} verifier_kind=judged judge_verdict={ok} "
+        f"judge_quote={judgment.quote[:160]!r} reply={reply[:240]!r}",
+        turns=len(a.messages),
+        metrics={**agent_metrics(a, result=result), "judge_verdict": float(ok)},
+    )
+
+
+def cmp7_noise_script() -> str:
+    """The log-noise fixture, pinned at authoring time — cluster_e's discipline.
+
+    A public function returning the script's exact bytes, so a test can assert on
+    what the model actually runs rather than on this module's source. One run emits
+    ``CMP7_NOISE_LINES`` lines of plausible service noise (~3,000 characters) and the
+    section number it was given, so three runs produce three distinguishable walls of
+    text rather than one repeated block a summarizer could collapse into a single
+    mention.
+
+    The ticket appears nowhere in it. The only route to the answer is the sentence
+    the user attached to the FIRST run request, which is exactly the thing repeated
+    compaction has to carry.
+    """
+    return (
+        "import sys\n"
+        "section = sys.argv[1] if len(sys.argv) > 1 else '1'\n"
+        f"for i in range({CMP7_NOISE_LINES}):\n"
+        "    print(\n"
+        "        f'2026-08-20T0{i % 10}:{i:02d}:{(i * 7) % 60:02d}Z svc-ledger "
+        "worker-{i % 9} INFO '\n"
+        "        f'heartbeat ok queue={i % 23} lag_ms={40 + i} retries={i % 4} "
+        "shard=ledger-{i % 5} section={section}'\n"
+        "    )\n"
+        "print(f'section {section} complete: {" + str(CMP7_NOISE_LINES) + "} records scanned')\n"
+    )
+
+
+def cmp7_rerun_prompt(section: int) -> str:
+    """A follow-up bulk turn. It never restates the ticket — the point is that the
+    ticket has to survive the noise, not be repeated alongside it."""
+    return (
+        f"Run `python3 {CMP7_SCRIPT} {section}` with the bash tool and tell me the last "
+        "line it printed."
+    )
+
+
+def run_cmp7() -> Attempt:
+    """A fact stated next to bulky tool output, asked for after repeated compaction.
+
+    The realistic shape of a coding session's history is not tidy prose: it is a
+    handful of sentences buried in walls of command output. G2 and G4 state their
+    facts in quiet turns of their own, which is the easy case. Here the fact rides
+    along with a request for ~3,000 characters of log noise, two more bulky tool
+    turns follow, and only then is it asked for.
+
+    Run at carbon's DEFAULT context limit, deliberately. G2 pins a 700-token window
+    and pays for it: 36 of its 95 recorded replies came back as nothing but the
+    truncation marker, a confound baked into the fixture. Here the window is the
+    shipped one, compaction is reached by real bulk, and `default_context_limit`
+    stays a knob this task can actually observe.
+
+    The opening turn is an ordinary greeting and it is load-bearing. Compaction keeps
+    the first `keep_head` messages VERBATIM (harness/compaction.py), so a fact stated
+    in the very first message is never summarized at all and every strategy answers
+    the question alike — a guard that cannot go red. The greeting spends that
+    protected slot, which is the same reason G2 and G4 open with one.
+    """
+    from harness.agent import APPROVAL_TOOLS
+    from harness.sandbox import Sandbox, bash_tool
+    from harness.tools import ToolRegistry
+    from harness.workspace import Workspace
+
+    ws = Workspace()
+    ws.write(CMP7_SCRIPT, cmp7_noise_script())
+    approvals: list[dict] = []
+    a = _plain_agent(
+        approve=scripted_approver(approvals),
+        approval_required=APPROVAL_TOOLS,
+        **workspace_kwargs(ws.root),
+    )
+    tools = ToolRegistry()
+    # scratch_dir=: every graded agent's Sandbox carries the shell route to
+    # $CARBON_SCRATCH_DIR uniformly (see cluster_e), even on a task that never
+    # offloads — carbon's own footer advertises the route unconditionally.
+    tools.register(
+        bash_tool(
+            Sandbox(trusted=True, timeout=60, scratch_dir=a.session_env.scratch_root),
+            workdir=str(ws.root),
+        )
+    )
+    a.tools = tools
+    try:
+        a.send("We are triaging a ledger incident. Acknowledge briefly.")
+        a.send(CMP7_RUN_AND_NOTE)
+        compactions = int(a.just_compacted)
+        for section in (2, 3):
+            a.send(cmp7_rerun_prompt(section))
+            compactions += int(a.just_compacted)
+        for i in range(1, 20):
+            a.send(_filler(i))
+            compactions += int(a.just_compacted)
+            if compactions >= 2:
+                break
+        if compactions < 2:
+            return Attempt(
+                False,
+                "error",
+                f"repeated-compaction setup did not fire twice (count={compactions})",
+                approvals=approvals,
+                turns=len(a.messages),
+                metrics=agent_metrics(a),
+            )
+        result = a.run(CMP7_QUESTION)
+        reply = result.text
+        ok = CMP7_SENTINEL.lower() in reply.lower()
+    finally:
+        a.close()  # the storage contract says close ends the scratch lifecycle
+    return Attempt(
+        passed=ok,
+        outcome="pass" if ok else "fail",
+        detail=f"compactions={compactions} ticket_recalled={ok} reply={reply[:240]!r}",
+        approvals=approvals,
+        turns=len(a.messages),
+        metrics=agent_metrics(a, result=result),
+    )
+
+
 SPECS = [
     TaskSpec("G1", "held_in", "G", "uncertain", primitive="response", alias="RSP-1", run=run_g1),
     TaskSpec("G2", "held_out", "G", "uncertain", primitive="compaction", alias="CMP-2", run=run_g2),
     TaskSpec("G3", "held_in", "G", "pass", primitive="subagent", alias="SUB-1", run=run_g3),
     TaskSpec("G4", "held_in", "G", "uncertain", primitive="compaction", alias="CMP-3", run=run_g4),
     TaskSpec("G5", "held_in", "G", "uncertain", primitive="compaction", alias="CMP-4", run=run_g5),
+    # The Phase 2c scenario guards. `alias=None` because the NAME is already the
+    # mnemonic — a second id for the same task would be one more thing to keep in
+    # sync. Priors are `uncertain`: nothing has measured them yet, and a prior is a
+    # claim about the suite as authored, never a reading of a baseline.
+    TaskSpec(
+        "CMP-5", "held_in", "G", "uncertain", primitive="compaction", alias=None, run=run_cmp5
+    ),
+    TaskSpec(
+        "CMP-6", "held_out", "G", "uncertain", primitive="compaction", alias=None, run=run_cmp6
+    ),
+    TaskSpec(
+        "CMP-7", "held_in", "G", "uncertain", primitive="compaction", alias=None, run=run_cmp7
+    ),
 ]
