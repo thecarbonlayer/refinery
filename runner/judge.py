@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 JUDGE_PROMPT = """You judge whether an ANSWER conveys the same meaning as an EXPECTED FACT.
@@ -117,11 +117,38 @@ class Judgment:
     ``quote`` is the answer span the judge cites (parsed from its own QUOTE
     line, never re-derived); ``raw`` is the judge's full, unparsed output —
     kept even on a parse failure so a human can see what actually came back.
+
+    ``tokens`` is what the judge call itself cost, from the provider's OWN
+    reported usage. A judged task makes a SECOND model call per attempt, and
+    an unrecorded one is cost the suite's per-task means silently understate.
+    Zero when the provider reported no usage (a scripted provider, a transport
+    failure) — never an estimate, which would put a fabricated number in the
+    same field as measured ones.
     """
 
     verdict: bool
     quote: str
     raw: str
+    tokens: int = 0
+
+
+def _usage_tokens(usage: dict) -> int:
+    """The judge call's total tokens from an OpenAI-style usage dict, or 0.
+
+    ``total_tokens`` when the provider reported one; otherwise the prompt/completion
+    split summed, which is the only other shape carbon's own accounting produces
+    (model/pricing.py takes the same two routes). Absent or unreadable usage is 0 —
+    a call whose cost nobody reported is recorded as unmeasured, never estimated.
+    """
+    if not usage:
+        return 0
+    try:
+        total = int(usage.get("total_tokens", 0) or 0)
+        if total:
+            return total
+        return int(usage.get("prompt_tokens", 0) or 0) + int(usage.get("completion_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _parse_judgment(raw: str) -> Judgment:
@@ -169,7 +196,8 @@ def judged_equivalent(expected: str, answer: str, provider) -> Judgment:
     ]
     try:
         response = chat(messages, provider=provider, temperature=0.0, max_tokens=512)
-        return _parse_judgment(response.content or "")
+        judgment = _parse_judgment(response.content or "")
+        return replace(judgment, tokens=_usage_tokens(response.usage))
     except Exception as exc:
         error_msg = f"<provider error: {exc}>"
         return Judgment(False, "", error_msg)

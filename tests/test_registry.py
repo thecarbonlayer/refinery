@@ -1962,18 +1962,21 @@ def test_c1_grants_the_allowance_to_the_sessions_scratch_root_specifically():
 # ---------------------------------------------------------------------------
 
 
-def test_cmp5_is_position_balanced_so_recency_alone_cannot_answer_it():
-    """The load-bearing property of CMP-5, and the one a reader has to be able to
-    check without running a model.
+def test_cmp5_keeps_the_retirement_fact_only_in_the_supersession_message():
+    """The property that makes CMP-5 fail a strategy which drops the supersession —
+    stated honestly, after the review corrected the original claim.
 
-    The point of the task is that a compaction fix which simply favours the LATEST
-    mention must not pass it. That only holds if the CURRENT code appears in BOTH
-    the early message and the supersession message, while the RETIRED code appears
-    ONLY in the supersession one — the later message then carries both codes, so
-    "take whichever was said last" is not a rule that can separate them. If the
-    current code ever drifts out of the early message, the task quietly becomes
-    "repeat the most recent code", which is exactly the fix it is supposed to
-    resist.
+    CMP-5 asks for BOTH roles. The retirement fact — that OLD-PATH is the retired
+    approach — is stated in exactly one message, the supersession. A strategy biased
+    toward the earliest content keeps the early decision, loses that message, and then
+    cannot fill the `retired=` role at all: it fails. That is the direction this task
+    genuinely covers.
+
+    It does NOT cover the recency direction, and the first version of this test
+    claimed it did. A strategy biased toward the LATEST content keeps the
+    supersession, which names both codes in both roles, and answers correctly — so
+    CMP-5 is silent there. The recency direction is G4/G5's job (their facts are
+    stated early and never restated).
     """
     from runner.tasks.cluster_g import (
         CMP5_CURRENT,
@@ -1983,51 +1986,80 @@ def test_cmp5_is_position_balanced_so_recency_alone_cannot_answer_it():
         CMP5_SUPERSESSION,
     )
 
-    assert CMP5_CURRENT in CMP5_EARLY
-    assert CMP5_CURRENT in CMP5_SUPERSESSION
+    # The retirement fact lives in ONE message. Drop it and the retired role is
+    # unanswerable — which is the whole mechanism.
     assert CMP5_RETIRED not in CMP5_EARLY
     assert CMP5_RETIRED in CMP5_SUPERSESSION
-    # ...and framed as retired where it does appear, before the approved one.
-    assert CMP5_SUPERSESSION.index(CMP5_RETIRED) < CMP5_SUPERSESSION.index(CMP5_CURRENT)
     assert "is retired" in CMP5_SUPERSESSION
-    # The question never names either code — it asks for the approved one by role.
+    assert CMP5_SUPERSESSION.index(CMP5_RETIRED) < CMP5_SUPERSESSION.index(CMP5_CURRENT)
+    assert CMP5_CURRENT in CMP5_EARLY and CMP5_CURRENT in CMP5_SUPERSESSION
+    # The ask names both ROLES and neither CODE.
+    assert "approved=" in CMP5_QUESTION and "retired=" in CMP5_QUESTION
     assert CMP5_CURRENT not in CMP5_QUESTION and CMP5_RETIRED not in CMP5_QUESTION
 
 
-def test_cmp5_requires_a_compaction_after_the_supersession_not_merely_two():
-    """The other half of the same property, and the one a constant cannot express.
+def test_cmp5_passes_only_when_both_roles_parse_to_the_right_codes():
+    """Contract amendment 1's verifier, as a truth table.
 
-    If both compactions fire BEFORE the supersession message, that message is still
-    sitting raw in the tail when the question is asked, and every strategy answers it
-    alike. The balance in the wording only measures anything once the superseding
-    statement has itself been through the door, so the setup guard counts compactions
-    after it and reports `error` when none fired.
+    Both roles, mechanically parsed, both exactly right. The two-role form is what
+    makes each bias direction answerable or not: naming the codes without roles, or
+    swapping them, is not a pass — a reply that knows the codes but not which is live
+    has not carried the decision.
     """
-    import inspect
-
-    from runner.tasks import cluster_g
-
-    source = inspect.getsource(cluster_g.run_cmp5)
-    assert "after_supersession" in source
-    assert "if compactions < 2 or after_supersession < 1:" in source, (
-        "CMP-5's setup guard no longer requires a compaction after the supersession; "
-        "the task would pass on recency alone whenever both fired early"
-    )
-
-
-def test_cmp5_passes_only_on_the_current_code_with_the_retired_one_absent():
-    """Contract §1's verifier, as a truth table. Naming BOTH codes is not a pass:
-    a reply that hedges by listing the retired approach too has not carried the
-    decision, it has carried the transcript."""
     from runner.tasks.cluster_g import CMP5_CURRENT, CMP5_RETIRED, cmp5_verdict
 
-    assert cmp5_verdict(f"{CMP5_CURRENT}")[0] is True
-    assert cmp5_verdict(f"the approved approach is {CMP5_CURRENT.lower()}.")[0] is True
-    assert cmp5_verdict(f"{CMP5_CURRENT} (which superseded {CMP5_RETIRED})")[0] is False
-    assert cmp5_verdict(f"{CMP5_RETIRED}")[0] is False
-    assert cmp5_verdict("I do not have that decision.")[0] is False
-    ok, current, retired = cmp5_verdict(f"{CMP5_RETIRED} and {CMP5_CURRENT}")
-    assert (ok, current, retired) == (False, True, True)
+    ok, approved, retired = cmp5_verdict(f"approved={CMP5_CURRENT} retired={CMP5_RETIRED}")
+    assert (ok, approved, retired) == (True, CMP5_CURRENT, CMP5_RETIRED)
+    # Case, surrounding punctuation and extra prose do not change the parse.
+    assert (
+        cmp5_verdict(
+            f"Sure — approved=`{CMP5_CURRENT.lower()}`, retired=`{CMP5_RETIRED.lower()}`."
+        )[0]
+        is True
+    )
+
+    # Swapped roles: both codes present, both roles wrong.
+    assert cmp5_verdict(f"approved={CMP5_RETIRED} retired={CMP5_CURRENT}")[0] is False
+    # Only the approved role answered — the retirement fact never came back.
+    assert cmp5_verdict(f"approved={CMP5_CURRENT}")[0] is False
+    # The old one-sided shape (bare code, no roles) no longer passes anything.
+    assert cmp5_verdict(CMP5_CURRENT)[0] is False
+    assert cmp5_verdict("I do not have that decision.") == (False, None, None)
+
+
+def test_cmp5_waits_for_the_supersession_to_leave_the_live_transcript():
+    """Premise enforcement by OBSERVATION, not by counting compactions.
+
+    The counting version was wrong twice over, and both are carbon facts rather than
+    opinions. ``Agent.run`` compacts BEFORE appending the turn's own message
+    (harness/agent.py), so ``just_compacted`` read after sending the supersession
+    reports a compaction that ran when that message did not yet exist. And
+    ``keep_tail`` carries the newest messages through verbatim, so the supersession
+    survives the next compactions untouched — a counter would credit them all while
+    the message sat in the raw tail the question is answered from.
+
+    So the task watches the transcript instead: it keeps sending filler until the
+    supersession user message is no longer in ``agent.messages``. That is
+    config-robust — it holds for any ``keep_tail``, ``trigger_fraction`` or window.
+    """
+    from runner.tasks.cluster_g import CMP5_SUPERSESSION, cmp5_supersession_pending
+
+    raw = [
+        {"role": "user", "content": "intro"},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": CMP5_SUPERSESSION},
+        {"role": "assistant", "content": "ok"},
+    ]
+    assert cmp5_supersession_pending(raw) is True
+    # Compacted away: the summary may even quote it, but the MESSAGE is gone, which
+    # is what "went through the door" means.
+    compacted = [
+        {"role": "user", "content": "[summary] ... " + CMP5_SUPERSESSION + " ..."},
+        {"role": "user", "content": "filler"},
+        {"role": "assistant", "content": "ok"},
+    ]
+    assert cmp5_supersession_pending(compacted) is False
+    assert cmp5_supersession_pending([]) is False
 
 
 def test_cmp6_states_its_fact_in_plain_words_with_no_sentinel_to_match_on():
@@ -2256,22 +2288,31 @@ def test_g2_decomposition_replays_every_recorded_pass_fraction_unchanged():
                 continue
             early = _extract_bool(detail, "early_recalled")
             late = _extract_bool(detail, "late_recalled")
-            ok, outcome, _why = g2_verdict(reply, bool(early), bool(late))
+            ok, outcome, why = g2_verdict(reply, bool(early), bool(late))
             assert ok is bool(record["passed"]), (
                 f"{path.name} attempt {record.get('attempt')}: replay says passed={ok}, "
                 f"the record says {record['passed']}"
             )
-            seen[outcome] = seen.get(outcome, 0) + 1
+            # Keyed by the non-answer REASON where there is one, so the two
+            # `not_attempted` branches are counted apart rather than pooled.
+            seen[why or outcome] = seen.get(why or outcome, 0) + 1
             passes += int(ok)
         recorded = summary["tasks"]["G2"]
         assert (passes, attempts) == (recorded["passes"], recorded["attempts"]), path.name
         assert round(passes / attempts, 4) == recorded["pass_fraction"], path.name
 
-    assert seen.get("fail"), "no plain failures replayed — the fail branch is untested"
-    assert seen.get("not_attempted"), (
-        "no non-answers replayed — the decomposition's own branches never fired, so "
-        "this replay could not have detected a semantic change in them"
-    )
+    # The exact corpus split, pinned. A bare "both branches fired" check cannot tell a
+    # decomposition that reclassified 35 attempts from one that reclassified 3, and the
+    # first report of this batch published the wrong numbers (55/36) from an ad-hoc
+    # bucketing that folded the 35 passes into the plain-fail count. These are the
+    # counts the classifier actually produces over the eleven committed files.
+    assert seen == {
+        "pass": 35,
+        "fail": 21,
+        "generation truncated before answer": 35,
+        "tool-syntax leak instead of answer": 4,
+    }, seen
+    assert sum(seen.values()) == 95
 
 
 def test_g2_publishes_whether_the_attempt_produced_an_answer_at_all():
@@ -2334,3 +2375,62 @@ def test_no_scenario_guards_fact_lands_in_the_verbatim_head_window():
             f"verbatim head window (keep_head={keep_head}) — the fact would never be "
             "summarized and the task could not fail"
         )
+
+
+def test_g2_truncation_marker_is_pinned_against_carbons_own_source():
+    """The marker is carbon's string, so carbon's own text is the authority.
+
+    A local copy is a pin on wording carbon is free to change, and the failure would be
+    silent in the worst direction: the classifier stops matching, every truncated
+    generation goes back to being recorded as an ordinary compaction failure, and the
+    only visible sign is a category quietly emptying.
+
+    carbon exposes no constant for it — the literal is inline in ``Agent._run`` — and a
+    carbon change is out of scope for this phase (contract §7), so the pin is made HERE
+    instead, against carbon's own module source. A reword on carbon's side turns this
+    red rather than silently reclassifying 35 attempts per campaign.
+    """
+    import inspect
+
+    import harness.agent as carbon_agent
+
+    from runner.tasks.cluster_g import G2_TRUNCATION_MARKER
+
+    source = inspect.getsource(carbon_agent)
+    assert G2_TRUNCATION_MARKER in source, (
+        "carbon no longer emits this exact truncation marker; G2's non-answer branch "
+        "has stopped matching anything"
+    )
+    # ...and it is the string appended when the stop reason is the output limit.
+    assert 'self._stop_reason = "incomplete_response"' in source
+
+
+def test_cmp6_records_the_judges_own_token_cost():
+    """Contract amendment 4. The judge is a second model call per CMP-6 attempt, and
+    an unrecorded call is cost this suite's per-task means quietly understate.
+
+    Recorded from the judge response's OWN usage, and 0 when the provider reported
+    none — never an estimate, which would be a fabricated measurement sitting in the
+    same field as real ones.
+    """
+    from model.fake import fake
+    from model.provider import LLMResponse, Provider
+
+    from runner.judge import judged_equivalent
+
+    judgment = judged_equivalent("e", "a", fake(scripted=lambda m: "VERDICT: NO\nQUOTE: x"))
+    assert judgment.tokens == 0
+
+    provider = Provider(
+        base_url="fake://local",
+        model="counted",
+        api_key="x",
+        responder=lambda messages, **kw: LLMResponse(
+            content="VERDICT: YES\nQUOTE: x",
+            finish_reason="stop",
+            usage={"prompt_tokens": 300, "completion_tokens": 12, "total_tokens": 312},
+        ),
+    )
+    judged = judged_equivalent("e", "a", provider)
+    assert judged.verdict is True
+    assert judged.tokens == 312

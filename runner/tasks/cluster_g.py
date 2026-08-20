@@ -55,12 +55,17 @@ G4_NEXT = "NEXT-ACTION-G4-5HB"
 # checkpoint carrying one cannot be mistaken for carrying the other.
 G5_FILES = ("reconcile_flags.py", "audit_flags.py")
 
-# --- CMP-5: supersession (contract §1) ------------------------------------------
-# The CURRENT code appears in BOTH the early message and the supersession message;
-# the RETIRED code appears ONLY in the supersession one, framed as retired. That
-# balance is the task: the later message carries both codes, so a strategy that
-# simply favours whatever was said most recently cannot separate them, and neither
-# can one that favours whatever was said first.
+# --- CMP-5: supersession (contract §1, redesigned per amendment 1) ---------------
+# The ask is TWO ROLES, not one code, and that is what gives the task a direction it
+# can actually fail. The retirement fact — that OLD-PATH is the retired approach —
+# is stated in exactly ONE message, the supersession. A strategy biased toward the
+# earliest content keeps the early decision, loses that message, and then cannot fill
+# the `retired=` role at all.
+#
+# Stated honestly, because the first version of this claimed more: CMP-5 does NOT
+# cover the recency direction. A strategy biased toward the LATEST content keeps the
+# supersession, which names both codes in both roles, and answers correctly. G4/G5
+# cover that direction — their facts are stated early and never restated.
 CMP5_CURRENT = "CURRENT-PATH-C5-4RQ"
 CMP5_RETIRED = "OLD-PATH-C5-9ZK"
 CMP5_EARLY = (
@@ -71,7 +76,16 @@ CMP5_SUPERSESSION = (
     f"Final decision: approach {CMP5_RETIRED} is retired; the approved approach is "
     f"{CMP5_CURRENT}. Acknowledge briefly."
 )
-CMP5_QUESTION = "Name the approved approach code for reconciliation. Reply with the code only."
+CMP5_QUESTION = (
+    "Which reconciliation approach code is approved, and which is retired? "
+    "Reply exactly in the form: approved=<code> retired=<code>"
+)
+# Mechanical parse of the two roles. Values are taken up to whitespace and then
+# stripped of surrounding punctuation/quoting, so `approved=`CODE`,` parses to CODE —
+# a model that answers correctly inside ordinary formatting is answering correctly,
+# and grading the formatting would measure obedience instead of compaction.
+_CMP5_ROLE_RE = re.compile(r"\b(approved|retired)\s*[=:]\s*([^\s,;]+)", re.IGNORECASE)
+_CMP5_TRIM = "`'\"*.,;:()[]<>"
 
 # --- CMP-6: semantic preservation, judged (contract §2) -------------------------
 # No sentinel anywhere, deliberately: the fact is ordinary prose with a number and
@@ -156,11 +170,16 @@ def _filler(i: int) -> str:
     return f"Operational notes: {notes} Acknowledge in one short sentence."
 
 
-# carbon's own marker for a generation cut off at the output limit
-# (harness/agent.py appends it to whatever prose was produced). In 36 of G2's 95
-# recorded round-2 replies the prose was EMPTY, so the whole reply is this marker
-# and nothing else — an attempt that never reached an answer, recorded until now
-# as an ordinary compaction failure.
+# carbon's own marker for a generation cut off at the output limit — carbon appends
+# it to whatever prose was produced (harness/agent.py, the `finish_reason == "length"`
+# branch). It is a LITERAL there, not a constant this could import, and a carbon change
+# is out of scope for this phase, so the copy is pinned against carbon's own module
+# source by `tests/test_registry.py` instead: a reword goes red rather than silently
+# reclassifying every truncated generation back into ordinary compaction failures.
+#
+# Of G2's 95 recorded round-2 attempts, 35 replies are this marker and nothing else —
+# the prose was EMPTY, so the attempt never reached an answer at all — beside 21 plain
+# failures, 4 tool-syntax leaks and 35 passes.
 G2_TRUNCATION_MARKER = "[incomplete: the model reached its output limit before finishing]"
 # Tool-call syntax leaking into a prose turn (4 of the same 95). The model emitted
 # a call the harness never executed instead of answering — again not a statement
@@ -481,36 +500,74 @@ def run_g3() -> Attempt:
     )
 
 
-def cmp5_verdict(reply: str) -> tuple[bool, bool, bool]:
-    """``(passed, current_present, retired_present)`` — contract §1's verifier.
+def cmp5_verdict(reply: str) -> tuple[bool, str | None, str | None]:
+    """``(passed, approved_code, retired_code)`` — contract amendment 1's verifier.
 
-    Naming both codes is NOT a pass. A reply that lists the retired approach
-    alongside the approved one has carried the transcript rather than the decision,
-    and the next turn acting on it would have to guess which one is live — which is
-    the failure the task exists to detect.
+    Both roles, mechanically parsed, both exactly right. The two-role form is what
+    replaced the original one-sided check, which a review showed passed BOTH bias
+    directions trivially: "reply with the approved code only" is answered by any
+    strategy that kept either message, since the approved code appears in both.
+
+    Asking which is retired cannot be answered from the early message at all, and
+    swapping the roles fails — a reply that knows the codes but not which one is live
+    has not carried the decision, which is the thing the next turn would act on.
+
+    Unparsed roles come back as ``None`` (recorded in the detail, never silently
+    treated as a wrong code): "the model did not answer in the form" and "the model
+    named the wrong approach" are different facts about a strategy.
     """
-    low = reply.lower()
-    current = CMP5_CURRENT.lower() in low
-    retired = CMP5_RETIRED.lower() in low
-    return (current and not retired), current, retired
+    found: dict[str, str] = {}
+    for role, value in _CMP5_ROLE_RE.findall(reply):
+        found.setdefault(role.lower(), value.strip(_CMP5_TRIM))
+    approved = found.get("approved")
+    retired = found.get("retired")
+    ok = (approved or "").upper() == CMP5_CURRENT and (retired or "").upper() == CMP5_RETIRED
+    return ok, approved, retired
+
+
+def cmp5_supersession_pending(messages: list[dict]) -> bool:
+    """Is the supersession message still sitting in the live transcript, verbatim?
+
+    The premise this task needs is that the supersession has been THROUGH the
+    compaction door, and neither a turn count nor a compaction count can establish
+    that. Two carbon facts, not opinions:
+
+    - ``Agent.run`` compacts BEFORE appending the turn's own message
+      (harness/agent.py), so ``just_compacted`` read right after sending the
+      supersession reports a compaction that ran when that message did not yet exist;
+    - ``keep_tail`` carries the newest messages through verbatim, so the supersession
+      survives the next compactions untouched while a counter happily credits them.
+
+    A review found the first version of this task crediting exactly those. So the
+    task observes the transcript instead: filler continues while this returns True.
+    Config-robust by construction — it holds for any ``keep_tail``,
+    ``trigger_fraction`` or window, and it is the message OBJECT that must leave, so
+    a checkpoint that quotes the text verbatim still counts as having processed it.
+    """
+    return any(m.get("role") == "user" and m.get("content") == CMP5_SUPERSESSION for m in messages)
 
 
 def run_cmp5() -> Attempt:
-    """A superseded decision must not come back out of the compaction door.
+    """Which decision is live, and which was retired — asked after the supersession
+    has itself gone through the compaction door.
 
-    G2 and G4 ask whether a stated fact SURVIVES. This one asks whether the right
-    one survives when two of them compete: an early decision, later explicitly
-    retired, and the approved one that replaced it. A summarizer that keeps "the
-    decisions discussed" without their status passes G2 and fails here, and so does
-    a strategy that resolves conflicts by recency — the approved code was stated
-    both early AND late, so recency cannot pick it out.
+    G2 and G4 ask whether a stated fact SURVIVES. This one asks whether the STATUS of
+    two competing decisions survives: an early decision, later explicitly retired, and
+    the approved one that replaced it. A summarizer that keeps "the decisions
+    discussed" without their status passes G2 and fails here.
 
-    The setup guard is stricter than the other compaction tasks' and has to be. Two
-    compactions somewhere in the trajectory is not enough here: if BOTH fire before
-    the supersession message, that message is still sitting raw in the tail when the
-    question is asked, and every strategy alike answers it. So the premise this task
-    needs is two compactions AND at least one of them after the supersession — the
-    superseding statement must itself have been through the door.
+    The direction it genuinely covers is the earliest-bias one. The retirement fact is
+    stated only in the supersession message, so a strategy that keeps the early
+    decision and drops that message cannot fill the ``retired=`` role at all. It does
+    NOT cover the recency direction — the supersession names both codes in both roles,
+    so a latest-content bias answers correctly; G4/G5 carry that direction.
+
+    The premise is enforced by OBSERVATION (``cmp5_supersession_pending``), not by
+    counting compactions: carbon compacts before appending the turn's own message and
+    ``keep_tail`` carries recent messages through verbatim, so a count credits
+    compactions that never saw the supersession. Filler continues until the message
+    has actually left the transcript; if it never leaves, the attempt is ``error`` —
+    the task never reached the thing it measures.
     """
     a = _plain_agent(context_limit=900)
     try:
@@ -521,35 +578,32 @@ def run_cmp5() -> Attempt:
             a.send(_filler(i))
             compactions += int(a.just_compacted)
         a.send(CMP5_SUPERSESSION)
-        after_supersession = int(a.just_compacted)
-        compactions += after_supersession
-        for i in range(4, 18):
-            a.send(_filler(i))
-            fired = int(a.just_compacted)
-            compactions += fired
-            after_supersession += fired
-            if compactions >= 2 and after_supersession >= 1:
+        compactions += int(a.just_compacted)
+        for i in range(4, 24):
+            if not cmp5_supersession_pending(a.messages) and compactions >= 2:
                 break
-        if compactions < 2 or after_supersession < 1:
+            a.send(_filler(i))
+            compactions += int(a.just_compacted)
+        superseded = not cmp5_supersession_pending(a.messages)
+        if not superseded or compactions < 2:
             return Attempt(
                 False,
                 "error",
-                f"repeated-compaction setup did not fire twice after the supersession "
-                f"(count={compactions} after_supersession={after_supersession})",
+                f"supersession never left the live transcript (compactions={compactions} "
+                f"still_verbatim={not superseded})",
                 turns=len(a.messages),
                 metrics=agent_metrics(a),
             )
         result = a.run(CMP5_QUESTION)
         reply = result.text
-        ok, current, retired = cmp5_verdict(reply)
+        ok, approved, retired = cmp5_verdict(reply)
     finally:
         a.close()  # the storage contract says close ends the scratch lifecycle
     return Attempt(
         passed=ok,
         outcome="pass" if ok else "fail",
-        detail=f"compactions={compactions} after_supersession={after_supersession} "
-        f"approved_recalled={current} "
-        f"retired_resurfaced={retired} reply={reply[:240]!r}",
+        detail=f"compactions={compactions} approved_answer={approved!r} "
+        f"retired_answer={retired!r} reply={reply[:240]!r}",
         turns=len(a.messages),
         metrics=agent_metrics(a, result=result),
     )
@@ -610,9 +664,17 @@ def run_cmp6() -> Attempt:
         passed=ok,
         outcome="pass" if ok else "fail",
         detail=f"compactions={compactions} verifier_kind=judged judge_verdict={ok} "
-        f"judge_quote={judgment.quote[:160]!r} reply={reply[:240]!r}",
+        f"judge_tokens={judgment.tokens} judge_quote={judgment.quote[:160]!r} "
+        f"reply={reply[:240]!r}",
         turns=len(a.messages),
-        metrics={**agent_metrics(a, result=result), "judge_verdict": float(ok)},
+        metrics={
+            **agent_metrics(a, result=result),
+            "judge_verdict": float(ok),
+            # The judge is a SECOND model call per attempt. Its cost is recorded
+            # beside the agent's own, or CMP-6's per-task token mean reports only
+            # half of what the task actually spent (contract amendment 4).
+            "judge_tokens": float(judgment.tokens),
+        },
     )
 
 
@@ -663,10 +725,11 @@ def run_cmp7() -> Attempt:
     turns follow, and only then is it asked for.
 
     Run at carbon's DEFAULT context limit, deliberately. G2 pins a 700-token window
-    and pays for it: 36 of its 95 recorded replies came back as nothing but the
+    and pays for it: 35 of its 95 recorded replies came back as nothing but the
     truncation marker, a confound baked into the fixture. Here the window is the
     shipped one, compaction is reached by real bulk, and `default_context_limit`
-    stays a knob this task can actually observe.
+    stays a knob this task can actually observe — which is why CMP-7 is the one
+    compaction task on that knob's coverage row.
 
     The opening turn is an ordinary greeting and it is load-bearing. Compaction keeps
     the first `keep_head` messages VERBATIM (harness/compaction.py), so a fact stated

@@ -308,21 +308,32 @@ def test_the_real_gate_refuses_to_recurse_into_pytest():
 # --- the null-model loader and the rule's section gate (contract §1/§2) -----------
 
 
-_SPLIT_OF = {"A1": "held_in", "G4": "held_in", "G5": "held_in", "G2": "held_out"}
+_SPLIT_OF = {
+    "A1": "held_in",
+    "G4": "held_in",
+    "G5": "held_in",
+    "G2": "held_out",
+    "CMP-5": "held_in",
+    "CMP-6": "held_out",
+    "CMP-7": "held_in",
+}
 _STANDARD_ATTEMPTS = {t: (5 if s == "held_out" else 3) for t, s in _SPLIT_OF.items()}
 
-# Contract §3's arm protocol: three full-suite arms at standard attempts, four
-# `--only A1 G2 G4 G5 --attempts 10` subset arms, nothing changed between any of them.
+# The arm protocol (contract §3, extended by the Phase 2c amendment): three full-suite
+# arms at standard attempts, four `--only A1 G2 G4 G5 CMP-5 CMP-6 CMP-7 --attempts 10`
+# subset arms, nothing changed between any of them. The scenario guards carry counts
+# because the model must RATE every covered task — a guard with no rate cannot be
+# adjudicated, which is why the loader pins the covered set rather than the gain set.
 _FULL_ARMS = {
-    "r2-null-full-a": {"A1": 2, "G4": 1, "G5": 2, "G2": 3},
-    "r2-null-full-b": {"A1": 2, "G4": 1, "G5": 2, "G2": 2},
-    "r2-null-full-c": {"A1": 1, "G4": 0, "G5": 3, "G2": 3},
+    "r2-null-full-a": {"A1": 2, "G4": 1, "G5": 2, "G2": 3, "CMP-5": 1, "CMP-6": 3, "CMP-7": 2},
+    "r2-null-full-b": {"A1": 2, "G4": 1, "G5": 2, "G2": 2, "CMP-5": 2, "CMP-6": 2, "CMP-7": 1},
+    "r2-null-full-c": {"A1": 1, "G4": 0, "G5": 3, "G2": 3, "CMP-5": 1, "CMP-6": 3, "CMP-7": 2},
 }
 _SUBSET_ARMS = {
-    "r2-null-cmp-a": {"A1": 5, "G4": 2, "G5": 6, "G2": 5},
-    "r2-null-cmp-b": {"A1": 6, "G4": 1, "G5": 7, "G2": 6},
-    "r2-null-cmp-c": {"A1": 5, "G4": 2, "G5": 6, "G2": 4},
-    "r2-null-cmp-d": {"A1": 6, "G4": 1, "G5": 5, "G2": 7},
+    "r2-null-cmp-a": {"A1": 5, "G4": 2, "G5": 6, "G2": 5, "CMP-5": 4, "CMP-6": 5, "CMP-7": 6},
+    "r2-null-cmp-b": {"A1": 6, "G4": 1, "G5": 7, "G2": 6, "CMP-5": 5, "CMP-6": 4, "CMP-7": 5},
+    "r2-null-cmp-c": {"A1": 5, "G4": 2, "G5": 6, "G2": 4, "CMP-5": 4, "CMP-6": 6, "CMP-7": 6},
+    "r2-null-cmp-d": {"A1": 6, "G4": 1, "G5": 5, "G2": 7, "CMP-5": 5, "CMP-6": 5, "CMP-7": 4},
 }
 
 
@@ -348,7 +359,7 @@ def _model(
     `mutate` edits the computed artifact before it is written, which is how the unfit
     and malformed cases are built without hand-authoring an artifact.
     """
-    from loop.calibrate import SUPPORTED, calibrate_model
+    from loop.calibrate import MODEL_TASKS, SUPPORTED, calibrate_model
 
     results_dir = tmp_path / f"arms-{name}"
     results_dir.mkdir()
@@ -381,7 +392,8 @@ def _model(
                 arm["filter"] = sorted(passes)
             (results_dir / f"{label}.json").write_text(json.dumps(arm))
     labels = sorted({**_FULL_ARMS, **_SUBSET_ARMS})
-    artifact = calibrate_model(labels, results_dir, SUPPORTED)
+    # SUPPORTED is the gain set; MODEL_TASKS is what the artifact must rate.
+    artifact = calibrate_model(labels, results_dir, SUPPORTED, coverage=MODEL_TASKS)
     if mutate is not None:
         mutate(artifact)
     path = tmp_path / name
@@ -397,6 +409,12 @@ _CMP = {
     "G4": ("held_in", 50, 8),
     "G5": ("held_in", 50, 31),
     "G2": ("held_out", 50, 27),
+    # The scenario guards: COVERED by the model, so every arm must carry them, and read
+    # per task by the guard gate. They are not in the gain set, so they never enter a
+    # supported-set mean.
+    "CMP-5": ("held_in", 50, 24),
+    "CMP-6": ("held_out", 50, 26),
+    "CMP-7": ("held_in", 50, 28),
     "X1": ("held_in", 3, 2),
     "X2": ("held_out", 4, 2),
 }
@@ -464,13 +482,17 @@ def test_a_fresh_calibration_loads_exactly_the_null_model_the_artifact_measured(
     artifact = json.loads(path.read_text())
     assert cal is not None
     assert cal.section == "compaction"
-    assert cal.supported == frozenset(artifact["null_model"])
+    # COVERED is the artifact's own key set; SUPPORTED is the narrower gain set,
+    # pinned by the section rather than read off the file (contract amendment 2).
+    assert cal.covered == frozenset(artifact["null_model"])
+    assert cal.supported == frozenset({"A1", "G2", "G4", "G5"})
     assert cal.null_rates == {
         task: Fraction(*(int(x) for x in row["null_rate"].split("/")))
         for task, row in artifact["null_model"].items()
     }
     assert cal.coverage_level == Fraction(artifact["coverage_level"])
-    assert cal.guards == _SECTION_CONFIRM_GUARDS["compaction"] == frozenset({"A1", "G2", "G5"})
+    assert cal.guards == _SECTION_CONFIRM_GUARDS["compaction"]
+    assert cal.guards == frozenset({"A1", "G2", "G5", "CMP-5", "CMP-6", "CMP-7"})
 
 
 def test_an_unfit_artifact_refuses_to_install_itself_and_says_which_check_failed(tmp_path):
@@ -808,7 +830,17 @@ def test_confirm_cli_judges_a_calibrated_claim_against_its_computed_quantile(
 
     def arms(gain: int):
         def run(label, only, attempts):
-            passes = {"A1": 27, "G4": 8, "G5": 31, "G2": 27 if label == "b" else gain}
+            # Every COVERED task, unmoved except the carrier: the confirmation reruns
+            # the guards too, and a pair missing one is refused before any judgment.
+            passes = {
+                "A1": 27,
+                "G4": 8,
+                "G5": 31,
+                "G2": 27 if label == "b" else gain,
+                "CMP-5": 24,
+                "CMP-6": 26,
+                "CMP-7": 28,
+            }
             return {
                 "fingerprint": dict(FP),
                 "tasks": {
@@ -1035,37 +1067,68 @@ def test_a_single_arm_disagreeing_on_runner_sha_is_stale(tmp_path):
     assert "runner_sha" in why and "STALE" in why
 
 
-def test_every_declared_compaction_guard_has_a_rate_in_the_installed_null_model():
-    """The invariant that ties the guard set to the calibration, and the reason the
-    two must move together.
+def test_every_declared_compaction_guard_has_a_rate_the_pinned_model_must_carry():
+    """The invariant that ties the guard set to the calibration (contract amendment 2).
 
-    `SectionCalibration` refuses a guard outside the model's supported set, because a
-    guard with no null rate cannot be adjudicated and would be silently skipped. So a
-    guard may only be DECLARED once the null model carries a rate for it. Phase 2c
-    adds CMP-5/6/7 to `loop.calibrate.MODEL_TASKS` — the coverage the next campaign
-    must measure — and this test is what forces the guard-set extension to wait for
-    that campaign instead of landing first and refusing every artifact on disk.
+    `SectionCalibration` refuses a guard the model carries no rate for, because a guard
+    that cannot be adjudicated is a guard silently skipped. The section therefore pins
+    two sets, not one: the COVERED set every artifact must rate (the seven), and the
+    GAIN set the split means average over (the four). Guards must sit inside the
+    covered set; the gain set must too; and both must sit inside the coverage the
+    calibration tool builds (`MODEL_TASKS`), or the campaign would produce an artifact
+    the loader then refuses.
 
-    If this goes red, the fix is not to edit the assertion: it is to finish the
-    recalibration, extend `_SECTION_SUPPORTED` alongside the guards, and re-run the
-    arms.
+    The relation is what this asserts, not the membership alone: it kills the
+    flip-without-coverage mutation (a guard outside the pin) and the shrink-the-pin
+    mutation (a covered set that no longer holds the guards) alike.
+    """
+    from loop.calibrate import MODEL_TASKS, SUPPORTED
+    from loop.validate import _SECTION_CONFIRM_GUARDS, _SECTION_COVERED, _SECTION_SUPPORTED
+
+    guards = _SECTION_CONFIRM_GUARDS["compaction"]
+    covered = _SECTION_COVERED["compaction"]
+    gain = _SECTION_SUPPORTED["compaction"]
+
+    assert guards == frozenset({"A1", "G2", "G5", "CMP-5", "CMP-6", "CMP-7"})
+    assert guards <= covered <= MODEL_TASKS, (
+        f"guard(s) {sorted(guards - covered)} are declared but outside the section's "
+        "pinned covered set — the loader would build a calibration that cannot judge them"
+    )
+    assert gain <= covered
+    assert gain == SUPPORTED == frozenset({"A1", "G2", "G4", "G5"})
+    assert covered == MODEL_TASKS
+    # G4 is the miner: covered (the gain mean needs its rate) and never a guard.
+    assert "G4" in covered and "G4" not in guards
+
+
+def test_the_installed_four_task_artifact_no_longer_installs_and_says_why():
+    """The transition, stated out loud rather than left to be discovered.
+
+    `model-r2.json` was pooled over {A1, G2, G4, G5} at a runner hash this branch has
+    already moved past. Under the seven-task pin it does not install, and the section is
+    loudly uncalibrated until Task 5's campaign re-records at this hash. That is the
+    designed state, not a defect — but "not calibrated" has to NAME the reason, because
+    "re-run the arms" and "someone edited the artifact" are different remedies.
     """
     import json
 
-    from loop.calibrate import MODEL_TASKS
-    from loop.validate import _SECTION_CONFIRM_GUARDS, _SECTION_MODEL, _SECTION_SUPPORTED
+    from loop.validate import _SECTION_MODEL, calibration_status
 
-    guards = _SECTION_CONFIRM_GUARDS["compaction"]
-    pinned = _SECTION_SUPPORTED["compaction"]
-    assert guards <= pinned, (
-        f"guard(s) {sorted(guards - pinned)} are declared but outside the section's "
-        "pinned supported set — the loader would build a calibration that cannot judge "
-        "them"
-    )
     installed = json.loads(_SECTION_MODEL["compaction"].read_text())
-    assert set(installed["null_model"]) == pinned, (
-        "the installed artifact no longer covers the pinned set; recalibrate before changing either"
+    assert set(installed["null_model"]) == {"A1", "G2", "G4", "G5"}, (
+        "fixture precondition: the committed artifact is the four-task round-2 model"
     )
-    # ...and the coverage the NEXT campaign must measure is a superset of both, so the
-    # guard set can grow only after the arms that rate it have been recorded.
-    assert pinned <= MODEL_TASKS and guards <= MODEL_TASKS
+    arm = installed["provenance"][0]
+    cal, why = calibration_status(
+        "compaction",
+        {
+            "runner_sha": arm["runner_sha"],
+            "config_version": arm["config_version"],
+            "model": arm["model"],
+            "gemma_sha": arm["carbon_sha"],
+            "dirty_sha": arm["dirty_sha"],
+        },
+    )
+    assert cal is None
+    assert "not calibrated" in why
+    assert "CMP-5" in why and "CMP-6" in why and "CMP-7" in why

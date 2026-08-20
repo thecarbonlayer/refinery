@@ -45,6 +45,8 @@ from loop.artifacts import Candidate, ValidationRecord
 from loop.calibrate import CONFIRMATION_GUARDS as _COMPACTION_GUARDS
 from loop.calibrate import COVERAGE_LEVEL as _PINNED_COVERAGE_LEVEL
 from loop.calibrate import MODEL_PATH as COMPACTION_MODEL_PATH
+from loop.calibrate import MODEL_TASKS as _COMPACTION_MODEL_TASKS
+from loop.calibrate import SUPPORTED as _COMPACTION_SUPPORTED
 from loop.calibrate import _fingerprint_field as _provenance_value
 from loop.calibrate import recompute_model
 from loop.config_edit import CONFIG_REL, apply_candidate
@@ -335,13 +337,21 @@ _FIELD_SECTION = {
 # `iterations/calibration-compaction/README.md` for why it was withdrawn).
 _SECTION_MODEL = {"compaction": COMPACTION_MODEL_PATH}
 
-# The task set each section's model must cover, exactly. The supported set is
-# pinned and the loader refuses any other. `calibrate_model` pins it on the way in;
-# this pins it on the way out, so an artifact that was hand-edited, truncated, or built
-# for some other section's evidence cannot install itself as this one's. A supported set
-# that silently loses a task also silently changes the denominator of every mean the
-# rule judges — the exact failure `_require_supported` exists to refuse downstream.
-_SECTION_SUPPORTED = {"compaction": frozenset({"A1", "G2", "G4", "G5"})}
+# TWO pinned sets per section since Phase 2c (contract amendment 2), and the
+# difference between them is load-bearing:
+#
+# `_SECTION_COVERED` is the task set each section's model must rate, EXACTLY — the
+# gain set plus the guards. `calibrate_model` pins it on the way in; this pins it on
+# the way out, so an artifact that was hand-edited, truncated, or built for some other
+# section's evidence cannot install itself as this one's. It is imported from
+# `loop.calibrate`, never restated, so the writer and the reader cannot drift.
+#
+# `_SECTION_SUPPORTED` is the GAIN set: the tasks the rule's split means average over.
+# It stays the four. A gain set that silently gained the three guards would change the
+# denominator of every mean the rule judges without anything saying so — which is the
+# same failure as one that silently loses a task, in the other direction.
+_SECTION_COVERED = {"compaction": _COMPACTION_MODEL_TASKS}
+_SECTION_SUPPORTED = {"compaction": _COMPACTION_SUPPORTED}
 
 # The provenance fields whose value must be PRESENT and EQUAL on both sides. `dirty_sha`
 # is deliberately absent from this tuple and checked separately below: None is a real,
@@ -573,11 +583,11 @@ def calibration_status(
             f"section {section!r} is not calibrated: {where} carries no null_model — there "
             "are no rates to compute a quantile from"
         )
-    pinned = _SECTION_SUPPORTED.get(section)
+    pinned = _SECTION_COVERED.get(section)
     if pinned is not None and set(null_model) != set(pinned):
         return None, (
             f"section {section!r} is not calibrated: {where} covers "
-            f"{sorted(null_model) or 'nothing'}, and this section's supported set is pinned "
+            f"{sorted(null_model) or 'nothing'}, and this section's covered set is pinned "
             f"to {sorted(pinned)} — missing {sorted(pinned - set(null_model))}, unexpected "
             f"{sorted(set(null_model) - pinned)}. A model over a different set of tasks is "
             "a model of different evidence."
@@ -648,7 +658,11 @@ def calibration_status(
     return (
         SectionCalibration(
             section=section,
-            supported=frozenset(rates),
+            # The GAIN set, from the section's own pin — not the artifact's key set,
+            # which is the wider covered set from Phase 2c on. Falling back to the
+            # rates keeps an unpinned section behaving exactly as it did.
+            supported=_SECTION_SUPPORTED.get(section) or frozenset(rates),
+            covered=frozenset(rates),
             null_rates=rates,
             coverage_level=level,
             guards=_SECTION_CONFIRM_GUARDS.get(section, frozenset()),

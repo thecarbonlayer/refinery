@@ -102,24 +102,13 @@ SUPPORTED = frozenset({"A1", "G2", "G4", "G5"})
 # computed against a different guard set than the one the confirmation actually
 # applies would describe a pipeline nobody runs. `loop.validate` imports this
 # constant instead of restating it, so the two cannot drift.
-CONFIRMATION_GUARDS = frozenset({"A1", "G2", "G5"})
-
+#
 # The Phase 2c scenario guards (phase2c-guards-contract.md §1-§3, §6): CMP-5
 # (supersession), CMP-6 (judged meaning-preservation), CMP-7 (buried facts).
 # They exist to catch a compaction fix mined from G4 that generalizes only to
 # G4's shape, so they are guards and never miners.
-#
-# Declared here, and NOT yet folded into `CONFIRMATION_GUARDS`, deliberately.
-# `loop.acceptance.SectionCalibration` refuses a guard the null model carries no
-# rate for -- a guard that cannot be adjudicated is a guard silently skipped --
-# so a guard may only be DECLARED once an artifact rates it. The installed
-# `model-r2.json` pools the four supported tasks alone; the campaign that rates
-# these three is the next step (contract §6: three full-suite arms plus four
-# `--only A1 G2 G4 G5 CMP-5 CMP-6 CMP-7` subset arms, then `calibrate_model`).
-# Extending the guard set before that artifact exists would refuse every
-# calibration on disk, which is why the two land together and this constant sits
-# beside the set it is going to join.
 SCENARIO_GUARDS = frozenset({"CMP-5", "CMP-6", "CMP-7"})
+CONFIRMATION_GUARDS = frozenset({"A1", "G2", "G5"}) | SCENARIO_GUARDS
 
 # The null model's task COVERAGE: supported ∪ guards (contract §6). Wider than
 # `SUPPORTED`, which stays the set the rule's GAIN judgment averages over -- the
@@ -128,7 +117,13 @@ SCENARIO_GUARDS = frozenset({"CMP-5", "CMP-6", "CMP-7"})
 # DERIVED from the sets it unions rather than typed out again: a hand-listed copy
 # is how a guard gets added in one place and missed by the campaign that has to
 # produce its rate.
-MODEL_TASKS = SUPPORTED | CONFIRMATION_GUARDS | SCENARIO_GUARDS
+#
+# Consequence, stated where it will be met: no artifact on disk covers these seven
+# tasks yet, so `compaction` is LOUDLY uncalibrated until the campaign at the new
+# runner hash re-records (contract amendment 2). That is not a transition hazard —
+# this branch already moved the runner hash, so every artifact recorded before it
+# was stale for these measurements anyway.
+MODEL_TASKS = SUPPORTED | CONFIRMATION_GUARDS
 
 # Round-2's one-sided coverage, as the exact Fraction every quantile in this
 # module is computed at. 975/1000 reduces to 39/40 -- kept spelled out at the

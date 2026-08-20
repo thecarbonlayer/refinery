@@ -40,7 +40,6 @@ from loop.acceptance import (
     calibration_digest,
     confirmed,
     decision_digest,
-    evaluate,
 )
 from loop.validate import calibration_status
 
@@ -74,12 +73,21 @@ def _restrict(results: dict, names) -> dict:
 
 
 @pytest.fixture(scope="module")
-def calibration():
-    cal = calibration_status("compaction", _arm("r2-null-full-a")["fingerprint"], model_path=MODEL)[
-        0
-    ]
-    assert cal is not None, "the installed artifact must load, or this sweep proves nothing"
-    return cal
+def refusal() -> str:
+    """Why the installed artifact does not load — the state this sweep is suspended in.
+
+    Through Phase 2b this fixture returned the calibration itself and the sweeps below
+    judged the real arms with it. Both halves of that pairing are now superseded: the
+    artifact pools four tasks and the loader pins seven, and the arms themselves were
+    recorded before CMP-5/6/7 existed, so no seven-task model could judge them either.
+    Fabricating rates for the guards to keep the sweep running would be the one thing
+    this file exists to prevent — a claim resting on numbers nobody measured.
+    """
+    cal, why = calibration_status(
+        "compaction", _arm("r2-null-full-a")["fingerprint"], model_path=MODEL
+    )
+    assert cal is None, "the four-task artifact must not install at the seven-task pin"
+    return why
 
 
 def _same_shape_pairs():
@@ -95,15 +103,24 @@ def test_the_sweep_covers_every_same_shape_ordered_pair_of_the_eight_arms():
     assert {label for pair in pairs for label in pair} == set(ALL_ARMS)
 
 
-def test_no_ordered_pair_of_null_arms_reaches_confirm(calibration):
-    """Stage 1 over the real arms with the real artifact: every verdict REJECT."""
-    outcomes = {}
-    for a, b in _same_shape_pairs():
-        decision = evaluate(_arm(a), _arm(b), calibration=calibration)
-        outcomes[f"{a}::{b}"] = decision.outcome
-    confirms = {k: v for k, v in outcomes.items() if v == CONFIRM}
-    assert not confirms, confirms
-    assert set(outcomes.values()) == {"REJECT"}
+def test_the_calibrated_null_sweep_is_suspended_until_the_campaign_recalibrates(refusal):
+    """The sweep's own precondition, asserted rather than assumed.
+
+    "Every same-shape ordered pair judged by the REAL rule under the REAL artifact" is
+    a claim about a pairing that no longer exists. It is restored by the Phase 2c
+    campaign (three full-suite arms and four subset arms at the new runner hash, then
+    `calibrate_model`), not by loosening anything here — so this test states the two
+    facts that make the suspension honest and will go red the moment either changes.
+    """
+    assert "not calibrated" in refusal
+    for guard in ("CMP-5", "CMP-6", "CMP-7"):
+        assert guard in refusal, "the refusal must name what the artifact is missing"
+    # And the recorded arms could not be judged by a seven-task model either: they
+    # predate the guards, so re-recording is the only route back, which is exactly what
+    # the campaign does.
+    for label in ALL_ARMS:
+        tasks = set(_arm(label)["tasks"])
+        assert not tasks & {"CMP-5", "CMP-6", "CMP-7"}, label
 
 
 def _carrier_sets():
@@ -117,6 +134,12 @@ def _carrier_sets():
                 yield split, combo
 
 
+@pytest.mark.skip(
+    reason="suspended with the calibrated sweep above: the installed artifact does not "
+    "load at the seven-task pin and the recorded arms predate the guards. The Phase 2c "
+    "campaign restores both, and this attack is re-established against the new arms "
+    "there rather than against numbers nobody measured."
+)
 def test_no_fabricated_first_confirm_can_be_accepted_on_a_null_pair(calibration):
     """Stage 2, attacked directly. `evaluate()` refuses to CONFIRM any of these
     pairs, so the only way to reach `confirmed()` with them is to hand it a first
@@ -162,10 +185,14 @@ def test_no_fabricated_first_confirm_can_be_accepted_on_a_null_pair(calibration)
     assert not accepted, accepted
 
 
-def test_the_installed_artifact_is_the_one_this_sweep_judged_with(calibration):
-    """A sweep against some other model would prove nothing about what ships."""
-    assert calibration.source == "iterations/calibration-compaction/model-r2.json"
-    assert calibration.computed_at_runner_sha == _arm("r2-null-full-a")["fingerprint"]["runner_sha"]
+def test_the_committed_artifact_is_still_the_one_this_file_talks_about(refusal):
+    """The artifact is superseded, not gone: it is still the committed record, still
+    measured at the arms' own runner hash, and still the file the loader names when it
+    refuses. A sweep — or a refusal — about some other model would prove nothing."""
+    model = json.loads(MODEL.read_text())
+    assert set(model["null_model"]) == {"A1", "G2", "G4", "G5"}
+    assert model["computed_at_runner_sha"] == _arm("r2-null-full-a")["fingerprint"]["runner_sha"]
+    assert "model-r2.json" in refusal
 
 
 # ---------------------------------------------------------------------------
@@ -207,22 +234,30 @@ def test_replay_main_exits_nonzero_when_a_result_file_was_skipped(tmp_path, caps
     assert code != 0
 
 
-def test_the_calibrated_replay_mode_exercises_the_calibrated_branch(tmp_path, capsys):
+def test_the_calibrated_replay_mode_reports_what_it_could_not_judge(tmp_path, capsys):
     """`--calibrated` is not a byte-identity replay — the calibrated regime is new
     behavior with nothing to be identical to. It is a COVERAGE gate: every same-shape
     ordered pair whose baseline the installed artifact is fresh for is judged through
     `evaluate(calibration=...)`, every CONFIRM is carried into `confirmed()`, and any
-    pair of NULL ARMS reaching CONFIRM or ACCEPT fails the run."""
+    pair of NULL ARMS reaching CONFIRM or ACCEPT fails the run.
+
+    With no installable artifact the gate has nothing to judge WITH, and the property
+    that matters becomes the other one: it must COUNT what it could not cover rather
+    than reporting a clean run over an empty set."""
     from loop.replay_check import main, replay_calibrated
 
     d = _seed_results(tmp_path)
     report = replay_calibrated(d, model_path=MODEL)
-    # Eleven arms make 110 ordered pairs. The 48 cross-shape ones are refused by the
-    # parity gates before any rule runs, which is behavior, not a skipped case.
-    assert report["pairs"] == 110
-    assert report["refused"] == 48
-    assert report["decided"] == 62
-    assert report["null_arm_pairs"] == 62
+    # Eleven arms make 110 ordered pairs. With the artifact refusing to install at the
+    # seven-task pin, EVERY pair lands in `uncalibrated_pairs` — the mode reports what
+    # it could not judge instead of judging it against nothing, which is the behavior
+    # worth pinning while the section waits for its campaign. The counted-pairs shape
+    # (110 = 62 same-shape + 48 cross-shape) is unchanged and is re-established as a
+    # calibrated sweep once the new arms exist.
+    assert report["results"] == len(ALL_ARMS)
+    assert report["uncalibrated_pairs"] == 110
+    assert report["pairs"] == 0
+    assert report["decided"] == 0
     assert report["confirms"] == 0
     assert report["accepts"] == 0
     assert report["false_outcomes"] == []
@@ -231,4 +266,3 @@ def test_the_calibrated_replay_mode_exercises_the_calibrated_branch(tmp_path, ca
     assert main(["--results-dir", str(d), "--calibrated"]) == 0
     out = capsys.readouterr().out
     assert "calibrated" in out.lower()
-    assert "62" in out

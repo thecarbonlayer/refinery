@@ -35,19 +35,24 @@ import pytest
 from loop.acceptance import ACCEPT, CONFIRM, REJECT, Decision, confirmed
 from loop.artifacts import ConfirmationRecord, ValidationRecord, write_confirmation_record
 from tests.test_p2b_closing import (
+    _UNMOVED as UNMOVED,
+)
+from tests.test_p2b_closing import (
     CANDIDATE,
     CLUSTER,
-    REAL_MODEL,
+    COVERED,
     SUPPORTED,
     _calibrated_record,
     _first_decision,
     _results,
+    committed_model,
+    installed_calibration,
     installed_model,
-    load_calibration,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-ATTEMPTS = dict.fromkeys(SUPPORTED, 10)
+# Every COVERED task, because a confirmation reruns the guards too.
+ATTEMPTS = dict.fromkeys(COVERED, 10)
 
 # A confirmation pair on which the ORIGINAL three-carrier claim honestly fails: A1
 # repeats beyond its own 2/5 quantile at 10v10, G4 and G5 do not move at all. Every
@@ -55,8 +60,8 @@ ATTEMPTS = dict.fromkeys(SUPPORTED, 10)
 # collapses — so the ONLY thing standing between this pair and an ACCEPT is the rule
 # that every named carrier must repeat. That makes it the exact pair a record-edit
 # attack wants: shrink the claim to the one carrier that did repeat.
-HONEST_BASE = {"A1": 2, "G4": 5, "G5": 8, "G2": 5}
-HONEST_CAND = {"A1": 9, "G4": 5, "G5": 8, "G2": 5}
+HONEST_BASE = {"A1": 2, "G4": 5, "G5": 8, "G2": 5, **UNMOVED}
+HONEST_CAND = {"A1": 9, "G4": 5, "G5": 8, "G2": 5, **UNMOVED}
 
 
 def _honest_first(tmp_path) -> tuple[Decision, dict, dict]:
@@ -85,7 +90,7 @@ def test_the_honest_record_still_reaches_a_verdict_on_this_pair(tmp_path):
     honest answer is REJECT because two of the three named carriers did not repeat. A
     gate that refused everything would pass both attack tests below while proving
     nothing."""
-    cal = load_calibration(REAL_MODEL)
+    cal = installed_calibration()
     first, base, cand = _honest_first(tmp_path)
 
     decision = confirmed(first, base, cand, calibration=cal)
@@ -104,7 +109,7 @@ def test_shrinking_the_carriers_and_deleting_the_digest_refuses(tmp_path):
     An absent digest is not "nothing to check". It is a calibrated record that never
     bound itself to its own claim, which is precisely the record this check exists to
     stop being trusted."""
-    cal = load_calibration(REAL_MODEL)
+    cal = installed_calibration()
     first, base, cand = _honest_first(tmp_path)
     attacked = _edited(first, drop=("decision_digest",))
 
@@ -123,7 +128,7 @@ def test_deleting_the_regime_as_well_still_refuses(tmp_path):
     a check of its own: a calibration in hand beside a record that does not claim to
     have been judged under one is a contradiction, and the contradiction is the
     finding."""
-    cal = load_calibration(REAL_MODEL)
+    cal = installed_calibration()
     first, base, cand = _honest_first(tmp_path)
     attacked = _edited(first, drop=("decision_digest", "regime"))
 
@@ -134,7 +139,7 @@ def test_deleting_the_regime_as_well_still_refuses(tmp_path):
 def test_deleting_the_calibration_digest_alone_refuses(tmp_path):
     """The same principle on the other binding: the artifact-swap check must not be
     switchable off either, by deleting its digest or by deleting the regime."""
-    cal = load_calibration(REAL_MODEL)
+    cal = installed_calibration()
     first, base, cand = _honest_first(tmp_path)
 
     with pytest.raises(ValueError, match="calibration digest"):
@@ -224,11 +229,11 @@ def test_an_honest_calibrated_confirmation_still_accepts(tmp_path):
     """Mandatory is not the same as impossible. A record written by `evaluate()` and
     left alone carries both digests, and a pair on which every carrier really does
     repeat still reaches ACCEPT."""
-    cal = load_calibration(REAL_MODEL)
+    cal = installed_calibration()
     record, _, _ = _calibrated_record(tmp_path)
     first = _first_decision(record)
-    base = _results({"A1": 3, "G4": 1, "G5": 3, "G2": 3}, ATTEMPTS)
-    cand = _results({"A1": 10, "G4": 7, "G5": 10, "G2": 9}, ATTEMPTS)
+    base = _results({"A1": 3, "G4": 1, "G5": 3, "G2": 3, **UNMOVED}, ATTEMPTS)
+    cand = _results({"A1": 10, "G4": 7, "G5": 10, "G2": 9, **UNMOVED}, ATTEMPTS)
 
     assert confirmed(first, base, cand, calibration=cal).outcome == ACCEPT
 
@@ -239,6 +244,8 @@ def test_an_uncalibrated_confirmation_needs_no_digests_at_all(tmp_path):
     is confirmed exactly as it always was."""
     from loop.acceptance import evaluate
 
+    # UNCALIBRATED: no calibration means no guards ride in, so the confirmation
+    # reruns exactly what moved.
     base = _results({"A1": 4, "G4": 1, "G5": 4, "G2": 3}, ATTEMPTS)
     cand = _results({"A1": 9, "G4": 5, "G5": 9, "G2": 8}, ATTEMPTS)
     first = evaluate(base, cand)
@@ -265,9 +272,9 @@ VERIFIER_CONDITIONAL = {
 
 
 def test_every_end_to_end_row_carries_a_conditional_value_beside_the_marginal():
-    rows = installed_model()["fitness"]["power"]["end_to_end"]["rows"]
-    baseline = installed_model()["fitness"]["false_confirm"]["baseline_arm"]
-    assert installed_model()["fitness"]["power"]["end_to_end"]["baseline_arm"] == baseline
+    rows = committed_model()["fitness"]["power"]["end_to_end"]["rows"]
+    baseline = committed_model()["fitness"]["false_confirm"]["baseline_arm"]
+    assert committed_model()["fitness"]["power"]["end_to_end"]["baseline_arm"] == baseline
     for row in rows:
         assert Fraction(row["conditional_joint"]) <= Fraction(row["conditional_stage1_confirm"])
         assert 0 <= row["conditional_joint_float"] <= 1
@@ -279,7 +286,7 @@ def test_the_conditional_power_matches_the_verifiers_independent_enumeration():
     """Two implementations, one definition. A number this artifact publishes about its
     own weakness is exactly the number nobody re-derives, so it is re-derived here
     against figures computed outside this repo."""
-    rows = installed_model()["fitness"]["power"]["end_to_end"]["rows"]
+    rows = committed_model()["fitness"]["power"]["end_to_end"]["rows"]
     by_key = {
         (row["kind"], row["carrier"] if row["kind"] == "single_carrier" else row["offset"]): row
         for row in rows
@@ -307,11 +314,11 @@ def test_the_conditional_rows_use_the_same_baseline_the_false_confirm_block_name
 def _promoted(tmp_path) -> tuple[ValidationRecord, dict, dict]:
     from loop.cli import _pr_eligible_record
 
-    cal = load_calibration(REAL_MODEL)
+    cal = installed_calibration()
     record, base, cand = _calibrated_record(tmp_path)
     first = _first_decision(record)
-    cb = _results({"A1": 3, "G4": 1, "G5": 3, "G2": 3}, ATTEMPTS)
-    cc = _results({"A1": 10, "G4": 7, "G5": 10, "G2": 9}, ATTEMPTS)
+    cb = _results({"A1": 3, "G4": 1, "G5": 3, "G2": 3, **UNMOVED}, ATTEMPTS)
+    cc = _results({"A1": 10, "G4": 7, "G5": 10, "G2": 9, **UNMOVED}, ATTEMPTS)
     decision = confirmed(first, cb, cc, calibration=cal)
     assert decision.outcome == ACCEPT
     write_confirmation_record(
