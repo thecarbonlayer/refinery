@@ -26,13 +26,22 @@ re-established against.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from itertools import combinations, permutations
 from pathlib import Path
 
 import pytest
 
-from loop.acceptance import ACCEPT, CONFIRM, Decision, calibration_digest, confirmed, evaluate
+from loop.acceptance import (
+    ACCEPT,
+    CONFIRM,
+    Decision,
+    calibration_digest,
+    confirmed,
+    decision_digest,
+    evaluate,
+)
 from loop.validate import calibration_status
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -136,6 +145,13 @@ def test_no_fabricated_first_confirm_can_be_accepted_on_a_null_pair(calibration)
                     "regime": "section_calibration",
                     "calibration_digest": calibration_digest(calibration),
                 },
+            )
+            # Bound to its own claim as well: `confirmed()` requires both digests
+            # whenever a calibration is in hand, so a fabricated record has to be as
+            # well-formed as a real one before it can be an attack on the RULE rather
+            # than an attack on the bookkeeping.
+            first = dataclasses.replace(
+                first, raw={**first.raw, "decision_digest": decision_digest(first)}
             )
             decision = confirmed(first, fb, fc, calibration=calibration)
             if decision.outcome == ACCEPT:

@@ -826,8 +826,13 @@ def test_confirm_cli_judges_a_calibrated_claim_against_its_computed_quantile(
         return run
 
     # Unwired (no artifact reachable): the calibrated claim cannot be judged at all.
+    # The refusal now comes from the SECTION being calibration-required rather than from
+    # the record saying it was calibrated -- a record's own fields are deletable, and a
+    # verification pass showed exactly that being used to buy an uncalibrated
+    # confirmation of a calibrated claim. Same case, same no-artifact-written path,
+    # earlier and better-named refusal.
     monkeypatch.setitem(validate_mod._SECTION_MODEL, "compaction", tmp_path / "absent.json")
-    with pytest.raises(SystemExit, match="confirmation could not be measured"):
+    with pytest.raises(SystemExit, match="decided by a measured null model or not at all"):
         run_confirmation(
             candidate,
             it_dir,

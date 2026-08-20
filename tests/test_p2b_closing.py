@@ -424,7 +424,15 @@ def test_the_joint_stage2_predicate_agrees_with_the_real_confirmed_on_sampled_ve
     """The same check for stage 2, at the confirmation's own ten-attempt counts, with
     the carrier set varied across the sample so the per-carrier gate, the guard gate
     and the positivity gate all get exercised against the real function."""
-    from loop.acceptance import CONFIRM, Decision, calibration_digest, confirmed
+    import dataclasses
+
+    from loop.acceptance import (
+        CONFIRM,
+        Decision,
+        calibration_digest,
+        confirmed,
+        decision_digest,
+    )
     from loop.calibrate import (
         CONFIRMATION_GUARDS,
         _stage2_accepts,
@@ -465,6 +473,12 @@ def test_the_joint_stage2_predicate_agrees_with_the_real_confirmed_on_sampled_ve
             improved_tasks=improved,
             confirm_tasks=tuple(sorted(SUPPORTED)),
             raw={"regime": "section_calibration", "calibration_digest": calibration_digest(cal)},
+        )
+        # `confirmed()` requires the decision digest too, whenever a calibration is in
+        # hand — an absent one refuses exactly like a wrong one, so a fabricated first
+        # decision binds itself the same way `evaluate()` binds a real one.
+        first = dataclasses.replace(
+            first, raw={**first.raw, "decision_digest": decision_digest(first)}
         )
         got = _stage2_accepts(
             diffs, SPLIT_OF, quantiles, task_quantiles, improved, CONFIRMATION_GUARDS

@@ -1246,6 +1246,44 @@ def _stage1_mass(
     return mass
 
 
+def _conditional_stage1_mass(
+    rates: dict[str, Fraction],
+    attempts: dict[str, int],
+    alt_rates: dict[str, Fraction],
+    baseline_counts: dict[str, int],
+    task_split: dict[str, str],
+    quantiles: dict[str, Fraction],
+) -> dict[tuple[str, tuple[str, ...]], Fraction]:
+    """The same {(evidence split, carriers): probability} map as `_stage1_mass`, but
+    with the BASELINE side FIXED at one recorded arm's own pass counts.
+
+    Every judgment this pipeline makes compares a candidate against ONE designated
+    baseline run, not against a fresh draw from the null. Marginalising over baselines
+    answers "how would this rule behave across all the baselines we might have had",
+    which is a fact about the design; conditioning on the arm actually in use answers
+    "how will it behave on the comparisons we are going to make", which is a fact about
+    this program. Both are published, and they differ a lot here: the designated arm
+    drew low on two tasks, which makes movement easier to demonstrate in BOTH
+    directions -- more true detections and more false ones.
+    """
+    tasks = tuple(sorted(rates))
+    pmfs = {t: _binom_pmf(attempts[t], alt_rates[t]) for t in tasks}
+    mass: dict[tuple[str, tuple[str, ...]], Fraction] = {}
+    for combo in product(*(range(attempts[t] + 1) for t in tasks)):
+        prob = Fraction(1)
+        diffs = {}
+        for t, k in zip(tasks, combo, strict=True):
+            prob *= pmfs[t][k]
+            diffs[t] = Fraction(k - baseline_counts[t], attempts[t])
+        if prob == 0:
+            continue
+        ok, split, carriers = _stage1_verdict(diffs, task_split, quantiles)
+        if ok:
+            key = (split, carriers)
+            mass[key] = mass.get(key, Fraction(0)) + prob
+    return mass
+
+
 def _stage2_split_mass(
     rates: dict[str, Fraction],
     attempts: dict[str, int],
@@ -1296,6 +1334,7 @@ def _end_to_end_row(
     split_tasks: dict[str, tuple[str, ...]],
     guards: frozenset[str],
     attempts: int,
+    baseline_counts: dict[str, int] | None,
 ) -> dict:
     """One published joint detection rate: P(stage 1 CONFIRMs AND stage 2 ACCEPTs).
 
@@ -1303,6 +1342,15 @@ def _end_to_end_row(
     uniform improvement across the whole supported set. Stage 1 is judged at the
     suite's STANDARD attempt counts (that is what a first validation runs) and
     stage 2 at the confirmation's own, higher count.
+
+    Reported twice, and the second is the one that describes this program. The
+    MARGINAL figure averages over every baseline the null could have produced. The
+    CONDITIONAL figure fixes the designated baseline arm at the counts it actually
+    recorded, which is the comparison every real judgment makes. The false-CONFIRM
+    block publishes exactly the same pair against the same arm, so a reader can put
+    a detection rate beside a false-alarm rate without silently comparing a
+    conditional number against a marginal one -- which is what the first version of
+    this artifact invited.
     """
     alt = {
         t: min(Fraction(1), rates[t] + (offset if carrier in (None, t) else Fraction(0)))
@@ -1330,13 +1378,38 @@ def _end_to_end_row(
             p *= mass.get(on_split, Fraction(0))
         return p
 
-    by_split = {split: {"stage1_confirm": Fraction(0), "joint": Fraction(0)} for split in SPLITS}
-    for (split, carriers), prob in stage1.items():
-        row = by_split.setdefault(split, {"stage1_confirm": Fraction(0), "joint": Fraction(0)})
-        row["stage1_confirm"] += prob
-        row["joint"] += prob * accept_probability(carriers)
-    stage1_total = sum((v["stage1_confirm"] for v in by_split.values()), Fraction(0))
-    joint_total = sum((v["joint"] for v in by_split.values()), Fraction(0))
+    conditional = (
+        _conditional_stage1_mass(
+            rates, standard_attempts, alt, baseline_counts, task_split, stage1_quantiles
+        )
+        if baseline_counts is not None
+        else {}
+    )
+
+    def fold(mass: dict[tuple[str, tuple[str, ...]], Fraction], prefix: str) -> dict:
+        by_split = {
+            split: {f"{prefix}stage1_confirm": Fraction(0), f"{prefix}joint": Fraction(0)}
+            for split in SPLITS
+        }
+        for (split, carriers), prob in mass.items():
+            row = by_split.setdefault(
+                split, {f"{prefix}stage1_confirm": Fraction(0), f"{prefix}joint": Fraction(0)}
+            )
+            row[f"{prefix}stage1_confirm"] += prob
+            row[f"{prefix}joint"] += prob * accept_probability(carriers)
+        return by_split
+
+    marginal_split = fold(stage1, "")
+    conditional_split = fold(conditional, "conditional_")
+
+    def totals(by_split: dict, prefix: str) -> tuple[Fraction, Fraction]:
+        return (
+            sum((v[f"{prefix}stage1_confirm"] for v in by_split.values()), Fraction(0)),
+            sum((v[f"{prefix}joint"] for v in by_split.values()), Fraction(0)),
+        )
+
+    stage1_total, joint_total = totals(marginal_split, "")
+    cond_stage1_total, cond_joint_total = totals(conditional_split, "conditional_")
     return {
         "kind": kind,
         "offset": _fraction_str(offset),
@@ -1348,14 +1421,23 @@ def _end_to_end_row(
         "stage1_confirm_float": float(stage1_total),
         "joint": _fraction_str(joint_total),
         "joint_float": float(joint_total),
+        "conditional_stage1_confirm": _fraction_str(cond_stage1_total),
+        "conditional_stage1_confirm_float": float(cond_stage1_total),
+        "conditional_joint": _fraction_str(cond_joint_total),
+        "conditional_joint_float": float(cond_joint_total),
         "by_evidence_split": {
             split: {
-                "stage1_confirm": _fraction_str(v["stage1_confirm"]),
-                "stage1_confirm_float": float(v["stage1_confirm"]),
-                "joint": _fraction_str(v["joint"]),
-                "joint_float": float(v["joint"]),
+                "stage1_confirm": _fraction_str(marginal_split[split]["stage1_confirm"]),
+                "stage1_confirm_float": float(marginal_split[split]["stage1_confirm"]),
+                "joint": _fraction_str(marginal_split[split]["joint"]),
+                "joint_float": float(marginal_split[split]["joint"]),
+                "conditional_stage1_confirm": _fraction_str(
+                    conditional_split[split]["conditional_stage1_confirm"]
+                ),
+                "conditional_joint": _fraction_str(conditional_split[split]["conditional_joint"]),
+                "conditional_joint_float": float(conditional_split[split]["conditional_joint"]),
             }
-            for split, v in sorted(by_split.items())
+            for split in sorted(marginal_split)
         },
     }
 
@@ -1367,6 +1449,7 @@ def _check_end_to_end(
     standard_attempts: dict[str, int],
     level: Fraction,
     guards: frozenset[str],
+    baseline: tuple[str, dict[str, int]] | None,
     *,
     offset: Fraction = POWER_OFFSET,
     attempts: int = POWER_ATTEMPTS,
@@ -1384,6 +1467,12 @@ def _check_end_to_end(
     Three alternatives, so the reader gets a curve rather than a number: +0.2 on
     one carrier at a time (the same offset the stage-1 rows use, one row per
     supported task) and +0.3/+0.5 applied uniformly across the supported set.
+
+    `baseline` is `(arm label, per-task pass counts)` for the DESIGNATED baseline arm,
+    or None when this pooling has no such arm. Every row carries a conditional rate
+    against it beside the marginal one, so the detection rates and the false-CONFIRM
+    rate published in the same artifact are conditional on the same recorded run and
+    can honestly be read against each other.
     """
     rates = {t: Fraction(*null_counts[t]) for t in sorted(supported)}
     split_tasks = {
@@ -1432,6 +1521,7 @@ def _check_end_to_end(
             split_tasks,
             guards,
             attempts,
+            baseline[1] if baseline else None,
         )
         for carrier in sorted(supported)
     ]
@@ -1449,12 +1539,19 @@ def _check_end_to_end(
             split_tasks,
             guards,
             attempts,
+            baseline[1] if baseline else None,
         )
         for uniform in uniform_offsets
     ]
     return {
         "confirmation_attempts": attempts,
         "guards": sorted(guards),
+        "baseline_arm": baseline[0] if baseline else None,
+        "baseline_counts": (
+            {t: [c, standard_attempts[t]] for t, c in sorted(baseline[1].items())}
+            if baseline
+            else None
+        ),
         "stage1_quantiles": {s: _fraction_str(q) for s, q in sorted(stage1_quantiles.items())},
         "stage2_quantiles": {s: _fraction_str(q) for s, q in sorted(stage2_quantiles.items())},
         "task_quantiles": {t: _fraction_str(q) for t, q in sorted(task_quantiles.items())},
@@ -1467,6 +1564,42 @@ def _check_end_to_end(
         ),
         "rows": rows,
     }
+
+
+def designated_baseline_counts(
+    arm_results: dict[str, dict],
+    supported: frozenset[str],
+    standard_attempts: dict[str, int],
+    baseline_arm: str = DESIGNATED_BASELINE,
+) -> tuple[dict[str, int] | None, str]:
+    """The designated baseline arm's own per-task pass counts, or None and the reason.
+
+    Resolved ONCE and handed to both blocks that condition on it -- the false-CONFIRM
+    rate and the end-to-end detection rates. Two resolvers would be two chances to
+    condition on two different arms and publish the pair as if they were comparable,
+    which is the exact defect the conditional rows were added to fix.
+
+    Refuses (None, reason) when the arm is not in this pooling, or when it did not run
+    at the suite's standard attempt counts: a designated baseline has to be a full-suite
+    run for "conditional on it" to describe a judgment anyone will actually make.
+    """
+    baseline = arm_results.get(baseline_arm)
+    if baseline is None:
+        return None, (
+            f"no arm labeled {baseline_arm!r} is in this pooling, so there is no "
+            "designated baseline to be conditional on"
+        )
+    counts: dict[str, int] = {}
+    for task in sorted(supported):
+        row = baseline["tasks"][task]
+        if int(row["attempts"]) != standard_attempts[task]:
+            return None, (
+                f"arm {baseline_arm!r} ran {task} at {row['attempts']} attempts, not the "
+                f"suite's standard {standard_attempts[task]} -- a designated baseline must "
+                "be a full-suite arm for a conditional rate to describe a real judgment"
+            )
+        counts[task] = int(row["passes"])
+    return counts, ""
 
 
 def _check_false_confirm(
@@ -1529,52 +1662,23 @@ def _check_false_confirm(
             "which is the comparison this pipeline actually makes."
         ),
     }
-    baseline = arm_results.get(baseline_arm)
-    if baseline is None:
+    counts, why_not = designated_baseline_counts(
+        arm_results, supported, standard_attempts, baseline_arm
+    )
+    if counts is None:
         out["conditional"] = None
         out["conditional_float"] = None
         out["by_evidence_split"] = {
             s: {"marginal": _fraction_str(p), "conditional": None}
             for s, p in sorted(marginal_split.items())
         }
-        out["baseline_note"] = (
-            f"no arm labeled {baseline_arm!r} is in this pooling, so the conditional "
-            "rate has no designated baseline to be conditional on"
-        )
+        out["baseline_note"] = why_not
         return out
-    counts = {}
-    for t in sorted(supported):
-        row = baseline["tasks"][t]
-        if int(row["attempts"]) != standard_attempts[t]:
-            out["conditional"] = None
-            out["conditional_float"] = None
-            out["by_evidence_split"] = {
-                s: {"marginal": _fraction_str(p), "conditional": None}
-                for s, p in sorted(marginal_split.items())
-            }
-            out["baseline_note"] = (
-                f"arm {baseline_arm!r} ran {t} at {row['attempts']} attempts, not the "
-                f"suite's standard {standard_attempts[t]} -- a designated baseline must "
-                "be a full-suite arm for the conditional rate to describe a real judgment"
-            )
-            return out
-        counts[t] = int(row["passes"])
 
     tasks = tuple(sorted(supported))
-    conditional_mass: dict[tuple[str, tuple[str, ...]], Fraction] = {}
-    pmfs = {t: _binom_pmf(standard_attempts[t], rates[t]) for t in tasks}
-    for combo in product(*(range(standard_attempts[t] + 1) for t in tasks)):
-        prob = Fraction(1)
-        diffs = {}
-        for t, k in zip(tasks, combo, strict=True):
-            prob *= pmfs[t][k]
-            diffs[t] = Fraction(k - counts[t], standard_attempts[t])
-        if prob == 0:
-            continue
-        ok, split, carriers = _stage1_verdict(diffs, task_split, quantiles)
-        if ok:
-            key = (split, carriers)
-            conditional_mass[key] = conditional_mass.get(key, Fraction(0)) + prob
+    conditional_mass = _conditional_stage1_mass(
+        rates, standard_attempts, rates, counts, task_split, quantiles
+    )
     conditional, conditional_split = summarize(conditional_mass)
     out["baseline_arm"] = baseline_arm
     out["baseline_counts"] = {t: [counts[t], standard_attempts[t]] for t in tasks}
@@ -1600,6 +1704,7 @@ def _check_power(
     level: Fraction,
     *,
     guards: frozenset[str] = CONFIRMATION_GUARDS,
+    baseline: tuple[str, dict[str, int]] | None = None,
     offset: Fraction = POWER_OFFSET,
     attempts: int = POWER_ATTEMPTS,
 ) -> dict:
@@ -1689,6 +1794,7 @@ def _check_power(
             standard_attempts,
             level,
             guards,
+            baseline,
             offset=offset,
             attempts=attempts,
         ),
@@ -1730,7 +1836,19 @@ def calibrate_model(labels: list[str], results_dir: Path, supported: frozenset[s
     stability = _check_stability(
         arm_results, labels, supported, task_split, standard_attempts, COVERAGE_LEVEL
     )
-    power = _check_power(null_counts, supported, task_split, standard_attempts, COVERAGE_LEVEL)
+    # Resolved once, so the conditional detection rates and the conditional
+    # false-CONFIRM rate are conditional on the SAME recorded arm -- the whole point
+    # of publishing them together.
+    baseline_counts, _ = designated_baseline_counts(arm_results, supported, standard_attempts)
+    baseline = (DESIGNATED_BASELINE, baseline_counts) if baseline_counts is not None else None
+    power = _check_power(
+        null_counts,
+        supported,
+        task_split,
+        standard_attempts,
+        COVERAGE_LEVEL,
+        baseline=baseline,
+    )
     false_confirm = _check_false_confirm(
         arm_results, null_counts, supported, task_split, standard_attempts, COVERAGE_LEVEL
     )

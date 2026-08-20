@@ -208,10 +208,19 @@ class ValidationRecord:
         `accepted` stays a bool because it is the SHIPPING gate (`pr` refuses anything
         false, and only a confirmation can make it true). This is what humans and
         reports read instead.
+
+        PENDING_CONFIRMATION describes a first CONFIRM that is still waiting. Once a
+        confirmation has ACCEPTED the candidate, "pending" stops being the cautious
+        answer and becomes the wrong one: the PR body printed it in its own header,
+        directly above the confirmation section stating the ACCEPT, so the document
+        contradicted itself about the only fact a reviewer needs. The confirmation
+        attached to this record (`loop.cli._pr_eligible_record`) is what settles it —
+        the first decision's own outcome never changes, and it should not have to.
         """
         outcome = self.rule.get("outcome") if self.rule.get("applied") else None
         if outcome == "CONFIRM":
-            return "PENDING_CONFIRMATION"
+            confirmed_outcome = (self.confirmation.get("confirmation") or {}).get("outcome")
+            return "ACCEPTED" if confirmed_outcome == "ACCEPT" else "PENDING_CONFIRMATION"
         return "ACCEPTED" if self.accepted else "REJECTED"
 
     def to_json(self) -> dict:

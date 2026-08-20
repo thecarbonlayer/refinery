@@ -1003,6 +1003,77 @@ def evaluate(
     )
 
 
+def verify_stage_binding(first: Decision, calibration: SectionCalibration) -> None:
+    """Both stage-binding checks, run whenever a calibration is in hand. Raises.
+
+    THE TRIGGER IS THE CALIBRATION, NEVER THE RECORD. The first version of this keyed
+    on ``first.raw["regime"] == "section_calibration"`` and skipped the decision-digest
+    check when that key was absent, which made the whole binding opt-in — by the record
+    being judged. A verification pass turned that into two end-to-end ACCEPTs on a pair
+    that honestly REJECTs: shrink ``improved_tasks`` from three carriers to the one that
+    repeated, then delete the digest (check skipped), then also delete the regime (both
+    checks skipped, while the CLI went on loading the calibration from the artifact and
+    judging against it). A record cannot be allowed to turn off its own audit by
+    forgetting to ask for it, so the trigger is now the calibration object, which comes
+    from an artifact on disk and a freshness check, not from the file under suspicion.
+
+    Three things must hold, and an ABSENT value fails exactly like a wrong one:
+
+    - the record must DECLARE it was judged under a calibration. A calibration in hand
+      and a record that does not say it was calibrated is a contradiction, and the
+      contradiction is the finding — do not resolve it silently in either direction;
+    - the calibration digest must match, so the two stages answer under ONE null model;
+    - the decision digest must match, so the confirmation re-tests the carrier set the
+      first decision actually claimed.
+
+    Honest limitation, stated rather than discovered later: these are unkeyed sha256
+    digests over the record's own content. They catch an edit — hand, script, or a
+    stale file — and they do NOT survive an adversary who edits the record and then
+    re-runs this code to recompute the digest. Making that impossible needs a signing
+    key this program does not have. What the digests buy is that no edit passes
+    ACCIDENTALLY and no check can be switched off by deletion.
+    """
+    raw = first.raw or {}
+    if raw.get("regime") != "section_calibration":
+        raise ValueError(
+            "a calibration was handed to this confirmation, but the first decision does "
+            f"not record that it was judged under one (regime={raw.get('regime')!r}, "
+            f"calibration in hand: {calibration.section!r} from {calibration.source}). "
+            "That is a contradiction, not a detail: either the record was edited, or the "
+            "wrong first decision is being confirmed. Re-validate the candidate."
+        )
+    for name, recorded, current, what in (
+        (
+            "calibration",
+            raw.get("calibration_digest"),
+            calibration_digest(calibration),
+            "the rates, coverage level and source the first decision was judged against",
+        ),
+        (
+            "decision",
+            raw.get("decision_digest"),
+            decision_digest(first),
+            "the carrier set and rerun set the first decision claimed",
+        ),
+    ):
+        if recorded == current:
+            continue
+        missing = recorded is None
+        raise ValueError(
+            f"stage binding failed on the {name} digest: the record "
+            + ("carries none at all" if missing else f"records {recorded!r}")
+            + f" and {what} digests to {current!r}. "
+            + (
+                "An absent digest is not 'nothing to check' — it is a calibrated record "
+                "that never bound itself, which is exactly what an edited record looks "
+                "like. "
+                if missing
+                else ""
+            )
+            + "Re-validate the candidate rather than repairing the record."
+        )
+
+
 def confirmed(
     first: Decision,
     confirm_baseline: dict,
@@ -1068,25 +1139,8 @@ def confirmed(
             "Load the section's calibration and pass calibration=; if it is no longer "
             "fresh, the claim needs re-measuring, not re-judging."
         )
-    if calibration is not None and (first.raw or {}).get("regime") == "section_calibration":
-        # The other half of the same wiring check: a calibration IS in hand, but is it
-        # the one this claim was judged against? Every other check in the loader passes
-        # independently on any fit, fresh, correctly-pinned artifact, so two different
-        # null models both install cleanly and the swap leaves no trace anywhere else.
-        # An ABSENT digest refuses too: a record that never bound itself to a model is
-        # exactly the record this check exists to stop being trusted.
-        recorded = (first.raw or {}).get("calibration_digest")
-        current = calibration_digest(calibration)
-        if recorded != current:
-            raise ValueError(
-                "this first decision was judged against a DIFFERENT calibration than the "
-                f"one handed to the confirmation: the record's calibration digest is "
-                f"{recorded!r} and the calibration in hand digests to {current!r} (rates, "
-                f"coverage level and source from {calibration.source}). Confirming a claim "
-                "under a null model it was never judged against answers a different "
-                "question under the same word. Re-validate the candidate against the "
-                "calibration you intend to confirm it with."
-            )
+    if calibration is not None:
+        verify_stage_binding(first, calibration)
     if first.outcome != CONFIRM:
         return first
     _parity(confirm_baseline, confirm_candidate)

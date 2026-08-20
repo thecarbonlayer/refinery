@@ -10,7 +10,6 @@ from loop.acceptance import (
     CONFIRM,
     FISHER_ALPHA,
     REJECT,
-    calibration_digest,
     confirmed,
     evaluate,
     fisher_one_sided,
@@ -839,6 +838,28 @@ _SPLIT_OF = {"A1": "held_in", "G4": "held_in", "G5": "held_in", "G2": "held_out"
 _STANDARD_ATTEMPTS = {t: (5 if s == "held_out" else 3) for t, s in _SPLIT_OF.items()}
 
 
+def _bound(first, cal):
+    """A hand-built first decision, bound the way `evaluate()` binds the ones it writes.
+
+    `confirmed()` requires BOTH stage-binding digests whenever a calibration is in hand
+    — an absent one refuses exactly like a wrong one, because a record that can switch
+    off its own audit by dropping a key is not audited. A fabricated record is still a
+    record, so it carries the same two digests. The decision digest is computed from the
+    decision itself, so it goes on in a second pass.
+    """
+    import dataclasses
+
+    from loop.acceptance import calibration_digest, decision_digest
+
+    raw = {
+        **(first.raw or {}),
+        "regime": "section_calibration",
+        "calibration_digest": calibration_digest(cal),
+    }
+    bound = dataclasses.replace(first, raw=raw)
+    return dataclasses.replace(bound, raw={**raw, "decision_digest": decision_digest(bound)})
+
+
 def _null_arm(passes, fp, *, subset):
     tasks = {}
     for name, p in passes.items():
@@ -1111,14 +1132,11 @@ def test_the_round_1_false_accept_reproduction_now_rejects():
         evidence_split="held_in",
         improved_tasks=("A1",),
         confirm_tasks=("A1", "G2", "G4", "G5"),
-        # A hand-built first decision must carry the calibration digest `evaluate()`
-        # writes on every calibrated decision: `confirmed()` binds the two stages to
-        # ONE null model, and an absent digest is a record that never bound itself.
-        raw={
-            "regime": "section_calibration",
-            "calibration_digest": calibration_digest(cal),
-        },
+        # Bound by `_bound` below: `confirmed()` requires BOTH stage-binding digests
+        # whenever a calibration is in hand, and a hand-built record is still a record.
+        raw={},
     )
+    first = _bound(first, cal)
     d = confirmed(first, baseline, candidate, calibration=cal)
     assert d.outcome == REJECT
     assert any("did not repeat on A1" in r for r in d.reasons), d.reasons
@@ -1554,14 +1572,11 @@ def test_a_confirmation_missing_a_supported_task_refuses(tmp_path):
         evidence_split="held_out",
         improved_tasks=("G2",),
         confirm_tasks=("A1", "G2", "G5"),  # no G4 — written before the amendment
-        # A hand-built first decision must carry the calibration digest `evaluate()`
-        # writes on every calibrated decision: `confirmed()` binds the two stages to
-        # ONE null model, and an absent digest is a record that never bound itself.
-        raw={
-            "regime": "section_calibration",
-            "calibration_digest": calibration_digest(cal),
-        },
+        # Bound by `_bound` below: `confirmed()` requires BOTH stage-binding digests
+        # whenever a calibration is in hand, and a hand-built record is still a record.
+        raw={},
     )
+    stale_record = _bound(stale_record, cal)
     counts = {n: v for n, v in _CONFIRM_COUNTS.items() if n != "G4"}
     fb, fc = _confirm_pair(stale_record, counts, counts | {"G2": (38, 50, "held_out")})
     with pytest.raises(ValueError, match="G4"):
@@ -1585,14 +1600,11 @@ def test_a_carrier_outside_the_null_model_refuses_rather_than_guessing(tmp_path)
         evidence_split="held_out",
         improved_tasks=("X2",),  # never a supported task
         confirm_tasks=("A1", "G2", "G4", "G5", "X2"),
-        # A hand-built first decision must carry the calibration digest `evaluate()`
-        # writes on every calibrated decision: `confirmed()` binds the two stages to
-        # ONE null model, and an absent digest is a record that never bound itself.
-        raw={
-            "regime": "section_calibration",
-            "calibration_digest": calibration_digest(cal),
-        },
+        # Bound by `_bound` below: `confirmed()` requires BOTH stage-binding digests
+        # whenever a calibration is in hand, and a hand-built record is still a record.
+        raw={},
     )
+    stale_record = _bound(stale_record, cal)
     counts = _confirm_counts(extra={"X2": (2, 4, "held_out")})
     moved = _confirm_counts({"G2": 38}, extra={"X2": (4, 4, "held_out")})
     fb, fc = _confirm_pair(stale_record, counts, moved)

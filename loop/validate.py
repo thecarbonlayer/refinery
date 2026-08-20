@@ -308,7 +308,7 @@ RULE_SECTIONS = frozenset({"tool_output", "compaction"})
 # Sections whose entry into the rule is CONDITIONAL on that fresh calibration. A
 # section outside this set decides on its own footing and never reads an artifact —
 # which is what keeps `tool_output`'s behavior identical to the day it was calibrated.
-_CALIBRATION_REQUIRED = frozenset({"compaction"})
+CALIBRATION_REQUIRED = frozenset({"compaction"})
 
 # field -> section. `compaction` and `compaction_prompt` are two fields of ONE section:
 # they change the same mechanism (when the harness compacts, and what it says while
@@ -665,7 +665,7 @@ def section_calibration(
     """The section's measured null model for THESE measurements, or None.
 
     None means the rule cannot run. What happens THEN depends on the section: one
-    outside `_CALIBRATION_REQUIRED` stays on the causal verdict, and a
+    outside `CALIBRATION_REQUIRED` stays on the causal verdict, and a
     calibration-required one is refused outright (`disposition_accepted`). None is
     returned for a section with no artifact at all (`tool_output`, which does not want
     one), for an artifact that has not been written yet, for one that failed its own
@@ -735,7 +735,7 @@ def rule_disposition(candidate: Candidate, baseline: dict, results: dict, covera
     # bound has to be a bound for. `_parity` in `evaluate()` already refuses a
     # candidate arm recorded under a different runner, so one side is enough.
     calibration, why_not = calibration_status(section, baseline.get("fingerprint") or {})
-    if calibration is None and section in _CALIBRATION_REQUIRED:
+    if calibration is None and section in CALIBRATION_REQUIRED:
         # FAIL CLOSED, and say so in the record. `applied: False` alone is ambiguous —
         # every uncalibrated section produces it, and for the others it means "the
         # causal verdict decides instead". For a calibration-REQUIRED section it means
