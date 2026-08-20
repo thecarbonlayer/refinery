@@ -4,9 +4,9 @@ The compaction half of this module now covers three axes a fix aimed at "remembe
 the recent thing" could otherwise overfit straight past, and each is a separate
 task rather than a variant of G2/G4 because each fails for a different reason:
 
-- CMP-5 (supersession): the CURRENT decision is stated TWICE — early and again in
-  the message that retires the old one — so recency alone cannot tell the approved
-  code from the retired one. Position-balanced by construction.
+- CMP-5 (supersession): the ask is two ROLES, approved and retired, and the
+  retirement fact is stated only in the superseding message — so a strategy that
+  keeps the early decision and drops that message cannot answer it at all.
 - CMP-6 (meaning): the fact carries no sentinel at all, so nothing can be matched
   on; the verdict comes from the pinned judge, and refuses outright when that
   judge has no committed validation behind it.
@@ -111,6 +111,17 @@ CMP7_SCRIPT = "service_log.py"
 # result lands INTACT. A fixture large enough to be cut at the door would make this
 # a tool_output task wearing a compaction task's name.
 CMP7_NOISE_LINES = 26
+# What one run of that fixture actually prints, MEASURED (the fixture test asserts this
+# exact length against the real script's output). The setup's turn budget is derived
+# from it, so it may not drift: a fixture edit that changes the noise size has to change
+# this number in the same commit or the test goes red.
+CMP7_NOISE_CHARS = 2964
+# How much slack the derived cap carries over the arithmetic minimum. Two full windows
+# of noise is what the premise NEEDS; the factor covers what the arithmetic cannot see —
+# the summary and retained tail a compaction leaves behind, a model that answers a bulk
+# turn without calling the tool, per-turn prose variation. Generous on purpose, and
+# still finite: an attempt that cannot compact twice must end as `error`, not run on.
+CMP7_TURN_SLACK = 3
 CMP7_RUN_AND_NOTE = (
     f"Run `python3 {CMP7_SCRIPT} 1` with the bash tool and tell me the last line it "
     f"printed. Note for later: the incident ticket is {CMP7_SENTINEL}."
@@ -752,14 +763,62 @@ def cmp7_rerun_prompt(section: int) -> str:
     )
 
 
+def cmp7_turn_budget() -> int:
+    """How many bulky turns the setup may spend before giving up — DERIVED, not chosen.
+
+    The first live run of this task errored 3/3 with ``count=1``: three bulky turns and
+    nineteen small filler turns produced one compaction, not two, so the attempt reported
+    a failed premise it could have reached with more of what it was already doing. The
+    turn count was the bug. The premise is two compactions, and the loop below now asks
+    for more bulk until it OBSERVES them — the same shape CMP-5 uses for its own premise.
+
+    That leaves only the giving-up point to fix, and a hardcoded one would be the same
+    mistake in a smaller place. It is computed instead, from carbon's own window
+    (``default_context_limit`` x ``trigger_fraction``) and from what one noise turn
+    actually contributes, measured through carbon's OWN estimator — so a config edit to
+    either the window or the trigger moves the cap with it, in the direction it should
+    move. ``CMP7_TURN_SLACK`` covers what the arithmetic cannot see.
+
+    Read from CONFIG at CALL time, never at import: `runner/` must not bind carbon's
+    config at import (`test_importing_the_task_registry_binds_no_carbon_config`), and a
+    candidate that edits the window has to move this number in the same run.
+    """
+    import math
+
+    from harness.compaction import estimate_tokens
+    from harness.harness_config import CONFIG
+
+    trigger = CONFIG.default_context_limit * CONFIG.compaction.trigger_fraction
+    # One bulk turn as the window sees it: the request, and the result it comes back
+    # with. A placeholder of the fixture's measured length is exact here — carbon's
+    # estimator counts characters, so the content's shape cannot change the number.
+    per_turn = estimate_tokens(
+        [
+            {"role": "user", "content": cmp7_rerun_prompt(2)},
+            {"role": "tool", "content": "x" * CMP7_NOISE_CHARS},
+        ]
+    )
+    if per_turn <= 0:  # pragma: no cover -- a turn carrying nothing cannot fill anything
+        raise ValueError("CMP-7's noise turn estimates as zero tokens; the fixture is empty")
+    return CMP7_TURN_SLACK * 2 * math.ceil(trigger / per_turn)
+
+
 def run_cmp7() -> Attempt:
     """A fact stated next to bulky tool output, asked for after repeated compaction.
 
     The realistic shape of a coding session's history is not tidy prose: it is a
     handful of sentences buried in walls of command output. G2 and G4 state their
     facts in quiet turns of their own, which is the easy case. Here the fact rides
-    along with a request for ~3,000 characters of log noise, two more bulky tool
-    turns follow, and only then is it asked for.
+    along with a request for ~3,000 characters of log noise, more bulky tool turns
+    follow, and only then is it asked for.
+
+    How MANY more is observed, not chosen. The first live run fixed the count at three
+    bulky turns plus filler and errored 3/3 with `count=1` — the second compaction never
+    accumulated before the filler ran out, so the task reported a failed premise instead
+    of reaching it. The premise is two compactions, so the loop keeps asking for bulk
+    until it sees them, giving up only at a cap derived from the config
+    (`cmp7_turn_budget`). Each turn names a different section, so the turns are distinct
+    evidence rather than one command repeated.
 
     Run at carbon's DEFAULT context limit, deliberately. G2 pins a 700-token window
     and pays for it: 35 of its 95 recorded replies came back as nothing but the
@@ -802,14 +861,14 @@ def run_cmp7() -> Attempt:
         a.send("We are triaging a ledger incident. Acknowledge briefly.")
         a.send(CMP7_RUN_AND_NOTE)
         compactions = int(a.just_compacted)
-        for section in (2, 3):
-            a.send(cmp7_rerun_prompt(section))
+        budget = cmp7_turn_budget()
+        spent = 0
+        while compactions < 2 and spent < budget:
+            spent += 1
+            # `spent + 1`: sections 2, 3, 4... — the fact-bearing turn already ran
+            # section 1, and every turn asks for a different one.
+            a.send(cmp7_rerun_prompt(spent + 1))
             compactions += int(a.just_compacted)
-        for i in range(1, 20):
-            a.send(_filler(i))
-            compactions += int(a.just_compacted)
-            if compactions >= 2:
-                break
         if compactions < 2:
             return Attempt(
                 False,

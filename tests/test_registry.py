@@ -2,6 +2,7 @@ import ast
 import contextlib
 import hashlib
 import json
+import math
 import pathlib
 import re
 import shutil
@@ -2209,7 +2210,12 @@ def test_cmp7_noise_fixture_is_bulky_opaque_and_never_carries_the_ticket(tmp_pat
     """
     from harness.harness_config import CONFIG
 
-    from runner.tasks.cluster_g import CMP7_SCRIPT, CMP7_SENTINEL, cmp7_noise_script
+    from runner.tasks.cluster_g import (
+        CMP7_NOISE_CHARS,
+        CMP7_SCRIPT,
+        CMP7_SENTINEL,
+        cmp7_noise_script,
+    )
 
     script = tmp_path / CMP7_SCRIPT
     script.write_text(cmp7_noise_script())
@@ -2220,13 +2226,149 @@ def test_cmp7_noise_fixture_is_bulky_opaque_and_never_carries_the_ticket(tmp_pat
         cwd=tmp_path,
         check=True,
     )
-    assert 2500 <= len(out.stdout) <= 3500, f"noise is {len(out.stdout)} chars, wanted ~3000"
+    # EXACT, not a range: the adaptive setup below derives its turn budget from this
+    # number, so a fixture edit that changes the noise size must change the constant the
+    # budget is computed from in the same commit — not drift away from it silently.
+    assert len(out.stdout) == CMP7_NOISE_CHARS, f"noise is {len(out.stdout)} chars"
+    assert 2500 <= CMP7_NOISE_CHARS <= 3500, "the contract asks for ~3000 characters"
     assert CMP7_SENTINEL not in cmp7_noise_script()
     assert CMP7_SENTINEL not in out.stdout
     assert len(out.stdout) < CONFIG.tool_output.budget, (
         "the noise must survive the tool_output door intact — otherwise CMP-7 grades "
         "truncation policy rather than what compaction carried"
     )
+
+
+def test_cmp7_turn_budget_covers_two_full_windows_of_its_own_noise():
+    """The cap is DERIVED from carbon's config and the fixture's measured size.
+
+    A hardcoded turn count is what the first live run got wrong: three bulky turns and
+    nineteen small filler turns produced one compaction, not two, and the task errored
+    3/3 on a premise it could have reached. The premise is not a turn count — it is two
+    compactions — so the loop asks for more bulk until it observes them, and the only
+    thing that has to be bounded is the giving-up point.
+
+    That bound is computed here from the window (`default_context_limit` x
+    `trigger_fraction`) and what one noise turn actually contributes, through carbon's
+    OWN estimator. It must be able to fill the window twice over — anything less could
+    give up before the premise was reachable — and it must still be finite.
+    """
+    from harness.compaction import estimate_tokens
+    from harness.harness_config import CONFIG
+
+    from runner.tasks.cluster_g import CMP7_NOISE_CHARS, cmp7_rerun_prompt, cmp7_turn_budget
+
+    trigger = CONFIG.default_context_limit * CONFIG.compaction.trigger_fraction
+    per_turn = estimate_tokens(
+        [
+            {"role": "user", "content": cmp7_rerun_prompt(2)},
+            {"role": "tool", "content": "x" * CMP7_NOISE_CHARS},
+        ]
+    )
+    assert per_turn > 0, "a turn that contributes nothing could never fill the window"
+
+    budget = cmp7_turn_budget()
+    assert budget * per_turn >= 2 * trigger, (
+        "the cap must be able to fill the window twice over, or the setup can give up "
+        "before two compactions were ever reachable"
+    )
+    # ...and still bounded: a generous cap is not an unbounded one. A live attempt that
+    # cannot compact twice has to end as `error`, not as an endless run.
+    assert budget <= 6 * math.ceil(2 * trigger / per_turn)
+
+
+def _cmp7_stand_in(compact_on):
+    """A stand-in Agent that fires compaction on the sends a test names.
+
+    Same shape as the wiring stand-in above (`_CapturingAgent`): enough of carbon's
+    surface for the task to run, and nothing that reaches a model. It is what makes the
+    adaptive loop testable OFFLINE — the property under test is the accumulation, and
+    that is arithmetic over `just_compacted`, not model behavior.
+    """
+    from types import SimpleNamespace
+
+    sends: list[str] = []
+
+    class _Agent:
+        def __init__(self, **kwargs):
+            self.messages: list[dict] = []
+            self.tracer = None
+            self.tools = None
+            self.just_compacted = False
+            self.session_env = SimpleNamespace(
+                scratch_root=Path(tempfile.mkdtemp(prefix="cmp7-stand-in-"))
+            )
+
+        def _turn(self, prompt):
+            sends.append(prompt)
+            self.messages.append({"role": "user", "content": prompt})
+            self.messages.append({"role": "assistant", "content": "ok"})
+
+        def send(self, prompt, **kwargs):
+            self._turn(prompt)
+            self.just_compacted = len(sends) in compact_on
+            return ""
+
+        def run(self, prompt, **kwargs):
+            self._turn(prompt)
+            self.just_compacted = False
+            from runner.tasks.cluster_g import CMP7_SENTINEL
+
+            return SimpleNamespace(
+                text=f"The incident ticket is {CMP7_SENTINEL}.",
+                turns=1,
+                stop_reason="stop",
+                usage={},
+                verified=None,
+                compactions=len(compact_on),
+            )
+
+        def close(self):
+            shutil.rmtree(self.session_env.scratch_root, ignore_errors=True)
+
+    return _Agent, sends
+
+
+def test_cmp7_keeps_adding_bulk_until_the_second_compaction_and_then_stops(monkeypatch):
+    """The adaptive property: the loop is driven by what it OBSERVES, not by a count.
+
+    It must stop as soon as the second compaction has fired — an attempt that keeps
+    piling on bulk after the premise is met spends live minutes for nothing — and the
+    turns it does send must be distinct, or three identical commands are one turn of
+    evidence wearing three hats.
+    """
+    from runner.tasks import cluster_g
+
+    agent_cls, sends = _cmp7_stand_in({3, 5})
+    monkeypatch.setattr("harness.agent.Agent", agent_cls)
+
+    attempt = cluster_g.run_cmp7()
+
+    assert attempt.outcome == "pass", attempt.detail
+    # intro, the fact-bearing bulk turn, three more bulk turns, then the question.
+    assert len(sends) == 6, sends
+    bulk = sends[1:5]
+    assert len(set(bulk)) == len(bulk), "each bulk turn must ask for something different"
+    assert "compactions=2" in attempt.detail
+
+
+def test_cmp7_errors_with_the_observed_count_only_once_the_derived_cap_is_spent(monkeypatch):
+    """The other half: giving up is still possible, and it happens at the cap rather
+    than at an arbitrary turn — with the count it actually observed in the record, so a
+    campaign can tell "the premise was never reachable" from "the task is broken"."""
+    from runner.tasks import cluster_g
+
+    agent_cls, sends = _cmp7_stand_in(set())
+    monkeypatch.setattr("harness.agent.Agent", agent_cls)
+
+    attempt = cluster_g.run_cmp7()
+
+    assert attempt.passed is False
+    assert attempt.outcome == "error"
+    assert "count=0" in attempt.detail
+    # The intro, the fact-bearing turn, and then every turn the cap allows — and no
+    # final question, because the task never reached the thing it measures.
+    assert len(sends) == 2 + cluster_g.cmp7_turn_budget()
 
 
 def test_cmp7_states_the_ticket_in_the_same_turn_that_asks_for_the_bulk():
