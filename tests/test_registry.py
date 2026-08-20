@@ -2206,7 +2206,9 @@ def test_cmp7_noise_fixture_is_bulky_opaque_and_never_carries_the_ticket(tmp_pat
       the answer is the conversation the compaction door has to carry;
     - the output arrives INTACT at carbon's shipped `tool_output` budget — a
       fixture large enough to be truncated at the door would make CMP-7 a
-      tool_output task wearing a compaction task's name.
+      tool_output task wearing a compaction task's name;
+    - the BULK rides on stderr and only the summary line on stdout, so the split is
+      what the next test needs to survive a pipe.
     """
     from harness.harness_config import CONFIG
 
@@ -2226,17 +2228,92 @@ def test_cmp7_noise_fixture_is_bulky_opaque_and_never_carries_the_ticket(tmp_pat
         cwd=tmp_path,
         check=True,
     )
-    # EXACT, not a range: the adaptive setup below derives its turn budget from this
-    # number, so a fixture edit that changes the noise size must change the constant the
-    # budget is computed from in the same commit — not drift away from it silently.
-    assert len(out.stdout) == CMP7_NOISE_CHARS, f"noise is {len(out.stdout)} chars"
+    # Carbon's bash tool returns `(stdout + stderr).strip()` (harness/sandbox.py), so
+    # the COMBINED length is what the window actually sees. EXACT, not a range: the
+    # setup's hard cap is derived from this number, so a fixture edit that changes the
+    # noise size must change the constant in the same commit rather than drift from it.
+    combined = out.stdout + out.stderr
+    assert len(combined) == CMP7_NOISE_CHARS, f"noise is {len(combined)} chars"
     assert 2500 <= CMP7_NOISE_CHARS <= 3500, "the contract asks for ~3000 characters"
+    # Almost nothing on stdout: one summary line, which is all a pipe can reach.
+    assert len(out.stdout) < 100, out.stdout
+    assert "complete" in out.stdout
+    assert len(out.stderr) > 2000, "the bulk must be the stderr half"
     assert CMP7_SENTINEL not in cmp7_noise_script()
-    assert CMP7_SENTINEL not in out.stdout
-    assert len(out.stdout) < CONFIG.tool_output.budget, (
+    assert CMP7_SENTINEL not in combined
+    assert CMP7_NOISE_CHARS < CONFIG.tool_output.budget, (
         "the noise must survive the tool_output door intact — otherwise CMP-7 grades "
         "truncation policy rather than what compaction carried"
     )
+
+
+def test_cmp7_noise_survives_the_pipe_the_model_actually_wrote(tmp_path):
+    """The defect this fixture shape exists to close, pinned through carbon's own tool.
+
+    The first live run errored 3/3 with `count=1`, and the instrumented cause was not
+    carbon at all: the ask says "tell me the last line it printed", and the model quite
+    reasonably ran `python3 service_log.py 1 | tail -n 1`. The tool result came back at
+    59 characters. The bulk this task is ABOUT never entered the window, the fill rate
+    ran 7.5x under what the setup assumed, and the second compaction never arrived.
+
+    Carbon's bash tool composes `(stdout + stderr).strip()` (harness/sandbox.py), and a
+    stdout pipe filters stdout alone. Putting the noise on stderr makes it unstrippable
+    by any pipe the model may reasonably write, without changing the ask, the verifier,
+    or the authoring-time pinning.
+
+    Run through carbon's REAL sandbox rather than a subprocess of my own: the property
+    is about what carbon returns to the model, so if carbon ever stops concatenating
+    stderr this must go red rather than keep asserting my belief about it.
+    """
+    from runner.helpers import rerun_pinned
+    from runner.tasks.cluster_g import CMP7_NOISE_CHARS, CMP7_SCRIPT, cmp7_noise_script
+
+    (tmp_path / CMP7_SCRIPT).write_text(cmp7_noise_script())
+    for command in (
+        f"python3 {CMP7_SCRIPT} 1",
+        f"python3 {CMP7_SCRIPT} 1 | tail -n 1",
+        f"python3 {CMP7_SCRIPT} 1 | head -c 40",
+        f"python3 {CMP7_SCRIPT} 1 > /dev/null",
+    ):
+        result = rerun_pinned(command, tmp_path)
+        body = (result.stdout + result.stderr).strip()
+        assert len(body) >= CMP7_NOISE_CHARS - 100, (
+            f"{command!r} stripped the bulk down to {len(body)} chars — the turn would "
+            "carry no weight into the window"
+        )
+
+
+def test_cmp7_projects_the_turns_it_still_needs_from_the_fill_it_observed():
+    """The stop-loss arithmetic, as a pure function.
+
+    The setup used to derive its budget from an ASSUMED per-turn contribution, and that
+    assumption is exactly what failed silently: it believed 762 tokens a turn while the
+    run was accumulating 101. So the loop now measures its own fill and projects from
+    THAT — the same observation-not-assumption discipline CMP-5's premise guard uses.
+
+    Deliberately pessimistic in one place, and it is worth naming: with no compaction
+    yet, the second one is costed as a full window from zero, because the floor a
+    compaction leaves behind is not knowable until one has fired. That makes the
+    projection give up slightly early rather than slightly late on a hopeless run, and
+    the healthy path never reaches it — at the fixture's real fill the premise arrives
+    in single-digit turns.
+    """
+    import math as _math
+
+    from runner.tasks.cluster_g import cmp7_turns_needed
+
+    # Nothing accumulating: unreachable, whatever the cap says.
+    assert cmp7_turns_needed(window=900, per_turn=0, trigger=3200, compactions=0) == _math.inf
+
+    # One compaction already fired: only the second is left to pay for.
+    assert cmp7_turns_needed(window=1400, per_turn=100, trigger=3200, compactions=1) == 18
+    # Past the trigger with one fired: the next send compacts, so nothing is needed.
+    assert cmp7_turns_needed(window=3300, per_turn=100, trigger=3200, compactions=1) == 0
+
+    # None fired yet: this window's remainder plus a full window for the second.
+    assert cmp7_turns_needed(window=1200, per_turn=100, trigger=3200, compactions=0) == 20 + 32
+    # The live defect's own numbers: 101 tokens a turn is a hopeless rate here.
+    assert cmp7_turns_needed(window=2124, per_turn=101, trigger=3200, compactions=1) > 10
 
 
 def test_cmp7_turn_budget_covers_two_full_windows_of_its_own_noise():
@@ -2277,8 +2354,12 @@ def test_cmp7_turn_budget_covers_two_full_windows_of_its_own_noise():
     assert budget <= 6 * math.ceil(2 * trigger / per_turn)
 
 
-def _cmp7_stand_in(compact_on):
+def _cmp7_stand_in(compact_on, *, fill_chars=3000):
     """A stand-in Agent that fires compaction on the sends a test names.
+
+    ``fill_chars`` is what each turn adds to the window, so a test can drive the loop's
+    OBSERVED fill rate: the fixture's real weight by default, or the trickle the live
+    defect produced when the model piped the bulk away.
 
     Same shape as the wiring stand-in above (`_CapturingAgent`): enough of carbon's
     surface for the task to run, and nothing that reaches a model. It is what makes the
@@ -2302,11 +2383,18 @@ def _cmp7_stand_in(compact_on):
         def _turn(self, prompt):
             sends.append(prompt)
             self.messages.append({"role": "user", "content": prompt})
+            self.messages.append({"role": "tool", "content": "x" * fill_chars})
             self.messages.append({"role": "assistant", "content": "ok"})
+
+        def _reset_window(self):
+            """What a compaction leaves behind: head, summary, tail."""
+            self.messages = self.messages[:2] + [{"role": "user", "content": "[summary] ..."}]
 
         def send(self, prompt, **kwargs):
             self._turn(prompt)
             self.just_compacted = len(sends) in compact_on
+            if self.just_compacted:
+                self._reset_window()
             return ""
 
         def run(self, prompt, **kwargs):
@@ -2352,10 +2440,9 @@ def test_cmp7_keeps_adding_bulk_until_the_second_compaction_and_then_stops(monke
     assert "compactions=2" in attempt.detail
 
 
-def test_cmp7_errors_with_the_observed_count_only_once_the_derived_cap_is_spent(monkeypatch):
-    """The other half: giving up is still possible, and it happens at the cap rather
-    than at an arbitrary turn — with the count it actually observed in the record, so a
-    campaign can tell "the premise was never reachable" from "the task is broken"."""
+def test_cmp7_never_spends_more_than_the_config_derived_hard_cap(monkeypatch):
+    """Giving up is still possible, and it is still bounded. The cap is the stop-loss;
+    the observed fill decides everything before it."""
     from runner.tasks import cluster_g
 
     agent_cls, sends = _cmp7_stand_in(set())
@@ -2366,9 +2453,33 @@ def test_cmp7_errors_with_the_observed_count_only_once_the_derived_cap_is_spent(
     assert attempt.passed is False
     assert attempt.outcome == "error"
     assert "count=0" in attempt.detail
-    # The intro, the fact-bearing turn, and then every turn the cap allows — and no
-    # final question, because the task never reached the thing it measures.
-    assert len(sends) == 2 + cluster_g.cmp7_turn_budget()
+    # No final question: the task never reached the thing it measures.
+    assert 2 < len(sends) <= 2 + cluster_g.cmp7_turn_budget()
+
+
+def test_cmp7_gives_up_early_and_says_so_when_the_fill_it_observes_is_hopeless(monkeypatch):
+    """The live defect's shape, and the behavior that would have made it loud.
+
+    When the bulk is piped away the window creeps by ~100 tokens a turn instead of
+    ~740, and no number of remaining turns can reach two compactions. The old setup
+    spent its whole budget and reported `count=1` with nothing to explain it. Now the
+    loop measures its own fill, sees the premise is out of reach, stops, and records the
+    rate — so the next reader gets the cause instead of the symptom.
+    """
+    from runner.tasks import cluster_g
+
+    # ~25 tokens a turn: carbon's estimator counts characters // 4.
+    agent_cls, sends = _cmp7_stand_in(set(), fill_chars=60)
+    monkeypatch.setattr("harness.agent.Agent", agent_cls)
+
+    attempt = cluster_g.run_cmp7()
+
+    assert attempt.outcome == "error"
+    assert "count=0" in attempt.detail
+    assert "fill_per_turn=" in attempt.detail, "the observed rate must reach the record"
+    assert len(sends) < 2 + cluster_g.cmp7_turn_budget(), (
+        "a hopeless fill rate must stop the loop before the cap, not after it"
+    )
 
 
 def test_cmp7_states_the_ticket_in_the_same_turn_that_asks_for_the_bulk():

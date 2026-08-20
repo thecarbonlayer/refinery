@@ -111,10 +111,11 @@ CMP7_SCRIPT = "service_log.py"
 # result lands INTACT. A fixture large enough to be cut at the door would make this
 # a tool_output task wearing a compaction task's name.
 CMP7_NOISE_LINES = 26
-# What one run of that fixture actually prints, MEASURED (the fixture test asserts this
-# exact length against the real script's output). The setup's turn budget is derived
-# from it, so it may not drift: a fixture edit that changes the noise size has to change
-# this number in the same commit or the test goes red.
+# What one run of that fixture puts in front of the model, MEASURED: carbon's bash tool
+# returns `(stdout + stderr).strip()` (harness/sandbox.py), so this is the COMBINED
+# length, 39 characters of summary on stdout and the rest of the noise on stderr. The
+# setup's hard cap is derived from it, so it may not drift: a fixture edit that changes
+# the noise size has to change this number in the same commit or the test goes red.
 CMP7_NOISE_CHARS = 2964
 # How much slack the derived cap carries over the arithmetic minimum. Two full windows
 # of noise is what the premise NEEDS; the factor covers what the arithmetic cannot see —
@@ -122,6 +123,10 @@ CMP7_NOISE_CHARS = 2964
 # turn without calling the tool, per-turn prose variation. Generous on purpose, and
 # still finite: an attempt that cannot compact twice must end as `error`, not run on.
 CMP7_TURN_SLACK = 3
+# How many turns must have been observed before the loop trusts its own fill rate. One
+# turn's growth is a sample of the model's verbosity; several are a sample of the
+# fixture's weight.
+CMP7_MIN_OBSERVED_TURNS = 4
 CMP7_RUN_AND_NOTE = (
     f"Run `python3 {CMP7_SCRIPT} 1` with the bash tool and tell me the last line it "
     f"printed. Note for later: the incident ticket is {CMP7_SENTINEL}."
@@ -739,6 +744,16 @@ def cmp7_noise_script() -> str:
     The ticket appears nowhere in it. The only route to the answer is the sentence
     the user attached to the FIRST run request, which is exactly the thing repeated
     compaction has to carry.
+
+    The noise goes to STDERR and only the summary line to stdout, and that split is the
+    load-bearing part. The ask says "tell me the last line it printed", and the first
+    live run showed the model doing the obvious thing with it: `python3 service_log.py 1
+    | tail -n 1`, which handed back 59 characters. The bulk this task is ABOUT never
+    entered the window, the fill rate ran 7.5x under what the setup assumed, and the
+    second compaction never came. Carbon composes its bash result as
+    `(stdout + stderr).strip()` while a pipe filters stdout alone, so noise on stderr
+    reaches the model whatever the model writes — without changing the ask, the
+    verifier, or the pinning.
     """
     return (
         "import sys\n"
@@ -748,7 +763,8 @@ def cmp7_noise_script() -> str:
         "        f'2026-08-20T0{i % 10}:{i:02d}:{(i * 7) % 60:02d}Z svc-ledger "
         "worker-{i % 9} INFO '\n"
         "        f'heartbeat ok queue={i % 23} lag_ms={40 + i} retries={i % 4} "
-        "shard=ledger-{i % 5} section={section}'\n"
+        "shard=ledger-{i % 5} section={section}',\n"
+        "        file=sys.stderr,\n"
         "    )\n"
         "print(f'section {section} complete: {" + str(CMP7_NOISE_LINES) + "} records scanned')\n"
     )
@@ -763,32 +779,61 @@ def cmp7_rerun_prompt(section: int) -> str:
     )
 
 
+def cmp7_trigger() -> float:
+    """The window level at which carbon compacts, from carbon's own config.
+
+    Read at CALL time, never at import: `runner/` must not bind carbon's config at
+    import (`test_importing_the_task_registry_binds_no_carbon_config`), and a candidate
+    that edits the window has to move this number in the same run.
+    """
+    from harness.harness_config import CONFIG
+
+    return CONFIG.default_context_limit * CONFIG.compaction.trigger_fraction
+
+
+def cmp7_turns_needed(window: float, per_turn: float, trigger: float, compactions: int) -> float:
+    """Turns still needed to reach two compactions, at the fill rate OBSERVED so far.
+
+    The setup's stop-loss. A rate of zero — nothing accumulating — is infinite, which is
+    the honest answer and the one the live defect deserved.
+
+    Pessimistic in one named place: with no compaction yet, the second is costed as a
+    full window from zero, because the floor a compaction leaves behind is not knowable
+    until one has fired. That makes the projection give up slightly early on a hopeless
+    run rather than slightly late, and the healthy path never reaches it — at the
+    fixture's real weight the premise arrives in single-digit turns.
+    """
+    import math
+
+    if per_turn <= 0:
+        return math.inf
+    needed = max(0.0, trigger - window) / per_turn
+    if compactions < 1:
+        needed += trigger / per_turn
+    return needed
+
+
 def cmp7_turn_budget() -> int:
-    """How many bulky turns the setup may spend before giving up — DERIVED, not chosen.
+    """The HARD cap on loop turns — a stop-loss, not the operative bound.
 
-    The first live run of this task errored 3/3 with ``count=1``: three bulky turns and
-    nineteen small filler turns produced one compaction, not two, so the attempt reported
-    a failed premise it could have reached with more of what it was already doing. The
-    turn count was the bug. The premise is two compactions, and the loop below now asks
-    for more bulk until it OBSERVES them — the same shape CMP-5 uses for its own premise.
+    The first live run of this task errored 3/3 with ``count=1``, and the instrumented
+    cause was not a turn count at all: the model piped the noise away
+    (``| tail -n 1``), the tool result came back at 59 characters, and the window
+    crawled at 101 tokens a turn against the 762 this function assumed. The fixture now
+    puts its bulk on stderr so no pipe can reach it, and the loop derives what it still
+    needs from the fill it actually MEASURES (``cmp7_turns_needed``) rather than from
+    any assumption about the tool result.
 
-    That leaves only the giving-up point to fix, and a hardcoded one would be the same
-    mistake in a smaller place. It is computed instead, from carbon's own window
-    (``default_context_limit`` x ``trigger_fraction``) and from what one noise turn
-    actually contributes, measured through carbon's OWN estimator — so a config edit to
-    either the window or the trigger moves the cap with it, in the direction it should
-    move. ``CMP7_TURN_SLACK`` covers what the arithmetic cannot see.
-
-    Read from CONFIG at CALL time, never at import: `runner/` must not bind carbon's
-    config at import (`test_importing_the_task_registry_binds_no_carbon_config`), and a
-    candidate that edits the window has to move this number in the same run.
+    This number survives as the outer bound: whatever the observed rate says, an attempt
+    that cannot compact twice must end as ``error`` rather than run on. It is computed
+    from carbon's own window and the fixture's measured weight, so a config edit to the
+    window or the trigger moves it in the direction it should move.
     """
     import math
 
     from harness.compaction import estimate_tokens
-    from harness.harness_config import CONFIG
 
-    trigger = CONFIG.default_context_limit * CONFIG.compaction.trigger_fraction
+    trigger = cmp7_trigger()
     # One bulk turn as the window sees it: the request, and the result it comes back
     # with. A placeholder of the fixture's measured length is exact here — carbon's
     # estimator counts characters, so the content's shape cannot change the number.
@@ -816,9 +861,17 @@ def run_cmp7() -> Attempt:
     bulky turns plus filler and errored 3/3 with `count=1` — the second compaction never
     accumulated before the filler ran out, so the task reported a failed premise instead
     of reaching it. The premise is two compactions, so the loop keeps asking for bulk
-    until it sees them, giving up only at a cap derived from the config
-    (`cmp7_turn_budget`). Each turn names a different section, so the turns are distinct
+    until it sees them. Each turn names a different section, so the turns are distinct
     evidence rather than one command repeated.
+
+    How it decides to give up is measured too, and that is the second lesson from the
+    live runs. The setup's first cut derived its budget from an ASSUMED per-turn
+    contribution, and the assumption was wrong by 7.5x because the model piped the bulk
+    away — a silent `count=1` with nothing in the record to explain it. So the loop
+    tracks `estimate_tokens(a.messages)` across its own turns, projects what it still
+    needs at the rate it is actually seeing (`cmp7_turns_needed`), and stops when that
+    exceeds what the cap has left — recording the rate either way. The config-derived
+    cap (`cmp7_turn_budget`) remains as the outer stop-loss.
 
     Run at carbon's DEFAULT context limit, deliberately. G2 pins a 700-token window
     and pays for it: 35 of its 95 recorded replies came back as nothing but the
@@ -834,6 +887,7 @@ def run_cmp7() -> Attempt:
     protected slot, which is the same reason G2 and G4 open with one.
     """
     from harness.agent import APPROVAL_TOOLS
+    from harness.compaction import estimate_tokens
     from harness.sandbox import Sandbox, bash_tool
     from harness.tools import ToolRegistry
     from harness.workspace import Workspace
@@ -861,19 +915,38 @@ def run_cmp7() -> Attempt:
         a.send("We are triaging a ledger incident. Acknowledge briefly.")
         a.send(CMP7_RUN_AND_NOTE)
         compactions = int(a.just_compacted)
-        budget = cmp7_turn_budget()
-        spent = 0
-        while compactions < 2 and spent < budget:
+        cap = cmp7_turn_budget()
+        trigger = cmp7_trigger()
+        window = estimate_tokens(a.messages)
+        spent = grown = 0
+        growth = 0.0
+        while compactions < 2 and spent < cap:
+            before = window
             spent += 1
             # `spent + 1`: sections 2, 3, 4... — the fact-bearing turn already ran
             # section 1, and every turn asks for a different one.
             a.send(cmp7_rerun_prompt(spent + 1))
             compactions += int(a.just_compacted)
+            window = estimate_tokens(a.messages)
+            if not a.just_compacted:
+                # A compaction SHRINKS the window; folding that turn into the average
+                # would report a negative fill rate for a run that is filling fine.
+                growth += max(0.0, window - before)
+                grown += 1
+            fill = growth / grown if grown else 0.0
+            # Trust the rate only once several turns have shown it: one turn's growth
+            # is a sample of the model's verbosity, not of the fixture's weight.
+            if grown >= CMP7_MIN_OBSERVED_TURNS:
+                if cmp7_turns_needed(window, fill, trigger, compactions) > cap - spent:
+                    break
+        fill = growth / grown if grown else 0.0
         if compactions < 2:
             return Attempt(
                 False,
                 "error",
-                f"repeated-compaction setup did not fire twice (count={compactions})",
+                f"repeated-compaction setup did not fire twice (count={compactions} "
+                f"turns={spent}/{cap} window={window} fill_per_turn={fill:.0f} "
+                f"trigger={trigger:.0f})",
                 approvals=approvals,
                 turns=len(a.messages),
                 metrics=agent_metrics(a),
@@ -886,7 +959,8 @@ def run_cmp7() -> Attempt:
     return Attempt(
         passed=ok,
         outcome="pass" if ok else "fail",
-        detail=f"compactions={compactions} ticket_recalled={ok} reply={reply[:240]!r}",
+        detail=f"compactions={compactions} turns={spent} fill_per_turn={fill:.0f} "
+        f"ticket_recalled={ok} reply={reply[:240]!r}",
         approvals=approvals,
         turns=len(a.messages),
         metrics=agent_metrics(a, result=result),
