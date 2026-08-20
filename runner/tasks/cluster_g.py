@@ -525,6 +525,38 @@ def cmp5_verdict(reply: str) -> tuple[bool, str | None, str | None]:
     return ok, approved, retired
 
 
+def cmp5_outcome(reply: str) -> tuple[bool, str, str | None]:
+    """CMP-5's whole verdict: ``(passed, outcome, non_answer_detail)``.
+
+    Contract §5's principle, which is not G2's alone: a reply that never attempted the
+    answer must not be recorded as a compaction failure. CMP-5 asks for a two-role form,
+    and a reply that ignores it entirely — including one whose PROSE is correct — says
+    nothing about what compaction carried. It is ``not_attempted``.
+
+    This matters more here than it would on a miner, because CMP-5's pooled rate becomes
+    its own GATE: a drop past its null quantile REJECTs a candidate. Formatting outcomes
+    in that denominator would make the gate a measurement of obedience.
+
+    The line is drawn at the parse, and only there. Neither role parsed means the reply
+    never entered the form; once EITHER role parses, the model answered, and a wrong or
+    missing code is a real failure, exactly as before.
+
+    Known consequence, stated rather than hidden: an explicit denial ("I don't have
+    those codes") parses no roles either, so it lands in ``not_attempted`` even though it
+    IS a compaction failure in substance. That is a deliberate simplification of the rule
+    as specified — the alternative is a denial-detection heuristic
+    (``loop/judge_validate`` has one) inside a mechanical verifier, which is a different
+    decision from this one. The direction is conservative for the gate: denials leave the
+    pooled rate rather than depressing it, so the guard cannot fire on them.
+    """
+    ok, approved, retired = cmp5_verdict(reply)
+    if ok:
+        return True, "pass", None
+    if approved is None and retired is None:
+        return False, "not_attempted", "did not answer in the requested form"
+    return False, "fail", None
+
+
 def cmp5_supersession_pending(messages: list[dict]) -> bool:
     """Is the supersession message still sitting in the live transcript, verbatim?
 
@@ -596,14 +628,19 @@ def run_cmp5() -> Attempt:
             )
         result = a.run(CMP5_QUESTION)
         reply = result.text
-        ok, approved, retired = cmp5_verdict(reply)
+        approved, retired = cmp5_verdict(reply)[1:]
+        ok, outcome, non_answer = cmp5_outcome(reply)
     finally:
         a.close()  # the storage contract says close ends the scratch lifecycle
     return Attempt(
         passed=ok,
-        outcome="pass" if ok else "fail",
+        outcome=outcome,
         detail=f"compactions={compactions} approved_answer={approved!r} "
-        f"retired_answer={retired!r} reply={reply[:240]!r}",
+        f"retired_answer={retired!r} "
+        + (f"non_answer={non_answer!r} " if non_answer else "")
+        # `reply=` stays LAST, the same convention run_g2 keeps: a trailing-match
+        # extractor reads everything after it as the reply.
+        + f"reply={reply[:240]!r}",
         turns=len(a.messages),
         metrics=agent_metrics(a, result=result),
     )

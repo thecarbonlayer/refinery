@@ -2027,6 +2027,54 @@ def test_cmp5_passes_only_when_both_roles_parse_to_the_right_codes():
     assert cmp5_verdict("I do not have that decision.") == (False, None, None)
 
 
+def test_cmp5_records_a_reply_that_never_used_the_form_as_not_attempted():
+    """G2's contract-§5 principle, applied to the new guard.
+
+    CMP-5 asks for a two-role form, and a reply that ignores it entirely — including one
+    whose PROSE is correct — is not evidence about what compaction carried. Recording it
+    as `fail` would put a formatting outcome into the pooled rate, and that rate is this
+    guard's own gate: a drop past its null quantile REJECTs a candidate. A gate whose
+    denominator is polluted by non-answers is measuring the wrong thing.
+
+    The line is drawn where the parse is: neither role parsed means the reply never
+    entered the form at all. Once EITHER role parses, the model did answer and a wrong
+    or missing code is a real failure, exactly as before.
+    """
+    from runner.tasks.cluster_g import CMP5_CURRENT, CMP5_RETIRED, cmp5_outcome
+
+    assert cmp5_outcome(f"approved={CMP5_CURRENT} retired={CMP5_RETIRED}") == (
+        True,
+        "pass",
+        None,
+    )
+
+    # Correct in prose, never in the form: the answer is right and the attempt still
+    # tells us nothing about the two-role question that was asked.
+    prose = f"The approved approach is {CMP5_CURRENT}, and {CMP5_RETIRED} was retired earlier."
+    assert cmp5_outcome(prose) == (False, "not_attempted", "did not answer in the requested form")
+
+    # Parsed, and wrong: a real failure, unchanged.
+    swapped = cmp5_outcome(f"approved={CMP5_RETIRED} retired={CMP5_CURRENT}")
+    assert swapped[:2] == (False, "fail")
+    # One role answered is still an answer — the other is a real miss, not a non-answer.
+    assert cmp5_outcome(f"approved={CMP5_CURRENT}")[:2] == (False, "fail")
+
+
+def test_cmp5_only_the_non_answer_branch_publishes_its_reason():
+    """The detail string, pinned where it lands: `run_cmp5` records the parsed roles on
+    every attempt and the non-answer reason only on the branch that has one — the same
+    shape `run_g2` uses, so an analysis reading either task's records can count
+    non-answers the same way in both."""
+    import inspect
+
+    from runner.tasks import cluster_g
+
+    source = inspect.getsource(cluster_g.run_cmp5)
+    assert "cmp5_outcome(reply)" in source
+    assert "non_answer=" in source
+    assert "reply={reply[:240]!r}" in source
+
+
 def test_cmp5_waits_for_the_supersession_to_leave_the_live_transcript():
     """Premise enforcement by OBSERVATION, not by counting compactions.
 
