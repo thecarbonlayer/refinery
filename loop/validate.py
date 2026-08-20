@@ -337,7 +337,13 @@ _SECTION_SUPPORTED = {"compaction": frozenset({"A1", "G2", "G4", "G5"})}
 # is deliberately absent from this tuple and checked separately below: None is a real,
 # meaningful value there (a clean tree), where None anywhere here means "this artifact
 # does not say", which is never evidence of a match.
-_REQUIRED_PROVENANCE = ("config_version", "model", "carbon_sha")
+#
+# `runner_sha` is here as well as in the `computed_at_runner_sha` check, not instead of
+# it: that summary field is ONE arm's value (the first), so checking only it leaves every
+# other arm's verifier version unexamined against the measurements. An artifact pooled
+# across two verifier versions would pass — the exact mixture the null protocol forbids,
+# because a Δ across verifier versions is not a measurement of noise.
+_REQUIRED_PROVENANCE = ("runner_sha", "config_version", "model", "carbon_sha")
 
 # Tasks a confirmation pair must rerun for a section EVEN IF UNMOVED — the section's
 # known trade-off guards and its reachable security checks. Movement-only selection
@@ -566,13 +572,30 @@ def calibration_status(
         )
     rates: dict[str, Fraction] = {}
     for task in sorted(null_model):
-        rate = _parse_exact_fraction((null_model[task] or {}).get("null_rate"))
+        raw_rate = (null_model[task] or {}).get("null_rate")
+        rate = _parse_exact_fraction(raw_rate)
         if rate is None or not 0 <= rate <= 1:
             return None, (
                 f"section {section!r} is not calibrated: {where} carries an unreadable "
-                f"null_rate for {task} "
-                f"({(null_model[task] or {}).get('null_rate')!r}) — a rate that cannot be "
-                "read exactly has no null distribution, and this loader approximates nothing"
+                f"null_rate for {task} ({raw_rate!r}) — a rate that cannot be read exactly "
+                "has no null distribution, and this loader approximates nothing"
+            )
+        # Contract §4.1 amendment. Checked HERE as well as in `SectionCalibration`, and
+        # not only there, because this is the boundary that has to explain itself: the
+        # artifact reaching this point has already passed every fitness check and
+        # written `fit: true`, so a bare exception from the constructor would say the
+        # calibration is broken where the truth is that a TASK is. The reviewer's case
+        # is exactly this shape — G4 pooled 0/49 across seven arms, fitness clean, and a
+        # per-task quantile of 0 that no repeat or guard drop could ever fail.
+        if not 0 < rate < 1:
+            return None, (
+                f"section {section!r} is not calibrated: {where} carries a degenerate "
+                f"null_rate for {task} ({raw_rate}) — every supported task needs "
+                "0 < rate < 1. A task that never passes, or never fails, across all arms "
+                "has a null quantile of 0 at every attempt count, so its repeat and guard "
+                "gates could not be failed. This is a question about the task, not about "
+                "the calibration: take it to a human rather than installing a gate that "
+                "gates nothing."
             )
         rates[task] = rate
     level = _parse_exact_fraction(model.get("coverage_level"))

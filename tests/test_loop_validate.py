@@ -335,6 +335,8 @@ def _model(
     model=None,
     carbon_sha=None,
     dirty_sha=None,
+    force_passes=None,
+    saturate=frozenset(),
     mutate=None,
 ):
     """A round-2 null-model artifact, MEASURED by `loop.calibrate.calibrate_model`
@@ -360,8 +362,14 @@ def _model(
     for arms, subset in ((_FULL_ARMS, False), (_SUBSET_ARMS, True)):
         for label, passes in arms.items():
             tasks = {}
-            for task, p in passes.items():
+            for task, p in {**passes, **(force_passes or {})}.items():
                 attempts = 10 if subset else _STANDARD_ATTEMPTS[task]
+                # `saturate` means "passed every attempt in this arm", which depends on
+                # the arm's own attempt count -- a literal pass count would be illegal
+                # (passes > attempts) on the 3-attempt full-suite arms and would only
+                # ever exercise `calibrate_model` on data the runner cannot produce.
+                if task in saturate:
+                    p = attempts
                 tasks[task] = {
                     "split": _SPLIT_OF[task],
                     "attempts": attempts,
@@ -943,3 +951,80 @@ def test_main_confirm_writes_the_record_only_when_run_confirmation_succeeds(tmp_
     cli_mod.main()
     written = list(it_dir.glob("confirmation-*.json"))
     assert len(written) == 1
+
+
+# --- what must not install: degenerate rates and unchecked per-arm provenance -----
+
+
+def test_a_degenerate_pooled_rate_produces_a_fit_artifact_the_loader_refuses(tmp_path):
+    """Contract §4.1 amendment, end to end and honestly.
+
+    G4 never passes in ANY arm, so its pooled rate is 0/49. Every fitness check still
+    passes — grain reads the split MEAN (A1 and G5 still vary), goodness sees each arm
+    agreeing perfectly with a rate of zero, and stability sees nothing move — so
+    `calibrate_model` writes `fit: true`. Nothing at the artifact level catches it, and
+    G4's per-task quantile is 0 at every attempt count: the repeat and guard gates on
+    that task could not be failed.
+
+    The refusal therefore has to live at the load boundary, and it does. The situation
+    a human then has to look at is real: a task that never passes across seven arms is
+    not calibrated evidence, it is a broken or impossible task.
+    """
+    from fractions import Fraction
+
+    from loop.calibrate import COVERAGE_LEVEL, null_task_quantile
+    from loop.validate import calibration_status
+
+    path = _model(tmp_path, stamped_sha=FP["runner_sha"], force_passes={"G4": 0})
+    artifact = json.loads(path.read_text())
+    assert artifact["fitness"]["fit"] is True, (
+        "the artifact certifies itself — this is exactly why the loader must not trust "
+        "fitness alone"
+    )
+    assert artifact["null_model"]["G4"]["null_rate"] == "0/49"
+    assert null_task_quantile(Fraction(0, 49), 10, 10, COVERAGE_LEVEL) == 0
+
+    cal, why = calibration_status("compaction", FP, model_path=path)
+    assert cal is None
+    assert "G4" in why and "0/49" in why
+    assert "0 < rate < 1" in why
+
+
+def test_a_pooled_rate_of_one_is_refused_the_same_way(tmp_path):
+    """The mirror case: a task that never FAILS pins the same zero quantile."""
+    from loop.validate import calibration_status
+
+    path = _model(
+        tmp_path,
+        stamped_sha=FP["runner_sha"],
+        name="allpass.json",
+        saturate={"G4"},
+    )
+    artifact = json.loads(path.read_text())
+    assert artifact["null_model"]["G4"]["null_rate"] == "49/49", (
+        "fixture precondition: G4 passed every attempt of every arm"
+    )
+    cal, why = calibration_status("compaction", FP, model_path=path)
+    assert cal is None and "G4" in why and "0 < rate < 1" in why
+
+
+def test_a_single_arm_disagreeing_on_runner_sha_is_stale(tmp_path):
+    """`computed_at_runner_sha` is ONE arm's value (the first), and the artifact records
+    every arm's own provenance beside it. Checking only the summary field leaves the
+    other six arms unchecked against the measurements — an artifact pooled across two
+    verifier versions would pass, which is precisely the mix the null protocol exists to
+    forbid. `runner_sha` belongs in the per-arm loop with the rest."""
+    from loop.validate import calibration_status
+
+    def drift_one_arm(artifact):
+        assert artifact["provenance"][0]["runner_sha"] == FP["runner_sha"]
+        artifact["provenance"][-1]["runner_sha"] = "0" * 64
+
+    path = _model(tmp_path, stamped_sha=FP["runner_sha"], mutate=drift_one_arm)
+    artifact = json.loads(path.read_text())
+    assert artifact["computed_at_runner_sha"] == FP["runner_sha"], (
+        "the summary field still matches — only a per-arm row disagrees"
+    )
+    cal, why = calibration_status("compaction", FP, model_path=path)
+    assert cal is None
+    assert "runner_sha" in why and "STALE" in why

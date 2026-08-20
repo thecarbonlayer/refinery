@@ -86,6 +86,7 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 from functools import cache
 from math import comb
+from types import MappingProxyType
 
 from loop.calibrate import null_gain_quantile, null_task_quantile
 
@@ -183,7 +184,12 @@ class SectionCalibration:
     - ``supported``: the tasks the model covers. Gain and regression are judged on the
       mean over THESE tasks, per split, and nothing else.
     - ``null_rates``: each supported task's pooled null pass rate, as an EXACT
-      ``Fraction`` of the pooled integer counts. Exact, and checked to be exact: a
+      ``Fraction`` of the pooled integer counts, in a read-only mapping (the memos key
+      on these values, so a post-construction edit would move the bound underneath
+      quantiles already cached at the old rate). Every rate must be strictly interior,
+      ``0 < rate < 1`` (contract §4.1 amendment): a rate of exactly 0 or 1 gives that
+      task a null quantile of 0 at every attempt count, which is a gate nothing can
+      fail. Exact, and checked to be exact: a
       float rate is refused here rather than at the arithmetic, because
       ``loop.calibrate``'s memoized binomial pmf keys on ``(n, p)`` and Python hashes
       ``0.5`` and ``Fraction(1, 2)`` as the same key — one float would silently hand
@@ -234,6 +240,25 @@ class SectionCalibration:
                 f"SectionCalibration({self.section!r}): a null rate outside [0, 1] is not "
                 f"a pass rate: {out_of_range}"
             )
+        # Contract §4.1 amendment: DEGENERATE rates do not install. A pooled rate of
+        # exactly 0 or 1 makes that task's null difference distribution a point mass at
+        # zero, so its quantile is 0 at EVERY attempt count and any movement at all
+        # clears it — the per-task twin of the grain check's "a threshold below the
+        # finest representable movement gates nothing". Reviewer's reproduction: an
+        # artifact with G4 pooled 0/49 passes every fitness check, installs, and lets a
+        # single-attempt repeat ACCEPT. A task that never passes (or never fails) across
+        # all arms is not calibrated evidence; the honest move is to refuse and let a
+        # human look at the task.
+        degenerate = sorted(t for t, r in self.null_rates.items() if r in (0, 1))
+        if degenerate:
+            named = ", ".join(f"{t}={_frac(self.null_rates[t])}" for t in degenerate)
+            raise ValueError(
+                f"SectionCalibration({self.section!r}): degenerate null rate(s) {named} — "
+                "every supported task needs 0 < rate < 1. A rate of exactly 0 or 1 gives "
+                "that task a null quantile of 0 at every attempt count, which is a gate "
+                "nothing can fail. Re-measure the task or take it to a human; do not "
+                "install a bound that is really an absence."
+            )
         if not isinstance(self.coverage_level, Fraction):
             raise ValueError(
                 f"SectionCalibration({self.section!r}): coverage_level must be an exact "
@@ -253,6 +278,13 @@ class SectionCalibration:
                 "drop against. Contract §2 made guards GATES; a guard that cannot be "
                 "gated must not be installed as one."
             )
+        # Read-only from here on. `_cached_gain_quantile`/`_cached_task_quantile` memoize
+        # on the rate values, so a caller mutating this mapping after construction would
+        # move the bound for every judgment that followed while every already-computed
+        # quantile stayed at the old rate — a threshold silently disagreeing with the
+        # model it claims to come from, and no error anywhere. A frozen dataclass blocks
+        # rebinding the attribute; it does nothing about mutating the dict behind it.
+        object.__setattr__(self, "null_rates", MappingProxyType(dict(self.null_rates)))
 
     def to_json(self) -> dict:
         return {

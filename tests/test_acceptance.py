@@ -1634,3 +1634,162 @@ def test_module_docstring_amends_the_byte_for_byte_claim():
     doc = acceptance_mod.__doc__
     assert "byte for byte" in doc
     assert "confirmation collapse veto" in doc
+
+
+# --- boundaries, and the rate a gate cannot be failed at (§4.1 amendment) ---------
+#
+# A comparison whose exact boundary no test crosses is a comparison nobody has pinned:
+# the Task 3 review mutated `per[n] <= q` to `< q` in the repeat gate and all 452 tests
+# stayed green. Each test below straddles one boundary — one case exactly ON it, one
+# case one attempt past it — so the comparison itself, not merely its neighbourhood,
+# is what goes red.
+
+
+def _first_on(cal, task, passes):
+    """A calibrated first CONFIRM whose single carrier is `task`."""
+    first = evaluate(_cmp_run(), _cmp_run({task: passes}), calibration=cal)
+    assert first.outcome == CONFIRM and first.improved_tasks == (task,)
+    return first
+
+
+def test_the_repeat_gate_boundary_is_exact(tmp_path):
+    """Contract §2: the repeat "must EXCEED its 97.5% quantile". A1's quantile at the
+    confirmation's 50v50 counts is exactly 1/5, and 1/5 is a movement A1 can actually
+    produce there (10 of 50 attempts) — so the boundary is reachable, not theoretical.
+    Landing exactly on it is not exceeding it."""
+    from fractions import Fraction
+
+    cal = _null_model_calibration(tmp_path)
+    first = _first_on(cal, "A1", 43)
+    base_counts = _confirm_counts()
+
+    at = _confirm_counts({"A1": 37})  # +10/50 = exactly 1/5
+    fb, fc = _confirm_pair(first, base_counts, at)
+    assert Fraction(37 - 27, 50) == _q_task(cal, "A1", fb, fc) == Fraction(1, 5)
+    d = confirmed(first, fb, fc, calibration=cal)
+    assert d.outcome == REJECT
+    assert len(d.reasons) == 1, f"only the repeat gate should object: {d.reasons}"
+    assert "did not repeat on A1" in d.reasons[0]
+
+    past = _confirm_counts({"A1": 38})  # one attempt more: +11/50
+    ok = confirmed(first, *_confirm_pair(first, base_counts, past), calibration=cal)
+    assert ok.outcome == ACCEPT, "one attempt past the quantile is past it"
+
+
+def test_the_guard_gate_boundary_is_exact(tmp_path):
+    """The same straddle on the other side. G5's quantile at 50v50 is 9/50, and a drop
+    of exactly 9/50 is reachable. `per[g] < -q` means exactly -9/50 is INSIDE the null
+    band and must not veto; one attempt further out must.
+
+    A1 rises by exactly what G5 loses in both arms, so the supported-set mean is zero
+    either way — the guard is the only thing whose verdict can differ here.
+    """
+    from fractions import Fraction
+
+    cal = _null_model_calibration(tmp_path)
+    first = _first_on(cal, "G2", 38)
+    base_counts = _confirm_counts()
+
+    at = _confirm_counts({"G2": 38, "A1": 36, "G5": 22})  # G5 -9/50 exactly
+    fb, fc = _confirm_pair(first, base_counts, at)
+    assert Fraction(22 - 31, 50) == -_q_task(cal, "G5", fb, fc) == -Fraction(9, 50)
+    ok = confirmed(first, fb, fc, calibration=cal)
+    assert ok.outcome == ACCEPT, "a drop landing exactly on the quantile is inside it"
+
+    past = _confirm_counts({"G2": 38, "A1": 37, "G5": 21})  # one attempt further: -10/50
+    d = confirmed(first, *_confirm_pair(first, base_counts, past), calibration=cal)
+    assert d.outcome == REJECT
+    assert len(d.reasons) == 1, f"only the guard should object: {d.reasons}"
+    assert "guard G5 dropped beyond its own null quantile" in d.reasons[0]
+
+
+def test_the_guard_reason_names_the_quantile_the_comparison_used(tmp_path):
+    """Reason text and comparison must move together. A reason naming 9/50 beside a
+    comparison made against something else is a decision whose record does not describe
+    it — and a reader auditing the committed record would have no way to tell.
+
+    The quantile is read back out of `raw["guard_quantiles"]` and required to be BOTH
+    the number the reason prints AND the number the boundary above proved the
+    comparison uses, so the two cannot be changed independently.
+    """
+    from fractions import Fraction
+
+    cal = _null_model_calibration(tmp_path)
+    first = _first_on(cal, "G2", 38)
+    fb, fc = _confirm_pair(
+        first, _confirm_counts(), _confirm_counts({"G2": 38, "A1": 37, "G5": 21})
+    )
+    d = confirmed(first, fb, fc, calibration=cal)
+
+    recorded = d.raw["guard_quantiles"]["G5"]
+    assert recorded["attempts"] == {"G5": [50, 50]}
+    assert Fraction(recorded["quantile"]) == _q_task(cal, "G5", fb, fc)
+    assert f"-{recorded['quantile']}" in d.reasons[0], (
+        "the reason must print the quantile the decision recorded, not a second one"
+    )
+    assert recorded["coverage_level"] == _frac_str(cal.coverage_level)
+    # Every guard is adjudicated and recorded, not only the one that tripped.
+    assert set(d.raw["guard_quantiles"]) == set(cal.guards)
+
+
+def _frac_str(x):
+    return f"{x.numerator}/{x.denominator}"
+
+
+def test_a_degenerate_null_rate_is_refused_at_construction(tmp_path):
+    """Contract §4.1 amendment. A pooled rate of exactly 0 or 1 makes that task's null
+    distribution a point mass at zero, so its quantile is 0 and ANY movement clears it
+    — a gate nothing can fail, which is the same defect the grain check refuses at the
+    split level. The rate is not a smaller bound; it is an absent one."""
+    from fractions import Fraction
+
+    from loop.acceptance import SectionCalibration
+
+    def build(rate):
+        return SectionCalibration(
+            section="compaction",
+            supported=frozenset({"A1"}),
+            null_rates={"A1": rate},
+            coverage_level=Fraction(975, 1000),
+            guards=frozenset({"A1"}),
+            source="model-r2.json",
+        )
+
+    build(Fraction(1, 2))  # interior rates still construct
+    for degenerate in (Fraction(0), Fraction(0, 49), Fraction(1), Fraction(49, 49)):
+        with pytest.raises(ValueError, match="A1") as exc:
+            build(degenerate)
+        assert "0 < rate < 1" in str(exc.value)
+        assert _frac_str(degenerate) in str(exc.value), "the reason must name the rate"
+    with pytest.raises(ValueError, match="A1"):
+        build(Fraction(3, 2))  # outside [0, 1] entirely, refused as before
+
+
+def test_a_zero_quantile_gate_is_unreachable_because_the_rate_never_installs(tmp_path):
+    """The failure the amendment closes, shown rather than asserted: at a pooled rate of
+    0/49 the per-task quantile IS zero at every attempt count, so a single-attempt
+    repeat would have cleared the repeat gate. The refusal above is what stops that
+    calibration from ever reaching a judgment."""
+    from fractions import Fraction
+
+    from loop.calibrate import COVERAGE_LEVEL, null_task_quantile
+
+    for attempts in (3, 10, 50):
+        assert null_task_quantile(Fraction(0, 49), attempts, attempts, COVERAGE_LEVEL) == 0
+        assert null_task_quantile(Fraction(49, 49), attempts, attempts, COVERAGE_LEVEL) == 0
+    assert Fraction(1, 50) > 0, "and one attempt out of fifty would have cleared it"
+
+
+def test_null_rates_cannot_be_mutated_after_construction(tmp_path):
+    """The quantile memos key on the rates. A caller reaching into `null_rates` after
+    construction would move the bound for every judgment that followed while every
+    already-cached quantile stayed put — a threshold that silently disagrees with the
+    model it was built from. The mapping is read-only, so it cannot happen."""
+    from fractions import Fraction
+
+    cal = _null_model_calibration(tmp_path)
+    with pytest.raises(TypeError):
+        cal.null_rates["A1"] = Fraction(1, 3)
+    with pytest.raises(TypeError):
+        del cal.null_rates["A1"]
+    assert cal.null_rates["A1"] == Fraction(27, 49), "unchanged"
