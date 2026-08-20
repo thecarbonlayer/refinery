@@ -55,6 +55,9 @@ SUBSET_ARMS = (
     "r2-null-cmp-c",
     "r2-null-cmp-d",
     "r2-null-cmp-e",
+    "r2-null-cmp-f",
+    "r2-null-cmp-g",
+    "r2-null-cmp-h",
 )
 ALL_ARMS = FULL_ARMS + SUBSET_ARMS
 SUPPORTED = ("A1", "G2", "G4", "G5")
@@ -85,10 +88,10 @@ def _same_shape_pairs():
 
 
 def test_the_sweep_covers_every_same_shape_ordered_pair_of_the_eight_arms():
-    """The denominator, stated: 3x2 full-suite pairs plus 5x4 subset pairs."""
+    """The denominator, stated: 3x2 full-suite pairs plus 8x7 subset pairs."""
     pairs = list(_same_shape_pairs())
-    assert len(pairs) == 26
-    assert len(set(pairs)) == 26
+    assert len(pairs) == 62
+    assert len(set(pairs)) == 62
     assert {label for pair in pairs for label in pair} == set(ALL_ARMS)
 
 
@@ -214,12 +217,12 @@ def test_the_calibrated_replay_mode_exercises_the_calibrated_branch(tmp_path, ca
 
     d = _seed_results(tmp_path)
     report = replay_calibrated(d, model_path=MODEL)
-    # Eight arms make 56 ordered pairs. The 30 cross-shape ones are refused by the
+    # Eleven arms make 110 ordered pairs. The 48 cross-shape ones are refused by the
     # parity gates before any rule runs, which is behavior, not a skipped case.
-    assert report["pairs"] == 56
-    assert report["refused"] == 30
-    assert report["decided"] == 26
-    assert report["null_arm_pairs"] == 26
+    assert report["pairs"] == 110
+    assert report["refused"] == 48
+    assert report["decided"] == 62
+    assert report["null_arm_pairs"] == 62
     assert report["confirms"] == 0
     assert report["accepts"] == 0
     assert report["false_outcomes"] == []
@@ -228,4 +231,4 @@ def test_the_calibrated_replay_mode_exercises_the_calibrated_branch(tmp_path, ca
     assert main(["--results-dir", str(d), "--calibrated"]) == 0
     out = capsys.readouterr().out
     assert "calibrated" in out.lower()
-    assert "26" in out
+    assert "62" in out

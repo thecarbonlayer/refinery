@@ -257,10 +257,10 @@ def test_an_uncalibrated_confirmation_needs_no_digests_at_all(tmp_path):
 # definition: stage 1 against the DESIGNATED baseline arm's recorded counts, stage 2
 # fresh on both sides.
 VERIFIER_CONDITIONAL = {
-    ("single_carrier", "G2"): 0.02128,
-    ("single_carrier", "A1"): 0.00105,
-    ("uniform", "3/10"): 0.11791,
-    ("uniform", "1/2"): 0.46685,
+    ("single_carrier", "G2"): 0.01949299041537673,
+    ("single_carrier", "A1"): 0.0008715009269644425,
+    ("uniform", "3/10"): 0.11264710638665064,
+    ("uniform", "1/2"): 0.46017457475579,
 }
 
 

@@ -55,6 +55,9 @@ SUBSET_ARMS = (
     "r2-null-cmp-c",
     "r2-null-cmp-d",
     "r2-null-cmp-e",
+    "r2-null-cmp-f",
+    "r2-null-cmp-g",
+    "r2-null-cmp-h",
 )
 SUPPORTED = frozenset({"A1", "G2", "G4", "G5"})
 SPLIT_OF = {"A1": "held_in", "G4": "held_in", "G5": "held_in", "G2": "held_out"}
@@ -773,8 +776,8 @@ def test_swapping_the_artifact_between_the_two_stages_refuses(tmp_path):
     first = _first_decision(record)
 
     # A SECOND null model, measured the same way from the same protocol, differing by
-    # one attempt on one arm (r2-null-cmp-a's G4 goes 2/10 -> 1/10, pooling G4 at 5/59
-    # instead of 6/59). It is fit, fresh, and pinned to the right supported set, so
+    # one attempt on one arm (r2-null-cmp-a's G4 goes 2/10 -> 1/10, pooling G4 at 7/89
+    # instead of 8/89). It is fit, fresh, and pinned to the right supported set, so
     # every check the loader has ever had passes on it: it installs cleanly. Only the
     # digest of the rates the FIRST decision was judged against can tell that this is
     # not that model.
@@ -788,7 +791,7 @@ def test_swapping_the_artifact_between_the_two_stages_refuses(tmp_path):
         (arms_dir / f"{label}.json").write_text(json.dumps(data))
     swapped = calibrate_model(list(FULL_ARMS + SUBSET_ARMS), arms_dir, MODEL_SUPPORTED)
     assert swapped["fitness"]["fit"] is True, "a swap only proves something if it installs"
-    assert swapped["null_model"]["G4"]["null_rate"] == "5/59"
+    assert swapped["null_model"]["G4"]["null_rate"] == "7/89"
     path = tmp_path / "other-model.json"
     path.write_text(json.dumps(swapped))
     other = load_calibration(path)
