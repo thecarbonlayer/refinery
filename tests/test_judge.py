@@ -8,6 +8,7 @@ import hashlib
 import json
 from collections import Counter
 
+import pytest
 from model.fake import fake
 
 from loop import judge_validate
@@ -368,3 +369,75 @@ def test_main_writes_agreement_artifact(tmp_path):
     assert on_disk["judge_prompt_sha"] == JUDGE_PROMPT_SHA
     assert on_disk["model"] == provider.model
     assert on_disk["total_pairs"] == len(judge_validate.build_corpus())
+
+
+# --- Transport/provider failures (fail-closed) ----------------------------------
+
+
+def test_provider_exception_fails_closed():
+    """If the provider raises an exception (network, auth, API error), the judge
+    should catch it and return Judgment(False, "", "<provider error: ...>") so one
+    flaky call degrades that pair instead of crashing the validation."""
+
+    def failing_responder(messages):
+        raise RuntimeError("Model service unavailable")
+
+    provider = fake(scripted=failing_responder)
+    judgment = judged_equivalent("expected fact", "some answer", provider)
+    assert judgment.verdict is False
+    assert judgment.quote == ""
+    assert "provider error" in judgment.raw
+    assert "Model service unavailable" in judgment.raw
+
+
+def test_run_validation_guards_provider_exception_per_pair():
+    """Each pair's judge call should be guarded independently so one flaky call
+    records a disagreement (pair recorded with the error in raw) instead of
+    aborting the whole validation run."""
+
+    def responder_with_failure(messages):
+        text = messages[1]["content"]
+        if "fails" in text:
+            raise ValueError("API rate limit exceeded")
+        return "VERDICT: YES\nQUOTE: q"
+
+    corpus = [
+        _pair(answer="works", ground_truth=True),
+        _pair(answer="fails", ground_truth=True),
+        _pair(answer="works-too", ground_truth=True),
+    ]
+
+    provider = fake(scripted=responder_with_failure)
+    result = judge_validate.run_validation(corpus, provider)
+
+    # All three pairs should be present in the records, no exception raised.
+    assert result["total_pairs"] == 3
+    # The second pair should disagree (expected True, got False due to exception).
+    assert result["records"][1]["judge_verdict"] is False
+    assert "provider error" in result["records"][1]["raw"]
+    assert result["disagree_count"] >= 1
+
+
+# --- Clean denial / ground truth contradiction (loud assertion) ----------------
+
+
+def test_pairs_from_record_asserts_no_clean_denial_with_ground_truth():
+    """A corpus pair that is both a clean denial AND has ground_truth=True is a
+    contradiction: the mechanical verifier said the reply was correct, but the
+    reply explicitly says "I don't have that". This is an empirically-safe-today
+    case that a future corpus append might break. Assert loudly instead of
+    silently misclassifying."""
+
+    # Build a synthetic record where the reply is a clean denial (matches _DENIAL_RE)
+    # but the mechanical verifier scored it as True (passed).
+    reply_text = "I do not have access to this information"
+    synthetic_record = {
+        "task": "A1",
+        "passed": True,  # ground_truth will be True
+        "detail": f"compacted=True sentinel_recalled=True reply='{reply_text}'",
+        "attempt": 0,
+    }
+
+    # This should raise an AssertionError with a clear message.
+    with pytest.raises(AssertionError, match="clean denial.*ground_truth"):
+        judge_validate.pairs_from_record(synthetic_record, "synthetic.jsonl")

@@ -123,6 +123,17 @@ def pairs_from_record(record: dict, source_file: str) -> list[CorpusPair]:
     denial = _is_clean_denial(reply)
 
     def pair(fact: str, expected: str, ground_truth: bool) -> CorpusPair:
+        # Empirically safe today: a clean denial (explicit "I don't have it") paired
+        # with ground_truth=True would mean the mechanical verifier scored a refusal as
+        # correct. This contradicts the task design and would be a corpus error. Fail
+        # loudly instead of silently misclassifying — a future corpus append might hit
+        # this case and we want immediate visibility.
+        assert not (denial and ground_truth), (
+            f"Contradiction in corpus pair: clean denial ({reply!r}) "
+            f"paired with ground_truth=True. Mechanical verifier and denial detector "
+            f"disagree on this record (task={task}, fact={fact}, attempt={attempt}). "
+            f"This is a corpus error — see {source_file}."
+        )
         return CorpusPair(task, fact, expected, reply, ground_truth, denial, source_file, attempt)
 
     if task == "A1":
@@ -179,7 +190,12 @@ def run_validation(corpus: list[CorpusPair], provider) -> dict:
     """Run the judge over ``corpus`` and assemble the agreement artifact
     (contract §4 shape): overall agreement, the zero-YES-on-clean-denial
     check, per-pair records, a disagreement list with quotes, prompt sha,
-    model, counts, and ``pass``."""
+    model, counts, and ``pass``.
+
+    Each pair's judge call is guarded independently: if the judge call fails
+    (provider exception), that pair is recorded as a disagreement with the
+    error in raw, instead of aborting the whole validation run.
+    """
     records = []
     agree_count = 0
     disagreements = []
@@ -197,6 +213,7 @@ def run_validation(corpus: list[CorpusPair], provider) -> dict:
             "ground_truth": p.ground_truth,
             "judge_verdict": judgment.verdict,
             "quote": judgment.quote,
+            "raw": judgment.raw,
             "agree": agrees,
             "is_clean_denial": p.is_clean_denial,
         }

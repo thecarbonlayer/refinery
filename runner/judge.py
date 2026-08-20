@@ -101,6 +101,12 @@ def judged_equivalent(expected: str, answer: str, provider) -> Judgment:
     The payload sent is built from ONLY ``expected`` and ``answer`` (contract
     §4) — no transcript, no task instructions; there is nothing else in this
     function's signature for either to come from.
+
+    Fail-closed guarantee covers both output parsing AND transport: provider
+    exceptions (network, auth, rate-limit, service unavailable) return
+    Judgment(False, "", "<provider error: ...>") so one flaky call degrades
+    the pair rather than crashing the validation. The runner's own catch-all
+    remains the outer net.
     """
     from model import chat  # lazy: runner/ modules never bind carbon at import time
 
@@ -109,5 +115,9 @@ def judged_equivalent(expected: str, answer: str, provider) -> Judgment:
         {"role": "system", "content": JUDGE_PROMPT},
         {"role": "user", "content": payload},
     ]
-    response = chat(messages, provider=provider, temperature=0.0, max_tokens=512)
-    return _parse_judgment(response.content or "")
+    try:
+        response = chat(messages, provider=provider, temperature=0.0, max_tokens=512)
+        return _parse_judgment(response.content or "")
+    except Exception as exc:
+        error_msg = f"<provider error: {exc}>"
+        return Judgment(False, "", error_msg)
