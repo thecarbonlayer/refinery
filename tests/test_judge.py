@@ -633,6 +633,41 @@ def test_run_validation_fails_on_yes_for_clean_denial():
     assert result["pass"] is False
 
 
+def test_run_validation_never_counts_an_undelivered_verdict_as_agreement():
+    """The review's probe, kept as a test: a judge that delivers YES on positives and
+    times out on negatives used to score 100% agreement with a clean-denial gate pass
+    — and not one NO was ever delivered, because an undelivered judgment fails closed
+    to verdict=False, which happens to equal every negative ground truth. 306 of the
+    635 real corpus pairs are negative, so that hole was material.
+
+    A pair with no verdict is not evidence of agreement. It counts as NOT agreed, it
+    lands in the disagreement list, and the artifact says how many verdicts were
+    actually delivered — so a validation run the judge slept through cannot stamp
+    pass: true."""
+    corpus = [
+        _pair(answer="works", ground_truth=True),
+        _pair(answer="neg-denial", ground_truth=False, denial=True),
+        _pair(answer="neg-plain", ground_truth=False),
+    ]
+
+    def responder(messages):
+        text = messages[1]["content"]
+        if "works" in text:
+            return "VERDICT: YES\nQUOTE: works"
+        raise RuntimeError("timeout")  # ran=False: no verdict ever delivered
+
+    result = judge_validate.run_validation(corpus, fake(scripted=responder))
+
+    assert result["agree_count"] == 1
+    assert result["overall_agreement"] == 1 / 3
+    assert result["pass"] is False
+    assert result["delivered_count"] == 1
+    assert result["undelivered_count"] == 2
+    # The undelivered pairs are visible per record and in the disagreement list.
+    assert [r["ran"] for r in result["records"]] == [True, False, False]
+    assert result["disagree_count"] == 2
+
+
 def test_run_validation_empty_corpus_does_not_vacuously_pass():
     provider = fake(scripted=lambda messages: "VERDICT: YES\nQUOTE: q")
     result = judge_validate.run_validation([], provider)

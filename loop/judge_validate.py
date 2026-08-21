@@ -198,6 +198,16 @@ def run_validation(corpus: list[CorpusPair], provider) -> dict:
     Each pair's judge call is guarded independently: if the judge call fails
     (provider exception), that pair is recorded as a disagreement with the
     error in raw, instead of aborting the whole validation run.
+
+    An UNDELIVERED verdict is never agreement. An undelivered judgment
+    (``Judgment.ran`` False — provider failure, unparseable output) fails
+    closed to ``verdict=False``, and that False happens to equal every
+    negative pair's ground truth — so comparing verdicts alone would let a
+    judge that times out on negatives score perfect agreement without ever
+    delivering a NO (306 of the 635 real pairs are negative). A pair with no
+    verdict counts as NOT agreed, joins the disagreement list, and the
+    artifact records how many verdicts were actually delivered, so a mostly
+    dead judge fails the 95% gate by construction.
     """
     records = []
     agree_count = 0
@@ -205,7 +215,7 @@ def run_validation(corpus: list[CorpusPair], provider) -> dict:
     clean_denial_yes = []
     for p in corpus:
         judgment = judged_equivalent(p.expected, p.answer, provider)
-        agrees = judgment.verdict == p.ground_truth
+        agrees = judgment.ran and judgment.verdict == p.ground_truth
         agree_count += int(agrees)
         record = {
             "task": p.task,
@@ -215,6 +225,7 @@ def run_validation(corpus: list[CorpusPair], provider) -> dict:
             "expected": p.expected,
             "ground_truth": p.ground_truth,
             "judge_verdict": judgment.verdict,
+            "ran": judgment.ran,
             "quote": judgment.quote,
             "raw": judgment.raw,
             "agree": agrees,
@@ -229,10 +240,13 @@ def run_validation(corpus: list[CorpusPair], provider) -> dict:
     total = len(corpus)
     overall_agreement = (agree_count / total) if total else 0.0
     clean_denial_total = sum(1 for p in corpus if p.is_clean_denial)
+    undelivered = sum(1 for record in records if not record["ran"])
     passes = total > 0 and overall_agreement >= AGREEMENT_THRESHOLD and not clean_denial_yes
 
     return {
         "pass": passes,
+        "delivered_count": total - undelivered,
+        "undelivered_count": undelivered,
         "judge_prompt_sha": JUDGE_PROMPT_SHA,
         # The parser half of the artifact's identity: the activation gate refuses
         # an artifact measured under any other parser version, exactly as it
