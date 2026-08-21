@@ -2056,6 +2056,17 @@ def test_cmp5_duplicate_role_assignments_resolve_last_wins():
     ok, approved, retired = cmp5_verdict(f"{right} {correction} {wrong}")
     assert ok is False and approved == CMP5_RETIRED and retired == CMP5_CURRENT
 
+    # Last-wins is PER ROLE: a correction that restates only one role supersedes
+    # only that role, and the un-corrected role's earlier value stands. Pinned so
+    # a future clear-everything-on-correction implementation cannot pass silently
+    # — under that reading the retired role would come back empty and this pass
+    # would flip.
+    partial = f"approved={CMP5_RETIRED} retired={CMP5_RETIRED} {correction} approved={CMP5_CURRENT}"
+    v = cmp5_outcome(partial, _judge_never_called)
+    assert (v.passed, v.outcome, v.verifier) == (True, "pass", "mechanical")
+    ok, approved, retired = cmp5_verdict(partial)
+    assert (ok, approved, retired) == (True, CMP5_CURRENT, CMP5_RETIRED)
+
 
 def test_cmp5_outcome_decides_mechanically_wherever_determinism_has_the_verdict():
     """Decision 12's rule, as the layer order: mechanical checks decide wherever they
