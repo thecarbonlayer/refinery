@@ -99,20 +99,51 @@ def test_validation_status_requires_the_artifact_to_match_the_parser_version(tmp
                 "pass": True,
                 "judge_prompt_sha": JUDGE_PROMPT_SHA,
                 "judge_parser_version": JUDGE_PARSER_VERSION,
+                "model": "m",
             }
         )
     )
-    assert validation_status(good) == (True, "")
+    assert validation_status(good, judge_model="m") == (True, "")
 
     for version in (None, JUDGE_PARSER_VERSION + 1, "2"):
-        artifact = {"pass": True, "judge_prompt_sha": JUDGE_PROMPT_SHA}
+        artifact = {"pass": True, "judge_prompt_sha": JUDGE_PROMPT_SHA, "model": "m"}
         if version is not None:
             artifact["judge_parser_version"] = version
         stale = tmp_path / "stale.json"
         stale.write_text(json.dumps(artifact))
-        ok, why = validation_status(stale)
+        ok, why = validation_status(stale, judge_model="m")
         assert ok is False
         assert "judge_parser_version" in why and "re-run" in why
+
+
+def test_validation_status_binds_the_artifact_to_the_live_judge_model(tmp_path):
+    """The third identity pin, same construction as the prompt sha and the parser
+    version: agreement is a measurement of a specific JUDGE, and the judge is a
+    model as much as it is a prompt and a parser. Validate with model A, flip the
+    provider to model B, and the artifact used to keep activating CMP-5/6 —
+    describing a judge that is not the one running. The gate now takes the live
+    judge's model identity and refuses on mismatch; a missing key refuses too (an
+    artifact that never said which model it measured is not evidence about any)."""
+    from runner.judge import JUDGE_PARSER_VERSION, JUDGE_PROMPT_SHA, validation_status
+
+    artifact = {
+        "pass": True,
+        "judge_prompt_sha": JUDGE_PROMPT_SHA,
+        "judge_parser_version": JUDGE_PARSER_VERSION,
+        "model": "model-A",
+    }
+    path = tmp_path / "agreement.json"
+    path.write_text(json.dumps(artifact))
+    assert validation_status(path, judge_model="model-A") == (True, "")
+
+    ok, why = validation_status(path, judge_model="model-B")
+    assert ok is False
+    assert "model-A" in why and "model-B" in why and "re-run" in why
+
+    del artifact["model"]
+    path.write_text(json.dumps(artifact))
+    ok, why = validation_status(path, judge_model="model-A")
+    assert ok is False and "model" in why
 
 
 def test_the_committed_agreement_artifact_is_refused_until_revalidated_for_this_parser():
@@ -127,7 +158,8 @@ def test_the_committed_agreement_artifact_is_refused_until_revalidated_for_this_
     current version. Fail closed is the designed state here, not a regression."""
     from runner.judge import validation_status
 
-    ok, why = validation_status()
+    # Any live model: the parser-version refusal comes first regardless.
+    ok, why = validation_status(judge_model="any-model")
     assert ok is False
     assert "judge_parser_version" in why
 

@@ -84,22 +84,29 @@ AGREEMENT_PATH = (
 )
 
 
-def validation_status(path: Path | None = None) -> tuple[bool, str]:
-    """Is this judge validated for THIS prompt? ``(ok, reason)``.
+def validation_status(path: Path | None = None, *, judge_model: str) -> tuple[bool, str]:
+    """Is this judge validated for THIS prompt, parser, and model? ``(ok, reason)``.
 
     Contract §4: the judged verifiers' activation (CMP-6's verdict, CMP-5's
     extraction lane) is gated on
     ``iterations/judge-validation/agreement.json`` existing, recording
-    ``pass: true``, AND carrying the CURRENT ``JUDGE_PROMPT_SHA`` and
-    ``JUDGE_PARSER_VERSION``. Any other state returns False with the reason,
-    and the tasks turn that into an ``error`` outcome — never a mechanical
-    fallback, which would silently replace a meaning check with a substring
-    check and report the result under the same task name.
+    ``pass: true``, AND carrying the CURRENT ``JUDGE_PROMPT_SHA``,
+    ``JUDGE_PARSER_VERSION``, and the model the live judge will actually run
+    on (``judge_model`` — required, so no caller can forget the binding). Any
+    other state returns False with the reason, and the tasks turn that into an
+    ``error`` outcome — never a mechanical fallback, which would silently
+    replace a meaning check with a substring check and report the result under
+    the same task name.
 
     The identity comparisons are the half that is easy to forget and the one
     that matters most: the artifact is a measurement of a SPECIFIC prompt read
-    by a SPECIFIC parser, and an edit to either leaves the file on disk,
-    passing, describing a judge that no longer exists.
+    by a SPECIFIC parser on a SPECIFIC model, and a change to any of the three
+    leaves the file on disk, passing, describing a judge that no longer
+    exists. Serving identity beyond the model string (provider, quantization)
+    is NOT bound yet, deliberately: those fields do not exist on the provider
+    seam today — they arrive with the queued fingerprint extension for the new
+    serving base, and the artifact and this check must grow them in that same
+    change rather than pretend to bind what is not recorded.
 
     Fails CLOSED on every unreadable state (missing file, bad JSON, an OSError)
     — the same discipline as ``_parse_judgment``.
@@ -128,6 +135,15 @@ def validation_status(path: Path | None = None) -> tuple[bool, str]:
         return False, (
             f"validation artifact was measured for judge_parser_version={recorded_parser!r}, "
             f"this parser is {JUDGE_PARSER_VERSION} — re-run the validation"
+        )
+    # The model half of the identity: agreement measured on one model says nothing
+    # about another. A missing key refuses too — an artifact that never said which
+    # model it measured is not evidence about any.
+    recorded_model = artifact.get("model")
+    if recorded_model != judge_model:
+        return False, (
+            f"validation artifact was measured with judge model {recorded_model!r}, "
+            f"this run's judge is {judge_model!r} — re-run the validation"
         )
     if artifact.get("pass") is not True:
         return False, f"validation artifact records pass={artifact.get('pass')!r}"

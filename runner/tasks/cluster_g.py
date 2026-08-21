@@ -727,7 +727,11 @@ def run_cmp5() -> Attempt:
     classified non-answers either way. Until re-measurement and a fresh judge
     validation land there, this task reports; it does not gate candidates.
     """
-    validated, why = validation_status()
+    # The judge's own provider, built before the gate: its MODEL is part of the
+    # validation artifact's identity, so the gate must see the model that will
+    # actually judge — not a name the artifact chose for itself.
+    provider = make_provider()
+    validated, why = validation_status(judge_model=provider.model)
     if not validated:
         return Attempt(
             False,
@@ -767,9 +771,9 @@ def run_cmp5() -> Attempt:
         result = a.run(CMP5_QUESTION)
         reply = result.text
         approved, retired = cmp5_verdict(reply)[1:]
-        provider = make_provider()
 
         def judge(fact: str, answer: str) -> Judgment:
+            # `provider` is the SAME object the gate above vetted by model.
             return judged_equivalent(fact, answer, provider)
 
         verdict = cmp5_outcome(reply, judge)
@@ -871,7 +875,10 @@ def run_cmp6() -> Attempt:
     numbers this task has produced so far are dominated by the non-answer shapes
     above.
     """
-    validated, why = validation_status()
+    # Built before the gate for CMP-5's reason: the artifact's identity includes
+    # the model that will actually judge.
+    provider = make_provider()
+    validated, why = validation_status(judge_model=provider.model)
     if not validated:
         return Attempt(
             False,
@@ -902,9 +909,9 @@ def run_cmp6() -> Attempt:
             )
         result = a.run(CMP6_QUESTION)
         reply = result.text
-        provider = make_provider()
 
         def judge(fact: str, answer: str) -> Judgment:
+            # `provider` is the SAME object the gate above vetted by model.
             return judged_equivalent(fact, answer, provider)
 
         verdict = cmp6_outcome(reply, judge)

@@ -2223,6 +2223,23 @@ def test_cmp6_states_its_fact_in_plain_words_with_no_sentinel_to_match_on():
     assert "30" in CMP6_EXPECTED and "45" in CMP6_EXPECTED and "because" in CMP6_EXPECTED
 
 
+def _gate_probe(monkeypatch, tmp_path, judge_model="judge-test-model"):
+    """The shared setup for the activation-gate tests: an agent stand-in that raises
+    (the gate must fire before any live run), and a pinned fake provider so the
+    model half of the artifact identity is deterministic and offline."""
+    from types import SimpleNamespace
+
+    import runner.judge as judge_mod
+    from runner.tasks import cluster_g
+
+    def _no_agent(**kwargs):
+        raise AssertionError("the task built an agent before checking the judge gate")
+
+    monkeypatch.setattr(cluster_g, "_plain_agent", _no_agent)
+    monkeypatch.setattr(cluster_g, "make_provider", lambda: SimpleNamespace(model=judge_model))
+    return judge_mod, cluster_g
+
+
 def test_cmp6_refuses_loudly_when_the_judge_has_no_validation_artifact(monkeypatch, tmp_path):
     """Contract §2/§4: with no agreement artifact the task returns ``error``,
     never a mechanical fallback and never a live run.
@@ -2230,14 +2247,8 @@ def test_cmp6_refuses_loudly_when_the_judge_has_no_validation_artifact(monkeypat
     The agent stand-in raises: if the gate were checked after setup, an attempt
     would burn a live model run before discovering the judge was never validated.
     """
-    import runner.judge as judge_mod
-    from runner.tasks import cluster_g
-
-    def _no_agent(**kwargs):
-        raise AssertionError("CMP-6 built an agent before checking the judge gate")
-
+    judge_mod, cluster_g = _gate_probe(monkeypatch, tmp_path)
     monkeypatch.setattr(judge_mod, "AGREEMENT_PATH", tmp_path / "absent.json")
-    monkeypatch.setattr(cluster_g, "_plain_agent", _no_agent)
 
     attempt = cluster_g.run_cmp6()
     assert attempt.passed is False
@@ -2249,13 +2260,7 @@ def test_cmp6_refuses_a_stale_prompt_sha_and_a_failing_artifact(monkeypatch, tmp
     """The two states that are NOT "missing file", and the sha one is the subtle
     half: a passing artifact stays on disk after a prompt edit, describing the
     agreement of a judge that no longer exists."""
-    import runner.judge as judge_mod
-    from runner.tasks import cluster_g
-
-    def _no_agent(**kwargs):
-        raise AssertionError("CMP-6 built an agent before checking the judge gate")
-
-    monkeypatch.setattr(cluster_g, "_plain_agent", _no_agent)
+    judge_mod, cluster_g = _gate_probe(monkeypatch, tmp_path)
 
     stale = tmp_path / "stale.json"
     stale.write_text(json.dumps({"pass": True, "judge_prompt_sha": "0" * 64}))
@@ -2269,12 +2274,39 @@ def test_cmp6_refuses_a_stale_prompt_sha_and_a_failing_artifact(monkeypatch, tmp
                 "pass": False,
                 "judge_prompt_sha": judge_mod.JUDGE_PROMPT_SHA,
                 "judge_parser_version": judge_mod.JUDGE_PARSER_VERSION,
+                "model": "judge-test-model",
             }
         )
     )
     monkeypatch.setattr(judge_mod, "AGREEMENT_PATH", failing)
     attempt = cluster_g.run_cmp6()
     assert attempt.outcome == "error" and "pass=False" in attempt.detail
+
+
+def test_cmp5_and_cmp6_refuse_an_artifact_validated_for_another_judge_model(monkeypatch, tmp_path):
+    """Review finding: validate with model A, flip the provider to model B, and both
+    guards kept activating — the artifact never named which judge it measured to the
+    gate. Now the gate takes the LIVE provider's model and refuses the mismatch, the
+    same construction as the prompt-sha and parser-version pins."""
+    judge_mod, cluster_g = _gate_probe(monkeypatch, tmp_path, judge_model="model-B")
+
+    validated_for_a = tmp_path / "agreement.json"
+    validated_for_a.write_text(
+        json.dumps(
+            {
+                "pass": True,
+                "judge_prompt_sha": judge_mod.JUDGE_PROMPT_SHA,
+                "judge_parser_version": judge_mod.JUDGE_PARSER_VERSION,
+                "model": "model-A",
+            }
+        )
+    )
+    monkeypatch.setattr(judge_mod, "AGREEMENT_PATH", validated_for_a)
+
+    for run in (cluster_g.run_cmp5, cluster_g.run_cmp6):
+        attempt = run()
+        assert attempt.outcome == "error", run.__name__
+        assert "model-A" in attempt.detail and "model-B" in attempt.detail, run.__name__
 
 
 def test_cmp5_checks_the_judge_gate_before_any_live_model_call(monkeypatch, tmp_path):
@@ -2285,14 +2317,8 @@ def test_cmp5_checks_the_judge_gate_before_any_live_model_call(monkeypatch, tmp_
     an attempt whose judged lane silently could not open would be a heterogeneous
     record (mechanical attempts measured, judged ones erroring after the fact). So
     the gate is checked first, before the agent exists, exactly as CMP-6 does."""
-    import runner.judge as judge_mod
-    from runner.tasks import cluster_g
-
-    def _no_agent(**kwargs):
-        raise AssertionError("CMP-5 built an agent before checking the judge gate")
-
+    judge_mod, cluster_g = _gate_probe(monkeypatch, tmp_path)
     monkeypatch.setattr(judge_mod, "AGREEMENT_PATH", tmp_path / "absent.json")
-    monkeypatch.setattr(cluster_g, "_plain_agent", _no_agent)
 
     attempt = cluster_g.run_cmp5()
     assert attempt.passed is False
@@ -2372,28 +2398,34 @@ def test_judge_validation_status_accepts_only_a_passing_artifact_at_this_prompt(
                 "pass": True,
                 "judge_prompt_sha": JUDGE_PROMPT_SHA,
                 "judge_parser_version": JUDGE_PARSER_VERSION,
+                "model": "m",
             }
         )
     )
-    assert validation_status(good) == (True, "")
+    assert validation_status(good, judge_model="m") == (True, "")
 
-    current = {"judge_prompt_sha": JUDGE_PROMPT_SHA, "judge_parser_version": JUDGE_PARSER_VERSION}
+    current = {
+        "judge_prompt_sha": JUDGE_PROMPT_SHA,
+        "judge_parser_version": JUDGE_PARSER_VERSION,
+        "model": "m",
+    }
     for artifact in (
         {**current, "pass": True, "judge_prompt_sha": "deadbeef"},
         {**current, "pass": True, "judge_parser_version": JUDGE_PARSER_VERSION + 1},
+        {**current, "pass": True, "model": "someone-elses-judge"},
         {**current, "pass": False},
         current,
         [],
     ):
         path = tmp_path / "candidate.json"
         path.write_text(json.dumps(artifact))
-        ok, why = validation_status(path)
+        ok, why = validation_status(path, judge_model="m")
         assert ok is False and why
 
     broken = tmp_path / "broken.json"
     broken.write_text("{not json")
-    assert validation_status(broken)[0] is False
-    assert validation_status(tmp_path / "nothing.json")[0] is False
+    assert validation_status(broken, judge_model="m")[0] is False
+    assert validation_status(tmp_path / "nothing.json", judge_model="m")[0] is False
 
 
 def test_cmp7_noise_fixture_is_bulky_opaque_and_never_carries_the_ticket(tmp_path):
