@@ -186,34 +186,34 @@ def test_garbage_output_fails_closed():
     raw = "I think the answer is probably related to the topic."
     provider = fake(scripted=lambda messages: raw)
     judgment = judged_equivalent("expected fact", "some answer", provider)
-    assert judgment == Judgment(False, "", raw)
+    assert judgment == Judgment(False, "", raw, ran=False)
 
 
 def test_empty_output_fails_closed():
     provider = fake(scripted=lambda messages: "")
     judgment = judged_equivalent("e", "a", provider)
-    assert judgment == Judgment(False, "", "")
+    assert judgment == Judgment(False, "", "", ran=False)
 
 
 def test_missing_quote_line_fails_closed():
     raw = "VERDICT: YES"
     provider = fake(scripted=lambda messages: raw)
     judgment = judged_equivalent("e", "a", provider)
-    assert judgment == Judgment(False, "", raw)
+    assert judgment == Judgment(False, "", raw, ran=False)
 
 
 def test_wrong_case_fails_closed():
     raw = "verdict: yes\nquote: something"
     provider = fake(scripted=lambda messages: raw)
     judgment = judged_equivalent("e", "a", provider)
-    assert judgment == Judgment(False, "", raw)
+    assert judgment == Judgment(False, "", raw, ran=False)
 
 
 def test_second_line_not_quote_prefixed_fails_closed():
     raw = "VERDICT: YES\nnever exceed 30 seconds"
     provider = fake(scripted=lambda messages: raw)
     judgment = judged_equivalent("e", "a", provider)
-    assert judgment == Judgment(False, "", raw)
+    assert judgment == Judgment(False, "", raw, ran=False)
 
 
 def test_trailing_lines_after_quote_are_ignored():
@@ -561,6 +561,46 @@ def test_main_writes_agreement_artifact(tmp_path):
     assert on_disk["judge_prompt_sha"] == JUDGE_PROMPT_SHA
     assert on_disk["model"] == provider.model
     assert on_disk["total_pairs"] == len(judge_validate.build_corpus())
+
+
+# --- ran: a False verdict vs the absence of a verdict ----------------------------
+
+
+def test_a_judgment_says_whether_a_verdict_actually_came_back():
+    """``ran`` separates two kinds of False verdict that must not be conflated.
+
+    A judge that answered ``VERDICT: NO`` made a decision about the answer; a judge
+    whose call failed or whose output never parsed made NO decision at all. Both fail
+    closed to ``verdict=False`` — that stays — but a verifier that treats the second
+    kind as evidence about the strategy under test is recording a judge outage as a
+    task failure. ``ran`` is what lets such a caller refuse (outcome ``error``)
+    instead of blaming the strategy.
+    """
+    # Delivered verdicts, YES and NO: the judge decided.
+    yes = judged_equivalent(
+        "E", "the answer states E", fake(scripted=lambda m: "VERDICT: YES\nQUOTE: E")
+    )
+    assert yes.ran is True and yes.verdict is True
+    no = judged_equivalent("E", "unrelated", fake(scripted=lambda m: "VERDICT: NO\nQUOTE: q"))
+    assert no.ran is True and no.verdict is False
+
+    # An ungrounded YES also RAN: the judge delivered a verdict and the grounding
+    # rule refused it — a real (policy) failure of the pair, not a judge outage.
+    ungrounded = judged_equivalent(
+        "E", "nothing supporting it", fake(scripted=lambda m: "VERDICT: YES\nQUOTE: invented span")
+    )
+    assert ungrounded.ran is True and ungrounded.verdict is False
+
+    # No verdict came back: garbage, empty, and a provider exception.
+    for scripted in (lambda m: "I think so, probably.", lambda m: ""):
+        judgment = judged_equivalent("E", "a", fake(scripted=scripted))
+        assert judgment.ran is False and judgment.verdict is False
+
+    def boom(messages):
+        raise RuntimeError("service unavailable")
+
+    failed = judged_equivalent("E", "a", fake(scripted=boom))
+    assert failed.ran is False and failed.verdict is False
 
 
 # --- Transport/provider failures (fail-closed) ----------------------------------

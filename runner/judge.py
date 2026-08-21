@@ -137,11 +137,20 @@ class Judgment:
     Zero when the provider reported no usage (a scripted provider, a transport
     failure) — never an estimate, which would put a fabricated number in the
     same field as measured ones.
+
+    ``ran`` separates two kinds of False verdict. True means a verdict actually
+    came back in the pinned two-line format — a real NO, or a YES the grounding
+    rule refused (the judge decided; the decision failed the pair). False means
+    NO decision exists: the provider call failed or the output never parsed.
+    Both fail closed to ``verdict=False``, but a verifier that recorded the
+    second kind as a task failure would be blaming the strategy under test for
+    a judge outage — ``ran`` is what lets it refuse (outcome ``error``) instead.
     """
 
     verdict: bool
     quote: str
     raw: str
+    ran: bool = True
     tokens: int = 0
 
 
@@ -197,8 +206,9 @@ def quote_is_grounded(quote: str, answer: str) -> bool:
 def _parse_judgment(raw: str, answer: str) -> Judgment:
     """Strict two-line parse plus the grounding rule: first line ``VERDICT: YES``
     or ``VERDICT: NO`` exactly, second line starting ``QUOTE:``. Anything else
-    fails CLOSED (verdict False, quote "") with ``raw`` preserved. Lines after the
-    second are ignored — the contract pins the first two, not the total length.
+    fails CLOSED (verdict False, quote "", and ``ran=False`` — no verdict ever
+    came back) with ``raw`` preserved. Lines after the second are ignored — the
+    contract pins the first two, not the total length.
 
     A parsed YES then has to earn its verdict: its quote must be grounded in
     ``answer``. An ungrounded YES fails closed the same way a malformed one does,
@@ -210,13 +220,13 @@ def _parse_judgment(raw: str, answer: str) -> Judgment:
     """
     lines = raw.splitlines()
     if len(lines) < 2:
-        return Judgment(False, "", raw)
+        return Judgment(False, "", raw, ran=False)
     verdict_line = lines[0].strip()
     quote_line = lines[1].strip()
     if verdict_line not in ("VERDICT: YES", "VERDICT: NO"):
-        return Judgment(False, "", raw)
+        return Judgment(False, "", raw, ran=False)
     if not quote_line.startswith("QUOTE:"):
-        return Judgment(False, "", raw)
+        return Judgment(False, "", raw, ran=False)
     quote = quote_line[len("QUOTE:") :].strip()
     if verdict_line == "VERDICT: NO":
         return Judgment(False, quote, raw)
@@ -270,4 +280,4 @@ def judged_equivalent(expected: str, answer: str, provider) -> Judgment:
         return replace(judgment, tokens=_usage_tokens(response.usage))
     except Exception as exc:
         error_msg = f"<provider error: {exc}>"
-        return Judgment(False, "", error_msg)
+        return Judgment(False, "", error_msg, ran=False)
