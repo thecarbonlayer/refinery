@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
+from pathlib import Path
 
 import pytest
 from model.fake import fake
@@ -17,20 +18,161 @@ from runner.judge import JUDGE_PROMPT, JUDGE_PROMPT_SHA, Judgment, judged_equiva
 # --- runner.judge ---------------------------------------------------------------
 
 
+# The judge prompt's digest, as a LITERAL. Derived from `JUDGE_PROMPT` it was a
+# tautology: `JUDGE_PROMPT_SHA` is itself computed by that same expression, so the
+# assertion re-ran the definition and could not go red for any prompt edit. Written
+# out, it goes red on every one — which is the whole point of pinning a prompt whose
+# measured agreement lives in a separate file.
+PINNED_JUDGE_PROMPT_SHA = "88fe0e70592e7a6ee72797f032156afd6f747cbe5c8d6a95fd127b941ef07663"
+
+
 def test_judge_prompt_sha_is_pinned():
-    """A prompt edit must be a LOUD, deliberate act (contract §4): this test
-    goes red the instant JUDGE_PROMPT changes without JUDGE_PROMPT_SHA
-    changing with it."""
-    assert JUDGE_PROMPT_SHA == hashlib.sha256(JUDGE_PROMPT.encode()).hexdigest()
+    """A prompt edit must be a LOUD, deliberate act (contract §4): this test goes red
+    the instant JUDGE_PROMPT changes, and stays red until the validation artifact is
+    re-measured for the new prompt and this literal is updated to match."""
+    assert JUDGE_PROMPT_SHA == PINNED_JUDGE_PROMPT_SHA
+    # And the constant really is the digest of the prompt beside it, so a hand-edited
+    # `JUDGE_PROMPT_SHA` cannot satisfy the pin above on its own.
+    assert hashlib.sha256(JUDGE_PROMPT.encode()).hexdigest() == PINNED_JUDGE_PROMPT_SHA
+
+
+def test_the_committed_agreement_artifact_was_measured_for_this_prompt():
+    """The pin's reason, made checkable: `agreement.json` is a measurement OF this
+    prompt, and CMP-6's activation gate compares the two shas. If they ever separate,
+    the artifact describes a judge that no longer exists."""
+    from runner.judge import AGREEMENT_PATH
+
+    artifact = json.loads(AGREEMENT_PATH.read_text())
+    assert artifact["judge_prompt_sha"] == PINNED_JUDGE_PROMPT_SHA
 
 
 def test_yes_verdict_parses_quote():
     raw = "VERDICT: YES\nQUOTE: never exceed 30 seconds"
     provider = fake(scripted=lambda messages: raw)
     judgment = judged_equivalent(
-        "retry backoff must never exceed 30 seconds", "some paraphrase", provider
+        "retry backoff must never exceed 30 seconds",
+        "the backoff should never exceed 30 seconds between retries",
+        provider,
     )
     assert judgment == Judgment(True, "never exceed 30 seconds", raw)
+
+
+# --- Grounding: a YES stands only on a verbatim span of the ANSWER ---------------
+
+
+def test_yes_with_an_empty_quote_fails_closed():
+    """A YES that cites nothing cites nothing. The two-line format was satisfied, so
+    the old parser handed back verdict=True with an empty quote — a pass no span of
+    the answer supports."""
+    raw = "VERDICT: YES\nQUOTE:"
+    provider = fake(scripted=lambda messages: raw)
+    judgment = judged_equivalent("expected fact", "an answer that states the fact", provider)
+    assert judgment.verdict is False
+    assert raw in judgment.raw, "the judge's own output is preserved"
+    assert "ungrounded" in judgment.raw
+
+
+def test_yes_with_a_quote_absent_from_the_answer_fails_closed():
+    """The attack this closes: a judge that INVENTS the supporting span. The quote is
+    fluent, on-topic and nowhere in the answer, and the verdict rode on it."""
+    raw = "VERDICT: YES\nQUOTE: the deploy key rotates every Tuesday"
+    provider = fake(scripted=lambda messages: raw)
+    judgment = judged_equivalent(
+        "the deploy key rotates every Tuesday",
+        "I believe there is a rotation policy of some kind.",
+        provider,
+    )
+    assert judgment.verdict is False
+    assert judgment.quote == "the deploy key rotates every Tuesday", (
+        "the quote is still reported — a reader has to see what the judge claimed"
+    )
+    assert raw in judgment.raw and "ungrounded" in judgment.raw
+
+
+def test_yes_with_a_grounded_quote_stands():
+    raw = "VERDICT: YES\nQUOTE: TUESDAY-KEY-9X"
+    provider = fake(scripted=lambda messages: raw)
+    judgment = judged_equivalent("TUESDAY-KEY-9X", "The key is `TUESDAY-KEY-9X`.", provider)
+    assert judgment == Judgment(True, "TUESDAY-KEY-9X", raw)
+
+
+def test_grounding_is_case_insensitive_and_whitespace_normalized():
+    """A model that re-wraps or re-cases a span it really did copy is still quoting it.
+    Anything looser than this (stripping punctuation, markdown, or stopwords) would
+    start accepting reconstructions, which is the thing being refused."""
+    raw = "VERDICT: YES\nQUOTE: Never   Exceed\n30 Seconds"
+    provider = fake(scripted=lambda messages: raw)
+    judgment = judged_equivalent(
+        "backoff never exceeds 30 seconds",
+        "the backoff will never exceed 30 seconds, per the runbook",
+        provider,
+    )
+    assert judgment.verdict is True
+
+
+def test_a_no_verdict_is_never_regrounded():
+    """NO verdicts are unaffected: the contract asks a NO to cite the closest attempt,
+    which by construction may not be a verbatim span at all. Fail-closed only ever
+    turns a pass into a failure, never the reverse."""
+    raw = "VERDICT: NO\nQUOTE: nothing in the answer says this"
+    provider = fake(scripted=lambda messages: raw)
+    judgment = judged_equivalent("expected fact", "unrelated reply", provider)
+    assert judgment == Judgment(False, "nothing in the answer says this", raw)
+
+
+def test_a_no_verdict_with_an_empty_quote_is_still_just_a_no():
+    raw = "VERDICT: NO\nQUOTE:"
+    provider = fake(scripted=lambda messages: raw)
+    judgment = judged_equivalent("e", "a", provider)
+    assert judgment == Judgment(False, "", raw)
+
+
+def test_the_committed_agreement_artifact_survives_the_grounding_rule():
+    """Re-validation of the judge, done OFFLINE against the record it already wrote.
+
+    A live re-run is a Phase 3 item — it needs model calls. But the artifact stores
+    every pair's recorded verdict and quote, and `build_corpus()` rebuilds the same
+    corpus from the same committed JSONLs, so the recorded judge outputs can be
+    RE-SCORED under the grounding rule without asking the judge anything. The join is
+    positional and verified field by field, never assumed.
+
+    What this pins: the agreement gate (>= 95%) and the zero-YES-on-clean-denial gate
+    both still hold once every YES has to cite a real span. If a future prompt or rule
+    change breaks either, this goes red on committed evidence rather than on a rerun
+    nobody scheduled.
+    """
+    from runner.judge import AGREEMENT_PATH, quote_is_grounded
+
+    artifact = json.loads(AGREEMENT_PATH.read_text())
+    corpus = judge_validate.build_corpus()
+    records = artifact["records"]
+    assert len(records) == len(corpus) == 635
+
+    agree = 0
+    denial_yes = 0
+    regrounded = 0
+    for record, pair in zip(records, corpus, strict=True):
+        assert (record["task"], record["fact"], record["source_file"], record["attempt"]) == (
+            pair.task,
+            pair.fact,
+            pair.source_file,
+            pair.attempt,
+        ), "the artifact's records must line up with the corpus they were measured on"
+        assert record["expected"] == pair.expected
+        assert record["ground_truth"] == pair.ground_truth
+        verdict = record["judge_verdict"]
+        if verdict and not quote_is_grounded(record["quote"], pair.answer):
+            verdict = False
+            regrounded += 1
+        agree += int(verdict == pair.ground_truth)
+        denial_yes += int(pair.is_clean_denial and verdict)
+
+    # Exactly one recorded YES loses its verdict: a G4 reply whose quote dropped the
+    # markdown emphasis around it, so the span was reconstructed rather than copied.
+    assert regrounded == 1
+    assert denial_yes == 0, "the clean-denial gate still holds under the stricter rule"
+    assert agree / len(records) >= judge_validate.AGREEMENT_THRESHOLD
+    assert artifact["pass"] is True
 
 
 def test_no_verdict_parses_quote():
@@ -102,6 +244,54 @@ def test_payload_carries_only_expected_and_answer():
         {"role": "system", "content": JUDGE_PROMPT},
         {"role": "user", "content": f"EXPECTED FACT:\n{expected}\n\nANSWER:\n{answer}"},
     ]
+
+
+def test_every_cmp6_pass_in_the_campaign_carries_a_grounded_quote():
+    """The other half of the offline re-validation: the campaign's own CMP-6 passes.
+
+    `agreement.json` measures the judge against MECHANICAL ground truth on A1/G2/G4/G5.
+    CMP-6 is the task where a judge YES IS the pass, with no mechanical check beside
+    it, so the grounding rule's real exposure is there. Every CMP-6 pass across the ten
+    Phase 2c arms is re-checked here against the reply it was made on; both strings are
+    in the recorded `detail`.
+
+    Read honestly: `runner/tasks/cluster_g.py` clamps the recorded quote to 160
+    characters and the recorded reply to 240. No reply in this campaign reached the
+    reply clamp, so the answers are whole; 15 of the 17 quotes sit exactly at the quote
+    clamp, so what is verified for those is that the first 160 characters of the quote
+    are a verbatim span of the full reply. The clamp is a limit of this retrospective
+    check only — the live rule sees both strings unclamped.
+    """
+    import ast
+    import re
+
+    from runner.judge import quote_is_grounded
+
+    results = Path(__file__).resolve().parents[1] / "results"
+    passes = []
+    for path in sorted(results.glob("p2c-null-*.jsonl")):
+        for line in path.read_text().splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if record.get("task") == "CMP-6" and record.get("passed"):
+                passes.append((path.name, record))
+
+    assert len(passes) == 17, "the campaign's CMP-6 pass count, from the record itself"
+    ungrounded = []
+    clamped = 0
+    for name, record in passes:
+        detail = record["detail"]
+        quote = ast.literal_eval(re.search(r"judge_quote=(.*?) reply=", detail, re.DOTALL).group(1))
+        reply = ast.literal_eval(re.search(r"reply=(.*)$", detail, re.DOTALL).group(1))
+        clamped += int(len(quote) == 160)
+        if not quote_is_grounded(quote, reply):
+            ungrounded.append((name, record["attempt"], quote))
+    assert not ungrounded, (
+        "a CMP-6 pass whose judge quote is not a span of the reply it judged: the "
+        f"recorded rate would change under the grounding rule — {ungrounded}"
+    )
+    assert clamped == 15, "and the clamp's reach, stated rather than assumed"
 
 
 # --- loop.judge_validate: corpus construction, real fixture lines ---------------
@@ -302,7 +492,7 @@ def test_run_validation_computes_agreement_and_disagreements():
     def responder(messages):
         text = messages[1]["content"]
         if "agrees-yes" in text:
-            return "VERDICT: YES\nQUOTE: q"
+            return "VERDICT: YES\nQUOTE: agrees-yes"  # grounded, so the YES stands
         if "agrees-no" in text:
             return "VERDICT: NO\nQUOTE: q"
         return "VERDICT: NO\nQUOTE: q"  # disagrees with ground_truth=True
@@ -338,8 +528,10 @@ def test_run_validation_fails_on_yes_for_clean_denial():
     def responder(messages):
         text = messages[1]["content"]
         if "clean-denial-reply" in text:
-            return "VERDICT: YES\nQUOTE: q"  # wrongly says YES on a denial
-        return "VERDICT: YES\nQUOTE: q"
+            # Wrongly says YES on a denial -- and cites a real span of it, so the
+            # grounding rule cannot mask the failure this gate exists to catch.
+            return "VERDICT: YES\nQUOTE: clean-denial-reply"
+        return "VERDICT: YES\nQUOTE: agrees"
 
     provider = fake(scripted=responder)
     result = judge_validate.run_validation(corpus, provider)
@@ -399,7 +591,7 @@ def test_run_validation_guards_provider_exception_per_pair():
         text = messages[1]["content"]
         if "fails" in text:
             raise ValueError("API rate limit exceeded")
-        return "VERDICT: YES\nQUOTE: q"
+        return "VERDICT: YES\nQUOTE: works"  # grounded in both surviving answers
 
     corpus = [
         _pair(answer="works", ground_truth=True),

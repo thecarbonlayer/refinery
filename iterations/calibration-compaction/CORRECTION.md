@@ -62,7 +62,9 @@ backend would be reading that difference as behavior.
 ## What this does and does not change
 
 - It does not change any verdict. `fitness.fit` is false because STABILITY refused on
-  the held-in quantile, which is unrelated to these six attempts.
+  the held-in quantile and on three per-task bounds, and because GOODNESS refused on
+  one arm's CMP-5 count. Neither refusal involves these six attempts: the CMP-7 and G5
+  rows they sit in pass both checks.
 - It does not change the artifact. The six rows keep their `error` outcome and their
   tracebacks, and the pooled rates stand unedited, exactly as iteration 4's correction
   left that record.

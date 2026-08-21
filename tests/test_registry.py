@@ -2834,6 +2834,8 @@ def test_cmp6_records_the_judges_own_token_cost():
             usage={"prompt_tokens": 300, "completion_tokens": 12, "total_tokens": 312},
         ),
     )
-    judged = judged_equivalent("e", "a", provider)
+    # The answer carries the span the scripted judge quotes: a YES only stands on a
+    # verbatim quote now, and this test is about token accounting, not grounding.
+    judged = judged_equivalent("e", "an answer containing x", provider)
     assert judged.verdict is True
     assert judged.tokens == 312

@@ -28,13 +28,32 @@ and the committed `model-r2.json` — wherever the point of the test survives it
 (the leave-one-out margins, the false-CONFIRM block, the end-to-end power rows) still
 reads it directly.
 
-What changed in Phase 2c: the committed artifact pools four tasks and the loader now
-pins seven, so it no longer INSTALLS — correctly, because the campaign that rates
-CMP-5/6/7 has not run. Tests that need a loadable calibration therefore build one with
-the real `calibrate_model` over synthetic null arms (`installed_model()`), carrying the
-real arms' provenance. The tamper mechanics are unchanged; the artifact they tamper
-with moved because the committed one is superseded, not because a fabricated fixture
-was easier. `tests/test_loop_validate.py` pins the committed artifact's own refusal.
+THE TERMINAL STATE THIS FILE NOW SITS IN, stated plainly because the docstring above
+described a state that has been superseded twice.
+
+`iterations/calibration-compaction/model-r2.json` is the Phase 2c pooling: ten arms
+(`p2c-null-full-a/b/c` plus `p2c-null-cmp-a` through `-g`), seven rated tasks (the four
+supported plus the scenario guards CMP-5/6/7), one runner hash. It does NOT install,
+and it says why itself: `fitness.fit = false`, with GOODNESS and STABILITY both
+refusing. Goodness refuses on one arm's CMP-5 count (3 of 3 against a pooled 17/79,
+exact two-sided tail 0.00996, just inside the 0.01 alpha); stability refuses on the
+held-in split mean and on the per-task bounds of CMP-5, CMP-6 and G4, each of which
+crosses a grain bucket when one arm is dropped. GRAIN passes, guards included.
+
+So `compaction` is uncalibrated, deliberately and loudly, and every sweep in this
+repo that needs an installed calibration is suspended with that refusal asserted
+rather than described (`tests/test_round2_attack.py`,
+`tests/test_loop_validate.py::test_the_committed_artifact_refuses_to_install_itself_and_says_why`).
+The restoration condition is a FIT artifact at these arms' runner hash or a successor —
+not a hand-edited `fit`, which the loader re-derives and rejects.
+
+`committed_model()` is that file, and every claim here about what `calibrate_model`
+PUBLISHES (the leave-one-out margins, the false-CONFIRM block, the end-to-end power
+rows) reads it directly. Tests that need a LOADABLE calibration cannot use it, so they
+build one with the real `calibrate_model` over synthetic null arms
+(`installed_model()`), carrying the real arms' provenance. The tamper mechanics are
+unchanged; the artifact they tamper with moved because the committed one does not
+install, not because a fabricated fixture was easier.
 """
 
 from __future__ import annotations
@@ -130,7 +149,8 @@ def committed_model() -> dict:
     """The artifact as COMMITTED — `iterations/calibration-compaction/model-r2.json`.
 
     Now the Phase 2c pooling: ten arms, seven rated tasks, `fitness.fit = false`
-    because stability refused. It does not install, but it is still the published
+    because goodness and stability refused (see this module's docstring for the
+    numbers). It does not install, but it is still the published
     record, and the tests that assert on what `calibrate_model` PUBLISHES — the
     leave-one-out margins, the false-CONFIRM block, the end-to-end power rows — are
     claims about that record. They read it here rather than through the loader fixture,
@@ -646,6 +666,32 @@ def test_the_guard_set_the_power_model_uses_is_the_one_the_pipeline_confirms_wit
     from loop.validate import _SECTION_CONFIRM_GUARDS
 
     assert _SECTION_CONFIRM_GUARDS["compaction"] is CONFIRMATION_GUARDS
+
+
+def test_this_modules_docstring_describes_the_artifact_that_is_actually_committed():
+    """The docstring above states a terminal state, and a stated state nobody checks
+    drifts — this one already described a superseded artifact twice.
+
+    Every claim in it is re-derived from `model-r2.json` here first and only then looked
+    for in the prose, the same discipline `tests/test_calibration_record.py` applies to
+    the README beside the artifact.
+    """
+    model = committed_model()
+    fitness = model["fitness"]
+    assert tuple(p["label"] for p in model["provenance"]) == P2C_ARMS
+    assert set(model["null_model"]) == {"A1", "G2", "G4", "G5", "CMP-5", "CMP-6", "CMP-7"}
+    assert fitness["fit"] is False
+    assert fitness["grain"]["pass"] is True
+    assert fitness["goodness"]["pass"] is False
+    assert fitness["stability"]["pass"] is False
+
+    doc = " ".join((__doc__ or "").split())
+    assert "ten arms" in doc and "seven rated tasks" in doc
+    assert "GOODNESS and STABILITY" in doc, "both refusing checks, named"
+    assert "GRAIN passes" in doc
+    assert "0.00996" in doc and "17/79" in doc, "the goodness refusal, in its own numbers"
+    for task in ("CMP-5", "CMP-6", "G4"):
+        assert task in doc
 
 
 def test_stability_publishes_a_leave_one_out_margin_for_every_arm():

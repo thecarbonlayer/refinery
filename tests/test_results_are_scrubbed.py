@@ -20,6 +20,14 @@ with a home directory in three shell commands. The leak was never in the record;
 in the prose beside it, which nothing checked. `results/*.log` joins for the same
 reason: a run log is machine-generated evidence the scrubber never touches.
 
+`iterations/` joins last, and it is the largest of the three by what it holds: every
+candidate, decision, validation record, confirmation and calibration artifact this
+program has published, plus the prose beside them. AGENTS.md told a human to grep it
+before committing and nothing enforced it — the same shape of gap that let the `docs/`
+leak through, one directory over. Its JSON is machine-written evidence and is held to
+the bare patterns; its Markdown is prose and is held to the prose patterns, exactly
+like `docs/`.
+
 TWO GATES, because the material differs. Machine-generated files (`results/`) are held
 to the bare patterns: nothing there has any business naming a home directory or a temp
 dir, in any form. Prose (`docs/`) is held to the same patterns anchored on a following
@@ -37,7 +45,20 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RESULTS = REPO_ROOT / "results"
 DOCS = REPO_ROOT / "docs"
+ITERATIONS = REPO_ROOT / "iterations"
 TESTS = REPO_ROOT / "tests"
+
+# The machine-written record: (root, glob) pairs held to the BARE patterns. Nothing
+# under any of these has any business naming a home directory or a temp dir, in any
+# form, so there is no prose exemption here.
+RECORD_GLOBS = (
+    (RESULTS, "*.json*"),
+    (RESULTS, "*.log"),
+    (ITERATIONS, "**/*.json*"),
+)
+
+# The prose beside it, held to the anchored patterns with the test-source exemption.
+PROSE_GLOBS = ((DOCS, "**/*.md"), (ITERATIONS, "**/*.md"))
 
 FORBIDDEN = (
     re.compile(r"/var/folders/"),
@@ -70,37 +91,97 @@ def _test_source_lines() -> set[str]:
     }
 
 
-def test_no_results_file_carries_a_machine_path():
+def _record_offenders(globs=RECORD_GLOBS) -> dict[str, list[str]]:
+    """Every machine-written file under `globs` that names a machine path.
+
+    Takes its roots as an argument so the gate can be pointed at a planted leak in a
+    temp tree and shown to catch it. A gate only ever run over a clean repo is
+    indistinguishable from one whose patterns match nothing.
+    """
     offenders: dict[str, list[str]] = {}
-    for path in sorted(RESULTS.glob("*.json*")) + sorted(RESULTS.glob("*.log")):
-        text = path.read_text()
-        hits = [p.pattern for p in FORBIDDEN if p.search(text)]
-        if hits:
-            offenders[path.name] = hits
+    for root, pattern in globs:
+        for path in sorted(root.glob(pattern)):
+            hits = [p.pattern for p in FORBIDDEN if p.search(path.read_text())]
+            if hits:
+                offenders[str(path.relative_to(root.parent))] = hits
+    return offenders
+
+
+def _prose_offenders(globs=PROSE_GLOBS) -> dict[str, list[str]]:
+    """The same, for prose: anchored patterns, minus lines that are verbatim test
+    sources."""
+    exempt = _test_source_lines()
+    offenders: dict[str, list[str]] = {}
+    for root, pattern in globs:
+        for path in sorted(root.glob(pattern)):
+            for number, line in enumerate(path.read_text().splitlines(), start=1):
+                if line.strip() in exempt:
+                    continue
+                hits = [p.pattern for p in FORBIDDEN_IN_PROSE if p.search(line)]
+                if hits:
+                    rel = path.relative_to(root.parent)
+                    offenders.setdefault(str(rel), []).append(f"line {number}: {hits}")
+    return offenders
+
+
+def test_no_machine_written_record_carries_a_machine_path():
+    """`results/` and `iterations/` — every file this program writes as evidence."""
+    offenders = _record_offenders()
     assert not offenders, (
-        f"machine paths in results/ — run `uv run python -m loop.scrub_results`: {offenders}"
+        f"machine paths in the committed record — run `uv run python -m loop.scrub_results` "
+        f"for anything under results/, and fix iterations/ by hand: {offenders}"
     )
+
+
+def test_the_gate_covers_the_whole_committed_record():
+    """The coverage itself, pinned. `iterations/` holds every candidate, decision,
+    validation record and calibration artifact this program has published, and it was
+    outside the gate while AGENTS.md told a human to grep it — which is the same shape
+    of gap that let a home directory sit in `docs/` for days."""
+    assert ITERATIONS in {root for root, _ in RECORD_GLOBS}
+    assert ITERATIONS in {root for root, _ in PROSE_GLOBS}
+    # And the roots are real directories with files in them, so the globs are not
+    # quietly scanning nothing.
+    assert list(ITERATIONS.glob("**/*.json")) and list(ITERATIONS.glob("**/*.md"))
 
 
 def test_no_committed_document_carries_a_machine_path():
     """The gap that let a home directory sit in public history: docs were not covered.
 
-    Every `.md` under `docs/`, at any depth — plans included, because a plan is where
-    someone pastes the command they actually ran.
+    Every `.md` under `docs/` and `iterations/`, at any depth — plans and iteration
+    READMEs included, because a plan is where someone pastes the command they actually
+    ran and an iteration README is where someone pastes what it printed.
     """
-    exempt = _test_source_lines()
-    offenders: dict[str, list[str]] = {}
-    for path in sorted(DOCS.rglob("*.md")):
-        for number, line in enumerate(path.read_text().splitlines(), start=1):
-            if line.strip() in exempt:
-                continue
-            hits = [p.pattern for p in FORBIDDEN_IN_PROSE if p.search(line)]
-            if hits:
-                rel = path.relative_to(REPO_ROOT)
-                offenders.setdefault(str(rel), []).append(f"line {number}: {hits}")
+    offenders = _prose_offenders()
     assert not offenders, (
         "machine paths in committed documents — replace them with <HOME>/<TMPDIR> "
         f"placeholders, preserving what the line was saying: {offenders}"
+    )
+
+
+def test_both_gates_catch_a_planted_leak(tmp_path):
+    """Both scanners, run over a tree that really does leak — the proof that the two
+    clean verdicts above are about the repo and not about a scanner that matches
+    nothing.
+
+    The record gate takes the bare patterns, so prose ABOUT a path trips it too; the
+    prose gate is anchored, so it does not. That difference is the design, and it is
+    asserted here rather than described.
+    """
+    root = tmp_path / "iterations"
+    (root / "iter-99").mkdir(parents=True)
+    (root / "iter-99" / "decision.json").write_text('{"note": "ran in /Users/someone/w"}')
+    (root / "iter-99" / "README.md").write_text(
+        "# notes\nran `cd /var/folders/qq/zz/T/w-1 && ls`\nthe rule names /Users/ and /home/\n"
+    )
+
+    record = _record_offenders(((root, "**/*.json*"),))
+    assert list(record) == ["iterations/iter-99/decision.json"]
+
+    prose = _prose_offenders(((root, "**/*.md"),))
+    assert list(prose) == ["iterations/iter-99/README.md"]
+    assert len(prose["iterations/iter-99/README.md"]) == 1, (
+        "line 3 names the patterns without being a path — prose about the rule is not a leak"
     )
 
 

@@ -21,6 +21,19 @@ fails CLOSED (verdict False) rather than guessing. A judge that free-forms is
 a judge that is not actually pinned, and quietly accepting near-miss formats
 would let the effective judging behavior drift without ``JUDGE_PROMPT_SHA``
 ever changing to say so.
+
+A YES must also be GROUNDED. The format check alone let two passes through that
+no span of the answer supported: ``QUOTE:`` with nothing after it, and a quote
+the judge composed rather than copied. Both read as a well-formed YES, and CMP-6
+turns a YES straight into a task pass — so a judge having a bad minute could hand
+this suite a pass built on a sentence the model never wrote.
+``quote_is_grounded`` closes that: a YES stands only when its quote appears
+verbatim in the answer, compared case-insensitively with whitespace collapsed.
+Nothing looser — no punctuation stripping, no markdown stripping, no fuzzy match
+— because every loosening starts accepting reconstructions, which is the exact
+thing being refused. NO verdicts are untouched: the prompt asks a NO to cite "its
+closest attempt", which by construction need not be a real span, and this rule may
+only ever turn a pass into a failure, never the reverse.
 """
 
 from __future__ import annotations
@@ -151,11 +164,50 @@ def _usage_tokens(usage: dict) -> int:
         return 0
 
 
-def _parse_judgment(raw: str) -> Judgment:
-    """Strict two-line parse: first line ``VERDICT: YES`` or ``VERDICT: NO``
-    exactly, second line starting ``QUOTE:``. Anything else fails CLOSED
-    (verdict False, quote "") with ``raw`` preserved. Lines after the second
-    are ignored — the contract pins the first two, not the total length."""
+def _normalized(text: str) -> str:
+    """``text`` with every whitespace run collapsed to one space, case-folded.
+
+    The two differences a real quote is allowed to have from the answer it was
+    copied out of: the model re-wrapped a line, or it re-cased a word. Both leave
+    the SPAN intact. Everything else — different punctuation, dropped markdown,
+    a synonym — means the judge produced the span instead of copying it, and that
+    is exactly what the grounding check exists to catch.
+    """
+    return " ".join(text.split()).casefold()
+
+
+def quote_is_grounded(quote: str, answer: str) -> bool:
+    """Does ``quote`` appear verbatim in ``answer`` (case-insensitive, whitespace
+    normalized)?
+
+    Public because it is applied in two places that must never disagree: here, at
+    judgment time, and in the offline re-scoring of
+    ``iterations/judge-validation/agreement.json`` (``tests/test_judge.py``), which
+    is how the committed validation's numbers are checked against this rule without
+    a live re-run. A second copy of "verbatim" would let the gate and the evidence
+    for the gate drift apart.
+
+    An empty (or whitespace-only) quote is never grounded: a YES that cites nothing
+    cites nothing, and the two-line format alone used to let it through.
+    """
+    normalized = _normalized(quote)
+    return bool(normalized) and normalized in _normalized(answer)
+
+
+def _parse_judgment(raw: str, answer: str) -> Judgment:
+    """Strict two-line parse plus the grounding rule: first line ``VERDICT: YES``
+    or ``VERDICT: NO`` exactly, second line starting ``QUOTE:``. Anything else
+    fails CLOSED (verdict False, quote "") with ``raw`` preserved. Lines after the
+    second are ignored — the contract pins the first two, not the total length.
+
+    A parsed YES then has to earn its verdict: its quote must be grounded in
+    ``answer``. An ungrounded YES fails closed the same way a malformed one does,
+    except the quote is KEPT — a reader has to see what the judge claimed to be
+    citing — and the reason is appended to ``raw`` beneath the judge's own output,
+    which is preserved intact. The reason lands in ``raw`` rather than in a new
+    field because ``raw`` is what ``loop.judge_validate`` already records per pair
+    and what a human reads when a verdict looks wrong.
+    """
     lines = raw.splitlines()
     if len(lines) < 2:
         return Judgment(False, "", raw)
@@ -166,7 +218,20 @@ def _parse_judgment(raw: str) -> Judgment:
     if not quote_line.startswith("QUOTE:"):
         return Judgment(False, "", raw)
     quote = quote_line[len("QUOTE:") :].strip()
-    return Judgment(verdict_line == "VERDICT: YES", quote, raw)
+    if verdict_line == "VERDICT: NO":
+        return Judgment(False, quote, raw)
+    if not quote.strip():
+        return Judgment(
+            False, quote, f"{raw}\n<ungrounded: the QUOTE is empty, so this YES cites nothing>"
+        )
+    if not quote_is_grounded(quote, answer):
+        return Judgment(
+            False,
+            quote,
+            f"{raw}\n<ungrounded: the QUOTE does not appear in the ANSWER, so this YES "
+            "rests on a span the answer never contained>",
+        )
+    return Judgment(True, quote, raw)
 
 
 def judged_equivalent(expected: str, answer: str, provider) -> Judgment:
@@ -181,11 +246,16 @@ def judged_equivalent(expected: str, answer: str, provider) -> Judgment:
     §4) — no transcript, no task instructions; there is nothing else in this
     function's signature for either to come from.
 
-    Fail-closed guarantee covers both output parsing AND transport: provider
-    exceptions (network, auth, rate-limit, service unavailable) return
-    Judgment(False, "", "<provider error: ...>") so one flaky call degrades
-    the pair rather than crashing the validation. The runner's own catch-all
-    remains the outer net.
+    Fail-closed guarantee covers output parsing, GROUNDING, and transport: a
+    malformed reply, a YES whose quote is not a verbatim span of ``answer``, and a
+    provider exception (network, auth, rate-limit, service unavailable) all return
+    a verdict of False, so one flaky call — or one invented citation — degrades the
+    pair rather than crashing the validation or passing a task. The runner's own
+    catch-all remains the outer net.
+
+    ``answer`` therefore reaches the parser as well as the payload. It is the same
+    string in both places, by construction: there is one ``answer`` in this
+    function, and nothing between here and the parse can substitute another.
     """
     from model import chat  # lazy: runner/ modules never bind carbon at import time
 
@@ -196,7 +266,7 @@ def judged_equivalent(expected: str, answer: str, provider) -> Judgment:
     ]
     try:
         response = chat(messages, provider=provider, temperature=0.0, max_tokens=512)
-        judgment = _parse_judgment(response.content or "")
+        judgment = _parse_judgment(response.content or "", answer)
         return replace(judgment, tokens=_usage_tokens(response.usage))
     except Exception as exc:
         error_msg = f"<provider error: {exc}>"

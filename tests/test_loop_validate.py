@@ -349,6 +349,7 @@ def _model(
     force_passes=None,
     saturate=frozenset(),
     mutate=None,
+    gain=None,
 ):
     """A round-2 null-model artifact, MEASURED by `loop.calibrate.calibrate_model`
     from the seven fabricated null arms above — nothing here is a hand-written rate.
@@ -392,8 +393,12 @@ def _model(
                 arm["filter"] = sorted(passes)
             (results_dir / f"{label}.json").write_text(json.dumps(arm))
     labels = sorted({**_FULL_ARMS, **_SUBSET_ARMS})
-    # SUPPORTED is the gain set; MODEL_TASKS is what the artifact must rate.
-    artifact = calibrate_model(labels, results_dir, SUPPORTED, coverage=MODEL_TASKS)
+    # SUPPORTED is the gain set; MODEL_TASKS is what the artifact must rate. `gain`
+    # overrides the former, which is how an artifact that chose its OWN gain set --
+    # internally consistent, and not the set the rule judges on -- gets built.
+    artifact = calibrate_model(
+        labels, results_dir, SUPPORTED if gain is None else gain, coverage=MODEL_TASKS
+    )
     if mutate is not None:
         mutate(artifact)
     path = tmp_path / name
@@ -510,6 +515,61 @@ def test_an_unfit_artifact_refuses_to_install_itself_and_says_which_check_failed
     assert cal is None
     assert "not calibrated" in why and "grain" in why
     assert "goodness" not in why, "only the checks that actually failed get named"
+
+
+def test_an_artifact_that_chose_its_own_gain_set_is_refused_naming_the_task(tmp_path):
+    """An artifact may not decide what the rule averages over.
+
+    Recomputation read the gain set off the artifact's OWN grain rows — the only place
+    that set was written down — so an artifact whose fitness was computed over three of
+    the four supported tasks re-derived cleanly, agreed with itself perfectly, and
+    installed. Every check then certified a judgment the rule does not make: the split
+    means it gates still average over four tasks, one of which nothing had checked.
+
+    G4 is the case that matters. It is the miner, the task every compaction candidate
+    is mined from, and a gain set quietly missing it is a rule whose evidence excludes
+    the task the evidence is about.
+    """
+    from loop.calibrate import SUPPORTED
+    from loop.validate import calibration_status
+
+    path = _model(
+        tmp_path,
+        stamped_sha=FP["runner_sha"],
+        gain=SUPPORTED - {"G4"},
+    )
+    artifact = json.loads(path.read_text())
+    assert artifact["fitness"]["fit"] is True, (
+        "fixture precondition: the artifact is internally consistent and certifies itself"
+    )
+    graded = {
+        t
+        for split, row in artifact["fitness"]["grain"].items()
+        if split not in ("pass", "per_task")
+        for t in row["tasks"]
+    }
+    assert graded == {"A1", "G2", "G5"}, "and its fitness genuinely covers a smaller set"
+
+    cal, why = calibration_status("compaction", FP, model_path=path)
+    assert cal is None
+    assert "G4" in why, "the refusal must name the task the artifact dropped"
+    assert "pinned" in why
+
+
+def test_a_per_task_block_missing_a_covered_task_is_refused(tmp_path):
+    """The other half of the same pin: the per-task blocks must cover what the model
+    RATES. Goodness, grain and stability each judge a guard on its own, so a per-task
+    row quietly absent is a guard nothing certified — recomputation rebuilds the block
+    over the covered set and names the row that is missing."""
+    from loop.validate import calibration_status
+
+    def drop_a_guard(artifact):
+        del artifact["fitness"]["goodness"]["per_task"]["CMP-7"]
+
+    path = _model(tmp_path, stamped_sha=FP["runner_sha"], mutate=drop_a_guard)
+    cal, why = calibration_status("compaction", FP, model_path=path)
+    assert cal is None
+    assert "recomput" in why and "goodness" in why and "CMP-7" in why
 
 
 def test_a_missing_provenance_value_is_a_mismatch_never_a_match(tmp_path):
@@ -1104,12 +1164,14 @@ def test_every_declared_compaction_guard_has_a_rate_the_pinned_model_must_carry(
 def test_the_committed_artifact_refuses_to_install_itself_and_says_why():
     """The transition, stated out loud rather than left to be discovered.
 
-    The reason has moved once already and this test moves with it. `model-r2.json` used
-    to be refused for its SHAPE: pooled over {A1, G2, G4, G5} while the loader pinned
-    seven tasks. The Phase 2c campaign closed that gap — ten arms, all seven tasks, at
-    one runner hash — and the artifact it produced refuses itself instead:
-    `fitness.fit = false`, because STABILITY did not hold. The section stays loudly
-    uncalibrated, which is the fail-closed design working.
+    The reason has moved twice now and this test moves with it. `model-r2.json` used to
+    be refused for its SHAPE: pooled over {A1, G2, G4, G5} while the loader pinned seven
+    tasks. The Phase 2c campaign closed that gap — ten arms, all seven tasks, at one
+    runner hash — and the artifact it produced refuses itself instead: `fitness.fit =
+    false`, first because STABILITY did not hold, and now because GOODNESS does not
+    either. Fitness certifies the tasks the model rates as of the phase's close, and
+    the guards it had rated without checking do not survive that. The section stays
+    loudly uncalibrated, which is the fail-closed design working.
 
     Asked at the artifact's OWN provenance, so shape and freshness are both satisfied
     and the refusal can only be the artifact's own verdict. "Re-run the arms",
@@ -1139,5 +1201,8 @@ def test_the_committed_artifact_refuses_to_install_itself_and_says_why():
     assert cal is None
     assert "not calibrated" in why
     assert "fitness.fit=False" in why, "the refusal must quote the artifact's own verdict"
-    assert "failed: stability" in why, "and name the check that produced it"
+    assert "failed: goodness, stability" in why, "and name the checks that produced it"
     assert "re-run the arms" in why, "and say what fixes it"
+    assert installed["fitness"]["grain"]["pass"] is True, (
+        "grain still holds — the refusal names exactly the two checks that do not"
+    )

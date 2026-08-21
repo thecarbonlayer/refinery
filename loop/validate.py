@@ -619,7 +619,20 @@ def calibration_status(
     # `recompute_model` re-derives every rate from the artifact's own per-arm counts and
     # re-runs grain, goodness and stability against them, so the loader ENFORCES the
     # artifact's self-refusal rather than quoting it.
-    rates, problems = recompute_model(model, level)
+    #
+    # The three pins are the other half. Recomputation reads what an artifact certified
+    # from the artifact itself -- the gain set off its grain rows, the guard set off its
+    # per-task rows -- so an artifact that quietly narrowed either one re-derived
+    # cleanly and agreed with itself perfectly. Passing THIS SECTION's sets holds the
+    # artifact against the judgment the rule actually makes: gain checks over the pinned
+    # supported set, per-task checks over the pinned covered set and the pinned guards.
+    rates, problems = recompute_model(
+        model,
+        level,
+        supported=_SECTION_SUPPORTED.get(section),
+        covered=_SECTION_COVERED.get(section),
+        guards=_SECTION_CONFIRM_GUARDS.get(section),
+    )
     if problems:
         return None, (
             f"section {section!r} is not calibrated: {where} does not survive recomputation "

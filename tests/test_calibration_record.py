@@ -64,12 +64,48 @@ def test_the_readme_describes_the_artifact_that_is_actually_committed():
     assert len(model["null_model"]) == 7
     assert model["fitness"]["fit"] is False
     assert model["fitness"]["stability"]["pass"] is False
+    assert model["fitness"]["goodness"]["pass"] is False
+    assert model["fitness"]["grain"]["pass"] is True
 
     doc = _normalized(README)
     assert "ten arms" in doc, "the pooling's size"
     assert "seven" in doc, "and the number of tasks it rates"
     assert "fit: false" in doc.lower() or "fit=false" in doc.lower()
-    assert "stability" in doc, "and which check refused"
+    # BOTH refusing checks, named. The set grew when fitness started certifying the
+    # tasks the model rates rather than only the four the gain judgment averages over,
+    # and a record that still named one of them would be describing the old artifact.
+    assert "STABILITY" in doc and "GOODNESS" in doc, "and which checks refused"
+
+
+def test_the_readme_states_the_guard_refusals_in_the_artifacts_own_numbers():
+    """The two new refusals, re-derived before they are looked for in the prose.
+
+    Both live on tasks that had no fitness row at all until the phase's close: a guard
+    was rated and never checked. The README quotes the goodness tail and names the
+    per-task stability crossings; each is read off the artifact here first.
+    """
+    fitness = _model()["fitness"]
+
+    failing = {
+        task: sorted(a for a, row in block["per_arm"].items() if not row["pass"])
+        for task, block in fitness["goodness"]["per_task"].items()
+    }
+    assert {t: a for t, a in failing.items() if a} == {"CMP-5": ["p2c-null-full-a"]}
+    tail = fitness["goodness"]["per_task"]["CMP-5"]["per_arm"]["p2c-null-full-a"]["tail_p"]
+    assert 0.0099 < float(Fraction(tail)) < 0.01, "just inside the 0.01 alpha"
+
+    crossed = {t for t, row in fitness["stability"]["per_task"].items() if not row["pass"]}
+    assert crossed == {"CMP-5", "CMP-6", "G4"}
+    # And every guard's own grain row clears the confirmation grain, so grain is not
+    # part of the refusal.
+    for task, row in fitness["grain"]["per_task"].items():
+        assert Fraction(row["quantile"]) > Fraction(row["grain"]), task
+
+    doc = _normalized(README)
+    assert "0.00996" in doc, "the goodness tail, quoted"
+    assert "17/79" in doc, "and the pooled rate it was measured against"
+    for task in sorted(crossed):
+        assert task in doc
     # The round-1 history is KEPT, not overwritten by the current state.
     assert "analysis-r1-unfit.json" in doc
     assert "withdrawn" in doc.lower()

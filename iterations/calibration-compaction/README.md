@@ -1,9 +1,10 @@
 # Compaction calibration: where this stands
 
 Short version: compaction is **not calibrated**. The committed artifact,
-`model-r2.json`, records `fit: false` because the STABILITY check refused, so the
-loader will not install it and the section falls back to the causal verdict. That is
-the fail-closed design working, not a defect. Nothing here gates a candidate today.
+`model-r2.json`, records `fit: false` because the GOODNESS and STABILITY checks
+refused, so the loader will not install it and the section falls back to the causal
+verdict. That is the fail-closed design working, not a defect. Nothing here gates a
+candidate today.
 
 The rest of this file is the history, because each round was withdrawn for a different
 reason and the reasons are the useful part.
@@ -65,15 +66,35 @@ described.
 - **Seven rated tasks**: the four-task gain set plus the three scenario guards. The
   gain judgment still averages over the four supported tasks; the guards need rates
   because the confirmation adjudicates them per task.
-- **`fitness.fit: false`.** GRAIN passes. GOODNESS passes. STABILITY does not.
+- **`fitness.fit: false`.** GRAIN passes. GOODNESS does not. STABILITY does not.
 
-The refusal is specific and worth stating in numbers. The held-in split's pooled
-quantile over all ten arms is **4/9**. Drop one arm, `p2c-null-cmp-d`, and it becomes
-**1/3**: one arm moves the bound a whole grain bucket. A threshold that depends on
-which arms happen to be in the pool is not a threshold. Held-out (G2 alone) is stable
-at 3/5 under every leave-one-out.
+### Fitness now certifies what the model rates
 
-Because `fit` is false the loader refuses, loudly, naming the check. Two consequences
+Through most of Phase 2c the fitness checks ran over the four supported tasks alone,
+so the three scenario guards were RATED and never CHECKED — each one gated on a pooled
+rate nothing had questioned. At the phase's close the per-task halves of all three
+checks were extended: goodness and leave-one-out stability over all seven rated tasks,
+and a per-task grain row for every guard, comparing its own bound at the
+confirmation's ten attempts against the single-attempt grain of 1/10.
+
+The guards do not survive it, and that is the finding rather than a setback:
+
+- **GOODNESS.** `p2c-null-full-a` passed CMP-5 on all 3 of its attempts, against a
+  pooled rate of 17/79. The exact two-sided binomial tail is **0.00996**, just inside
+  the 0.01 alpha. One arm disagrees with a single-rate model for that guard.
+- **STABILITY, per task.** CMP-5, CMP-6 and G4 each have a per-task bound that crosses
+  a grain bucket when one arm is dropped — CMP-5 under four different arms, CMP-6
+  under three, G4 under `p2c-null-cmp-d`.
+- **GRAIN passes**, including every guard's own row: each of the six confirmation
+  guards has a bound of 3/10 or 2/5 at ten attempts, comfortably above 1/10.
+
+The held-in gain refusal is unchanged and still worth stating in numbers. The held-in
+split's pooled quantile over all ten arms is **4/9**. Drop one arm, `p2c-null-cmp-d`,
+and it becomes **1/3**: one arm moves the bound a whole grain bucket. A threshold that
+depends on which arms happen to be in the pool is not a threshold. Held-out (G2 alone)
+is stable at 3/5 under every leave-one-out.
+
+Because `fit` is false the loader refuses, loudly, naming both checks. Two consequences
 worth knowing:
 
 - The section is uncalibrated, so `evaluate()` uses the causal verdict. Nothing is
@@ -96,6 +117,13 @@ Three things, and the second is the one that is easy to get wrong.
 **1. Bounds at the attempt counts judgments actually use.** The stability check pools
 arms recorded at 3 and 5 attempts with arms recorded at 10, then publishes one
 quantile. A bound is only a bound for the comparison it was computed at.
+
+Round 3 also has to answer the guards' own two refusals, which are new. CMP-5's
+goodness failure sits on a single 3-attempt arm and could be either a real outlier or
+the 3-attempt grain again; more held-in attempts is the same remedy. The per-task
+stability crossings on CMP-5, CMP-6 and G4 are the same shape as the held-in split's:
+low pooled rates on a coarse grid, where dropping one arm moves the bound a whole
+bucket.
 
 **2. More held-in ATTEMPTS, not more arms.** This is the auditor's finding and it is
 the whole reason round 3 is not just "run more arms". Held-in tasks run at **n=3**, so

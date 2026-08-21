@@ -28,9 +28,10 @@ SUSPENDED, and the reason has moved. It was once "the artifact rates four tasks 
 loader pins seven". The Phase 2c campaign ran to completion — ten `p2c-null-*` arms,
 all seven tasks, at one runner hash — and the artifact it produced records
 `fitness.fit = false`: STABILITY refused, because one arm moves the held-in quantile
-from 4/9 to 1/3. So the artifact still does not install, now by its own verdict rather
-than by shape, and there is still nothing calibrated to sweep WITH. That is the
-fail-closed design working, not a defect.
+from 4/9 to 1/3, and GOODNESS joined it at the phase's close, when fitness started
+certifying the guards the model rates instead of the gain set alone. So the artifact
+still does not install, now by its own verdict rather than by shape, and there is still
+nothing calibrated to sweep WITH. That is the fail-closed design working, not a defect.
 
 Restoration has one condition: a FIT artifact at the arms' own runner hash or a
 successor (the close-out's `attempted` metric has since advanced the branch's). The
@@ -166,28 +167,50 @@ def test_the_calibrated_null_sweep_is_suspended_by_the_artifacts_own_refusal(ref
     a claim about a pairing that does not exist while nothing installs. What is doing
     the refusing has moved, and this test pins the current reason rather than the one it
     used to have: the campaign is complete (ten arms, all seven tasks, one runner hash)
-    and the artifact it produced sets `fitness.fit = false` because STABILITY refused.
-    "The arms are missing" and "the arms are in and the model is not stable" are
-    different remedies, so the refusal has to say which one this is.
+    and the artifact it produced sets `fitness.fit = false` because GOODNESS and
+    STABILITY refused. "The arms are missing" and "the arms are in and the model is
+    neither well-fitted nor stable" are different remedies, so the refusal has to say
+    which one this is.
+
+    The reason set GREW at the phase's close, and the growth is the finding. Fitness now
+    certifies the tasks the model rates rather than only the four the gain judgment
+    averages over, and the guards it had been rating without checking do not survive it:
+    one arm's CMP-5 count (3 of 3, against a pooled 17/79) disagrees with a single-rate
+    model at p = 0.00996, just inside the 0.01 alpha, and CMP-5, CMP-6 and G4 each have
+    a per-task bound that crosses a grain bucket when one arm is dropped. Stability
+    already refused; goodness joined it once anything looked at the guards.
 
     Restoration condition, stated once and asserted here: a FIT artifact at this runner
     hash or a successor. Nothing weaker — not a hand-edited `fit`, which the loader
-    re-derives and rejects, and not a fresh pooling that still fails stability.
+    re-derives and rejects, and not a fresh pooling that still fails either check.
     """
     assert "not calibrated" in refusal
     assert "fitness.fit=False" in refusal, "the refusal must name the artifact's own verdict"
-    assert "failed: stability" in refusal, "and which check produced it"
+    assert "failed: goodness, stability" in refusal, "and which checks produced it"
     assert "re-run the arms" in refusal
 
-    # The same two facts read off the artifact, so the refusal cannot be the only thing
-    # saying them. `fit` is false, and stability is the check that made it false.
+    # The same facts read off the artifact, so the refusal cannot be the only thing
+    # saying them. `fit` is false; goodness and stability are the checks that made it so.
     fitness = json.loads(MODEL.read_text())["fitness"]
     assert fitness["fit"] is False
     assert fitness["stability"]["pass"] is False
-    assert fitness["grain"]["pass"] is True and fitness["goodness"]["pass"] is True, (
-        "stability alone refuses here — if another check has started failing too, the "
+    assert fitness["goodness"]["pass"] is False
+    assert fitness["grain"]["pass"] is True, (
+        "goodness and stability refuse here — if grain has started failing too, the "
         "suspension reason above is no longer the whole reason"
     )
+    # And WHERE each one refuses: both land on tasks the guards' own certification
+    # brought into scope, which is why the set grew.
+    failing_arms = {
+        task: sorted(a for a, row in block["per_arm"].items() if not row["pass"])
+        for task, block in fitness["goodness"]["per_task"].items()
+    }
+    assert {t: a for t, a in failing_arms.items() if a} == {"CMP-5": ["p2c-null-full-a"]}
+    assert {t for t, row in fitness["stability"]["per_task"].items() if not row["pass"]} == {
+        "CMP-5",
+        "CMP-6",
+        "G4",
+    }
 
 
 def _carrier_sets():
