@@ -83,7 +83,7 @@ def _isolated_scratch_root():
         shutil.rmtree(root, ignore_errors=True)
 
 
-def pytest_configure(config):
+def pytest_sessionstart(session):
     """Fail the whole run early — remediation, not an ImportError spray — when
     the sibling carbon checkout is not the pinned base (see carbon-base.json).
 
@@ -92,6 +92,19 @@ def pytest_configure(config):
     prints any commit-drift warnings to stderr — so this import is the ONE
     guard run for the whole pytest session. Calling ``require_carbon_base()``
     again here would run it a second time for no benefit.
+
+    ``pytest_sessionstart``, not ``pytest_configure``: pytest.exit's
+    returncode only becomes the process status inside ``wrap_session``
+    (``_pytest/main.py``), and informational commands like ``--help`` and
+    ``--markers`` call ``config._do_configure()`` OUTSIDE it — a guard raising
+    pytest.exit from pytest_configure escaped those commands as a raw
+    ``_pytest.outcomes.Exit`` traceback, exit 1. Every session-running
+    invocation (a normal run, ``--collect-only``, ``--fixtures``) fires
+    pytest_sessionstart inside ``wrap_session``, BEFORE collection — so the
+    guard still precedes any import of test modules — and ``wrap_session``
+    both honors the returncode and prints the message. ``--help``/``--markers``
+    never start a session and never touch the carbon pair, so they now
+    correctly print their output and succeed instead of tracebacking.
 
     The except clause matches ``RuntimeError`` and then checks the class name
     AND its defining module by string, rather than importing and checking
