@@ -2617,6 +2617,36 @@ def test_g2_decomposition_replays_every_recorded_pass_fraction_unchanged():
     assert sum(seen.values()) == 95
 
 
+def test_non_answer_taxonomy_is_one_classifier_shared_by_name():
+    """The taxonomy G2 owns (contract §5), hoisted where CMP-5 and CMP-6 can share it.
+
+    Three tasks now classify the same two non-answer shapes — a reply that is nothing
+    but carbon's truncation marker, and a tool-call fragment emitted instead of an
+    answer. Three inline copies of those strings would drift: an analysis counting
+    `non_answer=` reasons across tasks needs one spelling, so the labels are module
+    constants and the classification is one function all three call.
+    """
+    from runner.tasks.cluster_g import (
+        G2_TRUNCATION_MARKER,
+        NON_ANSWER_TOOL_SYNTAX,
+        NON_ANSWER_TRUNCATED,
+        classify_non_answer,
+        g2_verdict,
+    )
+
+    assert classify_non_answer(f"\n\n{G2_TRUNCATION_MARKER}") == NON_ANSWER_TRUNCATED
+    assert classify_non_answer("<|tool_call>call:bash {}<tool_call|>") == NON_ANSWER_TOOL_SYNTAX
+    assert classify_non_answer("a real answer") is None
+    # G2's strict starts-with rule survives the hoist: prose that produced an answer
+    # and THEN hit the limit did attempt, and stays a plain fail.
+    assert classify_non_answer(f"The codes are{G2_TRUNCATION_MARKER}") is None
+
+    # g2_verdict emits the SAME constants, so the replay test above and every
+    # cross-task count read one vocabulary.
+    assert g2_verdict(f"{G2_TRUNCATION_MARKER}", False, False)[2] == NON_ANSWER_TRUNCATED
+    assert g2_verdict("<|tool_call>x", False, False)[2] == NON_ANSWER_TOOL_SYNTAX
+
+
 def test_g2_publishes_whether_the_attempt_produced_an_answer_at_all():
     """Contract §5's metric. ``attempted`` is emitted on EVERY G2 attempt, including
     the setup-guard error, or its mean would be a fraction of whichever attempts

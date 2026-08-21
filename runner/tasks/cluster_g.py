@@ -202,6 +202,31 @@ G2_TRUNCATION_MARKER = "[incomplete: the model reached its output limit before f
 # about what compaction carried.
 _TOOL_SYNTAX_RE = re.compile(r"<\|tool_call")
 
+# The taxonomy's labels, as constants: G2, CMP-5 and CMP-6 all classify the same
+# two non-answer shapes, and an analysis counting `non_answer=` reasons across
+# tasks needs ONE spelling of each. Three inline copies would drift apart the
+# first time one was reworded.
+NON_ANSWER_TRUNCATED = "generation truncated before answer"
+NON_ANSWER_TOOL_SYNTAX = "tool-syntax leak instead of answer"
+
+
+def classify_non_answer(reply: str) -> str | None:
+    """The shared non-answer classification (contract §5's taxonomy): the label, or
+    None for a reply that did attempt an answer.
+
+    Deterministic and FIRST in every verifier that uses it — a reply that never
+    attempted the answer is not evidence about what compaction carried, and no
+    later layer (mechanical parse, judge) should be consulted about it. The
+    starts-with rule for truncation is deliberately strict, exactly as G2 pinned
+    it: prose that produced an answer and THEN hit the output limit did attempt,
+    and stays a plain fail.
+    """
+    if reply.lstrip().startswith(G2_TRUNCATION_MARKER):
+        return NON_ANSWER_TRUNCATED
+    if _TOOL_SYNTAX_RE.search(reply):
+        return NON_ANSWER_TOOL_SYNTAX
+    return None
+
 
 def g2_verdict(reply: str, early: bool, late: bool) -> tuple[bool, str, str | None]:
     """G2's whole verdict: ``(passed, outcome, non_answer_detail)``.
@@ -233,10 +258,9 @@ def g2_verdict(reply: str, early: bool, late: bool) -> tuple[bool, str, str | No
     """
     if early and late:
         return True, "pass", None
-    if reply.lstrip().startswith(G2_TRUNCATION_MARKER):
-        return False, "not_attempted", "generation truncated before answer"
-    if _TOOL_SYNTAX_RE.search(reply):
-        return False, "not_attempted", "tool-syntax leak instead of answer"
+    non_answer = classify_non_answer(reply)
+    if non_answer:
+        return False, "not_attempted", non_answer
     return False, "fail", None
 
 
