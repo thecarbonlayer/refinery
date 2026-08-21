@@ -19,7 +19,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from loop.acceptance import ACCEPT, CONFIRM, Decision, confirmed
+from loop.acceptance import ACCEPT, CONFIRM, Decision, confirmed, decision_digest
 from loop.artifacts import (
     STAGE_PAIRED_CONFIRMATION,
     Candidate,
@@ -33,6 +33,7 @@ from loop.artifacts import (
 )
 from loop.config_edit import apply_candidate
 from loop.validate import (
+    CALIBRATION_REQUIRED,
     EDITOR_ROOT,
     calibration_status,
     candidate_section,
@@ -109,7 +110,9 @@ def _check_candidate_identity(it_dir: Path, candidate: Candidate) -> None:
         )
 
 
-def load_first_decision(it_dir: Path, candidate_id: str) -> Decision:
+def load_first_decision(
+    it_dir: Path, candidate_id: str, *, require_binding: bool = False
+) -> Decision:
     """The candidate's first CONFIRM verdict, read back off its validation record.
 
     The only legitimate starting point for a paired confirmation — ``confirmed()``
@@ -117,6 +120,14 @@ def load_first_decision(it_dir: Path, candidate_id: str) -> Decision:
     so a confirmation without a first CONFIRM has nothing to confirm and nothing to
     compare against. Refuses loudly (``SystemExit``, matching this module's other
     refusals) rather than fabricating a decision or silently no-oping.
+
+    ``require_binding`` says the record MUST carry a matching decision digest — absent
+    refuses exactly like wrong. The caller derives it from the candidate's SECTION
+    (`loop.validate.CALIBRATION_REQUIRED`), which comes from code and from
+    candidates.json, never from the record being loaded: a record that could switch off
+    its own check by dropping a key is not checked. ``confirmed()`` enforces the same
+    binding again once the calibration is actually in hand; this is the early, better-
+    worded refusal, not the only one.
     """
     rec_path = it_dir / f"validation-{candidate_id}.json"
     rule = _load_validation_json(it_dir, candidate_id).get("rule", {})
@@ -136,7 +147,31 @@ def load_first_decision(it_dir: Path, candidate_id: str) -> Decision:
         for k, v in rule.items()
         if k in decision_fields
     }
-    return Decision(**kwargs)
+    decision = Decision(**kwargs)
+    # STAGE BINDING at the reload boundary. Everything above trusts a JSON file on
+    # disk, and the two fields it hands `confirmed()` are the whole exam: every task
+    # in `improved_tasks` must repeat beyond its own null quantile, and `confirm_tasks`
+    # is what gets rerun. Editing three carriers down to one is not a smaller claim,
+    # it is an easier test of a claim that was never made — and nothing else in this
+    # path could see it, because a shorter list is perfectly well-formed.
+    #
+    # An ABSENT digest refuses whenever the section requires a binding. The first
+    # version skipped that case, which meant the attack was "shrink the list, delete
+    # the digest" — the check asked the record's permission to run.
+    recorded = (decision.raw or {}).get("decision_digest")
+    if recorded is not None or require_binding:
+        current = decision_digest(decision)
+        if recorded != current:
+            raise SystemExit(
+                f"{rec_path} does not match its own decision digest: it "
+                + ("carries none" if recorded is None else f"records {recorded!r}")
+                + f" and the improved_tasks/confirm_tasks it now carries digest to "
+                f"{current!r}. improved_tasks={list(decision.improved_tasks)}, "
+                f"confirm_tasks={list(decision.confirm_tasks)} — a confirmation run from "
+                "this record would test a different claim than the one that was made. "
+                "Re-validate the candidate rather than repairing the record."
+            )
+    return decision
 
 
 def _run_confirm_arm(
@@ -212,7 +247,7 @@ def run_confirmation(
     """Fresh paired confirmation: a baseline arm (config unedited) against a candidate
     arm (candidate applied), both filtered to the first decision's ``confirm_tasks``
     at ``attempts`` each, judged by ``acceptance.confirmed()``. The only path from a
-    CONFIRM to an ACCEPT (contract §5) — shared infrastructure, not section-specific.
+    CONFIRM to an ACCEPT — shared infrastructure, not section-specific.
     """
     for label in (baseline_label, candidate_label):
         if (results_dir / f"{label}.json").is_file():
@@ -223,7 +258,13 @@ def run_confirmation(
                 "evidence that was never actually re-run for this confirmation"
             )
     _check_candidate_identity(it_dir, candidate)
-    first = load_first_decision(it_dir, candidate.id)
+    # Whether this record MUST be bound to its own claim is a property of the section
+    # the candidate edits, read from code and from candidates.json — not from the
+    # record, which is the thing being checked.
+    section = candidate_section(candidate)
+    first = load_first_decision(
+        it_dir, candidate.id, require_binding=section in CALIBRATION_REQUIRED
+    )
     confirm_set = tuple(first.confirm_tasks)
     only = list(confirm_set)
     require_clean_tree(carbon_root)
@@ -237,14 +278,13 @@ def run_confirmation(
         require_clean_tree(carbon_root)  # the revert must actually have reverted
     log(f"candidate {candidate.id}: confirmation candidate arm {candidate_label!r} done")
     # The section's measured bounds, if it has any that are fresh for THIS pair
-    # (contract §5 amendment). The freshness question is asked of the confirmation
+    # The freshness question is asked of the confirmation
     # BASELINE arm — the run that was just recorded, not the process asking — so a
     # calibration is used only where it is actually a bound for these measurements.
     # For an uncalibrated section (`tool_output`) this is None and nothing changes.
     # When the first decision WAS calibrated and this comes back None, `confirmed()`
     # refuses rather than quietly re-deciding on the weaker one-attempt bound, and the
     # refusal lands in the same no-artifact-written path as any other parity failure.
-    section = candidate_section(candidate)
     calibration, why_not = (
         calibration_status(section, baseline_results.get("fingerprint") or {})
         if section
@@ -252,6 +292,20 @@ def run_confirmation(
     )
     if calibration is not None:
         log(f"candidate {candidate.id}: judging against {calibration.source}")
+    elif section in CALIBRATION_REQUIRED:
+        # FAIL CLOSED here too, and keyed on the SECTION rather than on the record's
+        # own `regime`. The old guard lived in `confirmed()` and asked the first
+        # decision whether it had been calibrated — so deleting that one key bought an
+        # uncalibrated confirmation of a calibrated claim, judged against the weaker
+        # one-attempt grain. What requires a null model is the section, and the section
+        # comes from the candidate.
+        raise SystemExit(
+            f"candidate {candidate.id!r} edits {section!r}, which is decided by a "
+            f"measured null model or not at all, and this confirmation has none: "
+            f"{why_not}. Confirming it against the one-attempt bound would answer a "
+            "different question under the same word. Re-run the null arms and rebuild "
+            "the model, then re-validate."
+        )
     elif (first.raw or {}).get("regime") == "section_calibration":
         log(f"candidate {candidate.id}: no calibration for this confirmation — {why_not}")
     try:
@@ -284,7 +338,7 @@ def run_confirmation(
 def _pr_eligible_record(
     it_dir: Path, candidate: Candidate, record: ValidationRecord
 ) -> ValidationRecord:
-    """PR eligibility (contract §5 amendment): the validation record's own
+    """PR eligibility: the validation record's own
     ``accepted``, OR — for a rule-section candidate whose FIRST decision was
     CONFIRM — a fresh paired confirmation for the SAME candidate whose own outcome
     is ACCEPT.
@@ -334,7 +388,12 @@ def _pr_eligible_record(
             f"candidate {candidate.id!r}'s confirmation outcome is {outcome!r}, not "
             f"{ACCEPT!r} — no PR"
         )
-    return dataclasses.replace(record, accepted=True)
+    # The confirmation rides along onto the record. It is what ACCEPTED this candidate:
+    # its deltas, its quantiles and its attempt counts are the evidence for the merge,
+    # and stage 1's are not. Promoting `accepted` alone left `pr_body` rendering the
+    # first pass's numbers under the word ACCEPTED — the verdict of one measurement
+    # printed beside another one's figures.
+    return dataclasses.replace(record, accepted=True, confirmation=confirmation.to_json())
 
 
 def main() -> None:

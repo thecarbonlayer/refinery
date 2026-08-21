@@ -69,6 +69,126 @@ def commit_message(candidate: Candidate, record: ValidationRecord, iteration: st
     )
 
 
+def _counts_note(attempts: dict) -> str:
+    """``"A1 10v10, G4 10v10"`` — the per-task attempt counts a quantile was computed
+    at, straight off the decision's own quantile record. A threshold with no counts
+    beside it is exactly the round-1 artifact this program withdrew: a number nobody
+    could tell was about the wrong run."""
+    return ", ".join(f"{task} {pair[0]}v{pair[1]}" for task, pair in sorted(attempts.items()))
+
+
+def _quantile_rows(quantiles: dict) -> str:
+    rows = []
+    for split in ("held_in", "held_out"):
+        rec = quantiles.get(split) or {}
+        tasks = ", ".join(rec.get("tasks") or []) or "_none on this split_"
+        rows.append(
+            f"| {split.replace('_', '-')} | {tasks} | `{rec.get('quantile', '?')}` | "
+            f"{_counts_note(rec.get('attempts') or {}) or '—'} |"
+        )
+    return "\n".join(rows)
+
+
+def _calibrated_validation(
+    record: ValidationRecord, rule: dict, raw: dict, regressions: str
+) -> str:
+    """The Validation section for a decision judged against a MEASURED NULL MODEL.
+
+    The legacy section states the one-number acceptance rule. A calibrated decision
+    was never judged by it — it was judged on the SUPPORTED-SET split means against
+    quantiles computed from pooled null rates at the two runs' own attempt counts —
+    so rendering the legacy text there tells the human approving the merge that a
+    comparison was made which nobody made. What goes here instead is the rule that
+    actually ran, the deltas and bounds it ran on, the identity of the artifact those
+    bounds came from, and where to find the confirmation.
+    """
+    cal = rule.get("calibration") or raw.get("calibration") or {}
+    quantiles = raw.get("null_quantiles") or {}
+    rates = ", ".join(f"{t} `{r}`" for t, r in sorted((cal.get("null_rates") or {}).items()))
+    coverage = cal.get("coverage_level", "39/40")
+    sha = str(cal.get("computed_at_runner_sha") or "")
+    reasons = "\n".join(f"- {reason}" for reason in rule.get("reasons") or []) or "- _none_"
+    return f"""## Validation — measured null model for section `{cal.get("section", "?")}`
+
+**Supported-set Δ_in = {rule.get("delta_in", 0.0):+.4f}, \
+Δ_ho = {rule.get("delta_ho", 0.0):+.4f} -> {record.disposition}**
+
+This candidate was NOT judged by the one-number acceptance rule. It was judged against
+a measured NULL MODEL: one pooled pass rate per supported task, measured from arms with
+NOTHING changed between them, from which every bound below was computed at these two
+runs' own attempt counts rather than read off the artifact. CONFIRM required the
+supported-set split mean to exceed the {coverage} quantile of that null distribution on
+the evidence split. ACCEPT is not reachable here at all — only a fresh paired
+confirmation grants it, and it additionally requires every carrier to repeat beyond its
+OWN quantile, every guard to hold above its own, and both supported-set means to be
+non-negative.
+
+| split | supported tasks | {coverage} null quantile | computed at |
+|---|---|---:|---|
+{_quantile_rows(quantiles)}
+
+Whole-split means, kept for comparison and NOT what decided: \
+Δ_in = {raw.get("full_split_delta_in", 0.0):+.4f}, \
+Δ_ho = {raw.get("full_split_delta_ho", 0.0):+.4f}.
+
+Null model: `{cal.get("source", "?")}`, computed at runner `{sha[:12]}`. Pooled null
+rates: {rates or "_not recorded_"}. Guards: {", ".join(cal.get("guards") or []) or "none"}.
+
+Rule outcome: **{rule.get("outcome", "?")}**
+{reasons}
+
+Per-task regression warnings: {regressions}. A full-pass -> zero-pass movement is a
+promotion veto even when the aggregate split rule passes."""
+
+
+def _confirmation_section(record: ValidationRecord) -> str:
+    """The measurement that actually accepted the candidate, when one did.
+
+    A CONFIRM candidate's validation record keeps stage 1's numbers forever —
+    ``validate_candidate`` never rewrites it — so a promoted record used to render the
+    first pass's deltas under the word ACCEPTED. The first pass did not accept
+    anything: it said "promising". This section carries the run that did, at its own
+    attempt counts, against its own quantiles.
+    """
+    conf = record.confirmation or {}
+    if not conf:
+        return ""
+    decision = conf.get("confirmation") or {}
+    raw = decision.get("raw") or {}
+    carriers = raw.get("carrier_quantiles") or {}
+    guards = raw.get("guard_quantiles") or {}
+    rows = [
+        f"| {kind} | {task} | `{rec.get('quantile', '?')}` | "
+        f"{_counts_note(rec.get('attempts') or {}) or '—'} |"
+        for kind, group in (("carrier", carriers), ("guard", guards))
+        for task, rec in sorted(group.items())
+    ]
+    table = (
+        "\n".join(["| gate | task | null quantile | computed at |", "|---|---|---:|---|", *rows])
+        if rows
+        else "_no per-task gates recorded — this confirmation was judged uncalibrated._"
+    )
+    reasons = "\n".join(f"- {reason}" for reason in decision.get("reasons") or []) or "- _none_"
+    return f"""
+
+## Confirmation — the measurement that accepted this candidate
+
+Fresh paired rerun `{conf.get("baseline_label", "?")}` (config unedited) against
+`{conf.get("candidate_label", "?")}` (candidate applied), \
+{conf.get("attempts_per_task_per_arm", "?")} attempts per task per arm on \
+{", ".join(conf.get("confirm_set") or []) or "no tasks"} -> \
+**{decision.get("outcome", "?")}**. Recorded as \
+`confirmation-{record.candidate_id}.json` beside this candidate's validation record.
+
+**Confirmed supported-set Δ_in = {decision.get("delta_in", 0.0):+.4f}, \
+Δ_ho = {decision.get("delta_ho", 0.0):+.4f}** — these, not the first pass's, are the
+numbers this promotion rests on.
+
+{table}
+
+{reasons}"""
+
+
 def pr_body(
     candidate: Candidate,
     record: ValidationRecord,
@@ -105,6 +225,12 @@ def pr_body(
     # unknown-vs-clean distinction the denominator note ~40 lines below already draws.
     rule = record.rule or {}
     rule_applied = bool(rule.get("applied"))
+    rule_raw: dict = rule.get("raw") or {}
+    # Which rule the body must STATE is decided by which rule ran, read off the
+    # decision's own record. `regime` is written by `loop.acceptance.evaluate()` only
+    # when a calibration decided, so a legacy record (and every uncalibrated section)
+    # renders exactly the text it always did, byte for byte.
+    calibrated = rule_applied and rule_raw.get("regime") == "section_calibration"
     sec_reg: dict = rule.get("security_regressions") or {}
     beh_reg: dict = rule.get("behavioral_regressions") or {}
     behavioral_verdicts: dict = (rule.get("raw") or {}).get("behavioral_verdicts") or {}
@@ -251,6 +377,17 @@ def pr_body(
         parts.append("denominator unknown for " + ", ".join(f"`{name}`" for name in unknown))
     drift = "; ".join(parts) or "none — every metric covers the same counts on both sides"
     bf, cf = record.baseline_fingerprint, record.candidate_fingerprint
+    confirmation_section = _confirmation_section(record)
+    validation_section = (
+        _calibrated_validation(record, rule, rule_raw, regressions)
+        if calibrated
+        else f"""## Validation — acceptance rule `Δ_in ≥ 0, Δ_ho ≥ 0, max(Δ_in, Δ_ho) > 0`
+
+**Δ_in = {record.delta_in:+.4f}, Δ_ho = {record.delta_ho:+.4f} -> {record.disposition}**
+
+Per-task regression warnings: {regressions}. A full-pass -> zero-pass movement is a
+promotion veto even when the aggregate split rule passes."""
+    )
     return f"""## Failure cluster targeted
 
 **{cluster.id}** — {cluster.mechanism}
@@ -267,16 +404,11 @@ Observed in: {", ".join(cluster.tasks)}.
 
 (`version` bumped {bf.get("config_version")} -> {cf.get("config_version")} by the pipeline.)
 
-## Validation — acceptance rule `Δ_in ≥ 0, Δ_ho ≥ 0, max(Δ_in, Δ_ho) > 0`
-
-**Δ_in = {record.delta_in:+.4f}, Δ_ho = {record.delta_ho:+.4f} -> {record.disposition}**
-
-Per-task regression warnings: {regressions}. A full-pass -> zero-pass movement is a
-promotion veto even when the aggregate split rule passes.
+{validation_section}
 
 | task | split | baseline | candidate | Δ |
 |---|---|---|---|---|
-{per_task}
+{per_task}{confirmation_section}
 
 ### Efficiency and trajectory telemetry
 
