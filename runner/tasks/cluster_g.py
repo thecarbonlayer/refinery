@@ -263,8 +263,10 @@ class GuardVerdict:
     records which layer DECIDED — "mechanical" for the deterministic checks (the
     default, decision 12), "judged" when the pinned judge read the prose — because
     a rate whose verdicts came from two different layers must say which was which.
-    ``judgments`` carries the judge calls that were actually made (empty on a
-    mechanical verdict), for token accounting and for the record's quotes.
+    ``judgments`` carries every judge call that was actually made, for token
+    accounting and for the record's quotes — including on a verdict the taxonomy
+    decided after the judge refused: the call's cost is real even when its verdict
+    did not decide the attempt.
     """
 
     passed: bool
@@ -612,55 +614,72 @@ def cmp5_verdict(reply: str) -> tuple[bool, str | None, str | None]:
 
 
 def cmp5_outcome(reply: str, judge: Callable[[str, str], Judgment]) -> GuardVerdict:
-    """CMP-5's whole verdict, layered deterministic-first (decision 12's rule).
+    """CMP-5's whole verdict: DECIDE what can be decided, classify only the rest.
 
     The old verdict was the form parse alone, and it recorded a reply that skipped
     the form — including one whose PROSE was correct — as a non-answer. That made
     the pooled rate compound format obedience with recall, which is why this task
-    was barred from gating candidates. The layers now, in order:
+    was barred from gating candidates. A review then caught the first rework
+    putting the taxonomy in FRONT of the deciders, which un-answered answered
+    questions (a complete form with a trailing tool leak was `not_attempted`).
+    The layers now, decision-12 order — deciders first, taxonomy last:
 
-    1. The shared non-answer taxonomy (``classify_non_answer``): a truncated
-       generation or a tool-call fragment never attempted the answer, so no later
-       layer is consulted about it. ``not_attempted``, labeled.
-    2. The mechanical parse, wherever it can DECIDE: both roles answered in the
+    1. The mechanical parse, wherever it can DECIDE: both roles answered in the
        form is the model answering the exact question in the exact form —
-       determinism reads it, pass or fail (``CMP5_WRONG_IN_FORM``), and the judge
-       is never consulted. A wrong code in a complete form answer is a real recall
-       failure, not a formatting artifact.
-    3. Still mechanical: a reply carrying NEITHER approach code cannot name the
-       roles at all — no extraction can find what is not there. ``fail`` with
-       ``CMP5_NO_CODE``. This is where an explicit denial lands, and it is a real
-       failure now rather than the old conservative ``not_attempted``: the codes
-       did not survive compaction, which is exactly what this task measures.
-    4. Only then the judge — the one place determinism would manufacture a false
-       failure out of formatting: the reply carries a code but the form did not
-       deliver a complete answer. Each pinned role claim (``CMP5_APPROVED_FACT``,
-       ``CMP5_RETIRED_FACT``) is judged against the reply alone. Both YES is a
-       pass; a delivered NO is a real judged failure
+       determinism reads it, pass or fail (``CMP5_WRONG_IN_FORM``), the judge is
+       never consulted, and trailing garbage cannot veto it. A wrong code in a
+       complete form answer is a real recall failure, not a formatting artifact.
+    2. The judge, where determinism would manufacture a false failure out of
+       formatting: the reply carries a code but the form did not deliver a
+       complete answer. Each pinned role claim (``CMP5_APPROVED_FACT``,
+       ``CMP5_RETIRED_FACT``) is judged against the reply alone — the judge reads
+       THROUGH a leak, so a grounded YES on both roles passes. A delivered
+       non-pass falls to the taxonomy first (a leak with a code caught in it is
+       still a non-answer — the same call ``g2_verdict`` makes for a leak with a
+       sentinel in it); otherwise it is a real judged failure
        (``CMP5_ROLES_NOT_PRESERVED``).
+    3. The shared non-answer taxonomy (``classify_non_answer``), for replies
+       nothing could decide: ``not_attempted``, labeled.
+    4. Last, mechanically: a prose reply carrying NEITHER approach code cannot
+       name the roles at all. ``fail`` with ``CMP5_NO_CODE``. This is where an
+       explicit denial lands, and it is a real failure now rather than the old
+       conservative ``not_attempted``: the codes did not survive compaction,
+       which is exactly what this task measures.
 
-    Fail closed, without blaming the strategy: if either judge call never delivers
-    a verdict (``Judgment.ran`` False — provider outage, unparseable output), the
-    attempt is ``error`` with ``JUDGE_UNAVAILABLE``, never a silent pass and never
-    a ``fail`` that would put a judge outage into a guard's rate.
+    G2 divergence, deliberate: G2 classifies a wrong-answer-plus-leak reply as
+    ``not_attempted`` because its recall booleans cannot tell "answered wrongly"
+    from "never answered". CMP-5's complete form is positive evidence the model
+    answered, so a complete-but-wrong form stays a ``fail`` even beside a leak.
+
+    Fail closed, without blaming the strategy: if a needed judge verdict never
+    arrives (``Judgment.ran`` False — provider outage, unparseable output) and the
+    taxonomy cannot already explain the reply deterministically, the attempt is
+    ``error`` with ``JUDGE_UNAVAILABLE`` — never a silent pass, and never a
+    ``fail`` that would put a judge outage into a guard's rate. When the taxonomy
+    DOES explain it, the non-answer classification stands: it never depended on
+    the judge, so judge health must not turn it into an ``error``.
     """
-    non_answer = classify_non_answer(reply)
-    if non_answer:
-        return GuardVerdict(False, "not_attempted", non_answer, "mechanical")
     ok, approved, retired = cmp5_verdict(reply)
     if ok:
         return GuardVerdict(True, "pass", None, "mechanical")
     if approved is not None and retired is not None:
         return GuardVerdict(False, "fail", CMP5_WRONG_IN_FORM, "mechanical")
     low = reply.lower()
-    if CMP5_CURRENT.lower() not in low and CMP5_RETIRED.lower() not in low:
-        return GuardVerdict(False, "fail", CMP5_NO_CODE, "mechanical")
-    judgments = (judge(CMP5_APPROVED_FACT, reply), judge(CMP5_RETIRED_FACT, reply))
-    if not all(j.ran for j in judgments):
-        return GuardVerdict(False, "error", JUDGE_UNAVAILABLE, "judged", judgments)
-    if all(j.verdict for j in judgments):
-        return GuardVerdict(True, "pass", None, "judged", judgments)
-    return GuardVerdict(False, "fail", CMP5_ROLES_NOT_PRESERVED, "judged", judgments)
+    if CMP5_CURRENT.lower() in low or CMP5_RETIRED.lower() in low:
+        judgments = (judge(CMP5_APPROVED_FACT, reply), judge(CMP5_RETIRED_FACT, reply))
+        delivered = all(j.ran for j in judgments)
+        if delivered and all(j.verdict for j in judgments):
+            return GuardVerdict(True, "pass", None, "judged", judgments)
+        non_answer = classify_non_answer(reply)
+        if non_answer:
+            return GuardVerdict(False, "not_attempted", non_answer, "mechanical", judgments)
+        if not delivered:
+            return GuardVerdict(False, "error", JUDGE_UNAVAILABLE, "judged", judgments)
+        return GuardVerdict(False, "fail", CMP5_ROLES_NOT_PRESERVED, "judged", judgments)
+    non_answer = classify_non_answer(reply)
+    if non_answer:
+        return GuardVerdict(False, "not_attempted", non_answer, "mechanical")
+    return GuardVerdict(False, "fail", CMP5_NO_CODE, "mechanical")
 
 
 def cmp5_supersession_pending(messages: list[dict]) -> bool:
@@ -810,29 +829,44 @@ def run_cmp5() -> Attempt:
 
 
 def cmp6_outcome(reply: str, judge: Callable[[str, str], Judgment]) -> GuardVerdict:
-    """CMP-6's whole verdict: the shared non-answer taxonomy first, the judge after.
+    """CMP-6's whole verdict: the judge decides first, the taxonomy classifies
+    what it refused.
 
-    A reply that is nothing but carbon's truncation marker or a tool-call fragment
-    never attempted the constraint, so judging it would measure the leak, not the
-    meaning — ``not_attempted``, labeled, and the judge is not consulted (the one
-    deterministic step a judged task keeps, per decision 12's default). Everything
-    else goes to the judge exactly as before: a delivered YES passes, a delivered
-    NO is a real judged failure (``CMP6_NOT_EQUIVALENT``).
+    CMP-6 has no mechanical layer that can DECIDE — no sentinel, nothing to parse
+    — so its deciding layer IS the judge, and it runs first, the way G2 checks
+    successful recall before classifying anything: a delivered, grounded YES
+    passes even when tool syntax trails the answer, because the judge reads
+    through the leak the way G2's substring check reads through it. A first
+    version of this router put the taxonomy in front and thereby vetoed answers
+    the judge could have read — the review's ordering finding.
 
-    Fail closed without blaming the strategy: a judge that never delivers a verdict
-    (``Judgment.ran`` False) is an ``error`` with ``JUDGE_UNAVAILABLE``. The old
-    shape recorded that provider exception as a plain ``fail`` — serving noise
-    landing in a guard's rate, which is the exact confound the serving-health audit
-    flagged on this campaign.
+    Only a reply the judge REFUSED is classified: nothing-but-a-truncation-marker
+    or a tool-call fragment is ``not_attempted``, labeled (judging measured the
+    leak, and the label says so); ordinary refused prose is a real judged failure
+    (``CMP6_NOT_EQUIVALENT``).
+
+    Fail closed without blaming the strategy: a judge that never delivers a
+    verdict (``Judgment.ran`` False) is an ``error`` with ``JUDGE_UNAVAILABLE`` —
+    unless the deterministic taxonomy already explains the reply, in which case
+    the non-answer classification stands (it never depended on the judge). The
+    old shape recorded a provider exception as a plain ``fail`` — serving noise
+    landing in a guard's rate, which is the exact confound the serving-health
+    audit flagged on this campaign.
+
+    Live cost, stated: every attempt now spends a judge call, including the ones
+    the taxonomy will label — on the committed record that is 64 of 85. That is
+    the price of a leak-bearing real answer being decidable at all; the token
+    spend is recorded per attempt (``judge_tokens``), so it is visible, not
+    hidden.
     """
+    judgment = judge(CMP6_EXPECTED, reply)
+    if judgment.ran and judgment.verdict:
+        return GuardVerdict(True, "pass", None, "judged", (judgment,))
     non_answer = classify_non_answer(reply)
     if non_answer:
-        return GuardVerdict(False, "not_attempted", non_answer, "mechanical")
-    judgment = judge(CMP6_EXPECTED, reply)
+        return GuardVerdict(False, "not_attempted", non_answer, "mechanical", (judgment,))
     if not judgment.ran:
         return GuardVerdict(False, "error", JUDGE_UNAVAILABLE, "judged", (judgment,))
-    if judgment.verdict:
-        return GuardVerdict(True, "pass", None, "judged", (judgment,))
     return GuardVerdict(False, "fail", CMP6_NOT_EQUIVALENT, "judged", (judgment,))
 
 
@@ -855,15 +889,16 @@ def run_cmp6() -> Attempt:
     measurement under a judged task's name, which is the one failure that would make
     every number this task produces uninterpretable.
 
-    The verdict layer is ``cmp6_outcome``: non-answers become a classified
-    ``not_attempted`` BEFORE the judge is consulted (the shared contract-§5
-    taxonomy), a delivered NO is a real judged failure, and a judge that never
-    delivers is an ``error`` with the
-    ``JUDGE_UNAVAILABLE`` classification — never a ``fail`` that would put a judge
-    outage into a guard's rate. On the ten committed Phase 2c arms the taxonomy
-    reclassifies 64 of the 68 recorded failures as tool-syntax leaks (replayed in
-    ``tests/test_registry.py``); the pass fraction is untouched, but the record now
-    says what actually happened instead of lumping it.
+    The verdict layer is ``cmp6_outcome``: the judge decides first (a grounded YES
+    passes even past a trailing tool leak), replies the judge refused become a
+    classified ``not_attempted`` where the shared contract-§5 taxonomy explains
+    them, a refused ordinary reply is a real judged failure, and a judge that
+    never delivers is an ``error`` with the ``JUDGE_UNAVAILABLE`` classification —
+    never a ``fail`` that would put a judge outage into a guard's rate. On the ten
+    committed Phase 2c arms the taxonomy reclassifies 64 of the 68 recorded
+    failures as tool-syntax leaks (replayed in ``tests/test_registry.py``); the
+    pass fraction is untouched, but the record now says what actually happened
+    instead of lumping it.
 
     ``attempted`` is published on every exit, as it is on G2 and CMP-5. Emitted from
     every exit for the same reason as elsewhere: a metric a failing exit stays
