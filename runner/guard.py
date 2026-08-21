@@ -195,6 +195,20 @@ def is_local_base_url(base_url: str) -> bool:
     return parsed is not None and parsed[1] in _LOCAL_HOSTS
 
 
+def _describe_base(base_url) -> str:
+    """A scrub-safe way to NAME a base URL in a message: the host when one parses,
+    never the raw string — the raw string may embed a credential, and exception
+    text ends up in logs, records and tracebacks. Every message in this module
+    that talks about a base URL goes through here; none may format the URL
+    itself. ``.hostname`` parses independently of a malformed port, so even an
+    unnormalizable URL usually still gets named by its host."""
+    try:
+        host = urlsplit(base_url).hostname
+    except (ValueError, TypeError):
+        host = None
+    return f"host {host!r}" if host else "an unparseable base URL"
+
+
 def normalize_base_url(base_url: str) -> str:
     """The canonical serving-base identity: ``scheme://host[:port]/path``.
 
@@ -208,34 +222,48 @@ def normalize_base_url(base_url: str) -> str:
     path into the query value, a fragment truncates the request path, and
     userinfo becomes basic auth on the wire while being a credential no record
     may carry. Each of those makes the recorded identity a lie about the request
-    actually sent, so there is nothing honest to record. The refusal names the
-    part found, never the URL itself — the URL may embed the credential.
+    actually sent, so there is nothing honest to record. These checks run on the
+    RAW STRING, BEFORE any parse that can fail — a malformed port once bailed
+    the full parse and passed the URL through verbatim, credential and all, and
+    ``urlsplit`` itself raises on a bad IPv6 bracket — so NO malformed-authority
+    combination can carry a forbidden part through the verbatim fallback. The
+    refusal names the host, never the URL itself.
 
-    A URL that fails to parse at all passes through verbatim: what cannot be
-    parsed cannot be quietly rewritten, and the shared classification above reads
-    it as remote (fail closed), so it can never record unpinned."""
+    A URL that does not parse, or has no host or no parseable port, passes
+    through verbatim ONCE it is known to carry no forbidden part: what cannot
+    be parsed cannot be quietly rewritten, and the shared classification above
+    reads it as remote (fail closed), so it can never record unpinned."""
     if not base_url:
         return base_url
+    # Forbidden parts FIRST, detected on the raw string — nothing here can
+    # raise, so no parser stands in front of the checks. '?' and '#' are
+    # reserved delimiters wherever they appear unencoded (even a bare trailing
+    # one breaks the /chat/completions concatenation), and '@' marks userinfo
+    # inside the authority, which ends at the first '/', '?' or '#'.
+    authority = base_url.partition("//")[2]
+    for stop in "/?#":
+        authority = authority.partition(stop)[0]
+    offending = []
+    if "@" in authority:
+        offending.append("embedded credentials (userinfo)")
+    if "?" in base_url:
+        offending.append("a query string")
+    if "#" in base_url:
+        offending.append("a fragment")
+    if offending:
+        raise MalformedBaseUrl(
+            f"refusing base URL for {_describe_base(base_url)}: it carries "
+            f"{' and '.join(offending)}. The HTTP client appends /chat/completions to "
+            f"LLM_BASE_URL verbatim, so anything after the path changes or breaks the "
+            f"request in ways the recorded identity could not attribute — and "
+            f"credentials must never reach a record. Use a bare "
+            f"scheme://host[:port]/path in LLM_BASE_URL; credentials belong in "
+            f"LLM_API_KEY."
+        )
     parsed = _split_base_url(base_url)
     if parsed is None:
         return base_url
     parts, host, port = parsed
-    offending = []
-    if parts.username is not None or parts.password is not None:
-        offending.append("embedded credentials (userinfo)")
-    if parts.query:
-        offending.append("a query string")
-    if parts.fragment:
-        offending.append("a fragment")
-    if offending:
-        raise MalformedBaseUrl(
-            f"refusing base URL for host {host!r}: it carries {' and '.join(offending)}. "
-            f"The HTTP client appends /chat/completions to LLM_BASE_URL verbatim, so "
-            f"anything after the path changes or breaks the request in ways the recorded "
-            f"identity could not attribute — and credentials must never reach a record. "
-            f"Use a bare scheme://host[:port]/path in LLM_BASE_URL; credentials belong "
-            f"in LLM_API_KEY."
-        )
     if ":" in host:  # IPv6 literal — urlsplit strips the brackets; restore them
         host = f"[{host}]"
     port_part = f":{port}" if port is not None else ""
@@ -265,11 +293,14 @@ def assert_serving_pinned(
         if not value
     ]
     if missing:
+        # The base URL is named by host only (never echoed raw): this gate can
+        # receive a URL the normalizer passed through verbatim, and a raw URL in
+        # an exception message would disclose whatever the URL carries.
         raise UnpinnedServing(
-            f"refusing to record against remote serving base {base_url}: no full serving "
-            f"pin ({' and '.join(missing)} unset). Unpinned remote routing spreads one "
-            f"label's requests across providers with mixed quantization — a measured "
-            f"confound. Set LLM_PROVIDER_ORDER to exactly one provider name and "
+            f"refusing to record against remote serving base ({_describe_base(base_url)}): "
+            f"no full serving pin ({' and '.join(missing)} unset). Unpinned remote routing "
+            f"spreads one label's requests across providers with mixed quantization — a "
+            f"measured confound. Set LLM_PROVIDER_ORDER to exactly one provider name and "
             f"LLM_QUANTIZATION to one quantization label in carbon's .env (fallbacks are "
             f"disabled automatically when a pin is set), or point LLM_BASE_URL at a "
             f"local endpoint."

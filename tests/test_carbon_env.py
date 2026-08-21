@@ -37,6 +37,27 @@ def _scripted_responder(messages, **kwargs):
     raise AssertionError("never called — only its identity is fingerprinted")
 
 
+def _runner_tree_responder(messages, **kwargs):
+    """A top-level function posing as runner-tree code (unit seam: the marker
+    policy reads __module__/__qualname__, so faking the module string tests the
+    policy without planting a real function in runner/)."""
+    raise AssertionError("never called — only its identity is fingerprinted")
+
+
+_runner_tree_responder.__module__ = "runner.tasks.cluster_h"
+
+
+def _provider_with(responder):
+    return SimpleNamespace(
+        model="test-model",
+        base_url="http://localhost:1234/v1",
+        reasoning_effort=None,
+        provider_order=None,
+        quantization=None,
+        responder=responder,
+    )
+
+
 def test_fingerprint_clean_tree_has_no_dirty_sha(monkeypatch):
     _patch(
         monkeypatch,
@@ -284,28 +305,68 @@ def test_fingerprint_records_no_responder_as_none(monkeypatch):
     assert ge.carbon_fingerprint(ROOT)["responder"] is None
 
 
-def test_fingerprint_records_a_responder_marker_not_the_callable(monkeypatch):
+def test_fingerprint_records_a_marker_for_a_top_level_runner_responder(monkeypatch):
     """A provider serving from a responder is not a network serving base at all —
     if one ever reaches the suite-level provider, the fingerprint must say so.
     The callable itself is uncapturable; its qualified name is recorded, and the
-    named code lives in this repo, so runner_sha pins its behavior."""
-    _patch(
-        monkeypatch,
-        _CLEAN,
-        provider=SimpleNamespace(
-            model="test-model",
-            base_url="http://localhost:1234/v1",
-            reasoning_effort=None,
-            provider_order=None,
-            quantization=None,
-            responder=_scripted_responder,
-        ),
-    )
+    ONLY callables whose qualified name is a stable identity are top-level
+    functions under runner/ — the tree runner_sha hashes."""
+    _patch(monkeypatch, _CLEAN, provider=_provider_with(_runner_tree_responder))
     fp = ge.carbon_fingerprint(ROOT)
-    assert fp["responder"] == "tests.test_carbon_env._scripted_responder"
+    assert fp["responder"] == "runner.tasks.cluster_h._runner_tree_responder"
     from runner import guard
 
     assert fp["behavior_key"] == guard.fingerprint_behavior_key(fp)
+
+
+def test_fingerprint_refuses_a_closure_responder(monkeypatch):
+    """Cluster H's real responders are closures (`run_h1.<locals>.responder`), and
+    closures from one factory share a qualname whatever state they close over —
+    factory('A') and factory('B') would record the SAME marker for different
+    behavior. A marker that lies is worse than a refusal."""
+
+    def factory(tag):
+        def responder(messages, **kwargs):
+            return tag
+
+        responder.__module__ = "runner.tasks.cluster_h"  # runner-tree, still refused
+        return responder
+
+    a, b = factory("A"), factory("B")
+    assert a.__qualname__ == b.__qualname__  # the collision that forbids the marker
+    _patch(monkeypatch, _CLEAN, provider=_provider_with(a))
+    with pytest.raises(RuntimeError, match="top-level"):
+        ge.carbon_fingerprint(ROOT)
+
+
+def test_fingerprint_refuses_a_lambda_responder(monkeypatch):
+    lam = lambda messages, **kwargs: None  # noqa: E731 — the shape under test
+    lam.__module__ = "runner.tasks.cluster_h"
+    _patch(monkeypatch, _CLEAN, provider=_provider_with(lam))
+    with pytest.raises(RuntimeError, match="top-level"):
+        ge.carbon_fingerprint(ROOT)
+
+
+def test_fingerprint_refuses_a_bound_method_responder(monkeypatch):
+    """Two instances of one class share the method's qualname while closing over
+    different instance state — same collision as the closure case."""
+
+    class Scripted:
+        def responder(self, messages, **kwargs):
+            return None
+
+    _patch(monkeypatch, _CLEAN, provider=_provider_with(Scripted().responder))
+    with pytest.raises(RuntimeError, match="top-level"):
+        ge.carbon_fingerprint(ROOT)
+
+
+def test_fingerprint_refuses_a_responder_from_outside_runner(monkeypatch):
+    """`pinned by runner_sha` must be TRUE of the marker: runner_sha hashes only
+    runner/**/*.py, so a callable from any other module has no content identity
+    in the fingerprint and is refused, top-level or not."""
+    _patch(monkeypatch, _CLEAN, provider=_provider_with(_scripted_responder))
+    with pytest.raises(RuntimeError, match="runner"):
+        ge.carbon_fingerprint(ROOT)
 
 
 def test_fingerprint_refuses_a_responder_with_no_stable_name(monkeypatch):
@@ -314,20 +375,35 @@ def test_fingerprint_refuses_a_responder_with_no_stable_name(monkeypatch):
     runs of identical behavior. Refuse rather than guess."""
     import functools
 
+    _patch(monkeypatch, _CLEAN, provider=_provider_with(functools.partial(print)))
+    with pytest.raises(RuntimeError, match="responder"):
+        ge.carbon_fingerprint(ROOT)
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+def test_fingerprint_refuses_forbidden_url_parts_even_with_malformed_port(monkeypatch, pinned):
+    """The boundary version of the ordering fix, both pinned and unpinned: a
+    malformed port must not carry credentials/query/fragment past the refusals,
+    and no rendering of the refusal may disclose the credential."""
+    import traceback
+
+    from runner import guard
+
     _patch(
         monkeypatch,
         _CLEAN,
         provider=SimpleNamespace(
             model="test-model",
-            base_url="http://localhost:1234/v1",
+            base_url="http://user:sk-secret@host.example:notaport/v1?tenant=a#frag",
             reasoning_effort=None,
-            provider_order=None,
-            quantization=None,
-            responder=functools.partial(print),
+            provider_order="Novita" if pinned else None,
+            quantization="bf16" if pinned else None,
         ),
     )
-    with pytest.raises(RuntimeError, match="responder"):
+    with pytest.raises(guard.MalformedBaseUrl) as exc:
         ge.carbon_fingerprint(ROOT)
+    rendered = str(exc.value) + repr(exc.value) + "".join(traceback.format_exception(exc.value))
+    assert "sk-secret" not in rendered
 
 
 def test_fingerprint_refuses_a_base_url_with_a_query(monkeypatch):

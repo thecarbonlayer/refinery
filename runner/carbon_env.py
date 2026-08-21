@@ -12,6 +12,7 @@ given result (git SHA + config version stamp).
 from __future__ import annotations
 
 import hashlib
+import inspect
 import subprocess
 from pathlib import Path
 
@@ -68,14 +69,20 @@ PROVIDER_FIELDS_FINGERPRINTED = (
     "provider_order",
     "quantization",
     # Recorded as a MARKER, not the callable: None for a network provider, else the
-    # responder's qualified name (repo code, so ``runner_sha`` pins its behavior).
+    # responder's qualified name — accepted ONLY for a top-level function defined
+    # under runner/, because that is the one case where module.qualname is a stable,
+    # truthful identity (closures and lambdas share or lose their names, bound
+    # methods carry instance state no name captures, and code outside runner/ is
+    # not pinned by ``runner_sha``, which hashes runner/**/*.py alone). Anything
+    # else REFUSES to fingerprint — a marker that lies is worse than a refusal.
     # Scripted responders are REAL in this suite — cluster H builds
-    # ``Provider(..., responder=...)`` per task, and those results record under the
-    # suite's environment fingerprint — but those live on per-task providers inside
-    # ``runner/tasks/`` (verifier apparatus, hashed by ``runner_sha``), not on the
-    # env provider this fingerprint attests. The field is here so that a responder
-    # ever reaching the SUITE-LEVEL provider cannot masquerade as a network serving
-    # base: it would be named in the record and would move the behavior key.
+    # ``Provider(..., responder=...)`` per task (as closures), and those results
+    # record under the suite's environment fingerprint — but those live on per-task
+    # providers inside ``runner/tasks/`` (verifier apparatus, hashed by
+    # ``runner_sha``), not on the env provider this fingerprint attests, so they
+    # never reach this policy. The field is here so that a responder ever reaching
+    # the SUITE-LEVEL provider cannot masquerade as a network serving base: it is
+    # either named in the record and moves the behavior key, or it refuses.
     "responder",
 )
 PROVIDER_FIELDS_EXCLUDED = {
@@ -156,17 +163,31 @@ def carbon_fingerprint(root: Path = CARBON_ROOT) -> dict:
     serving = {field: getattr(provider, field, None) for field in PROVIDER_FIELDS_FINGERPRINTED}
     serving["base_url"] = guard.normalize_base_url(serving["base_url"])
     # The responder marker: the callable itself is uncapturable, so what is recorded
-    # is WHICH repo callable — module.qualname, whose behavior runner_sha pins. A
-    # callable with no stable name (e.g. functools.partial) refuses: an unstable
-    # marker would move the behavior key between runs of identical behavior.
+    # is WHICH callable — and only where module.qualname is a stable, truthful
+    # identity: a top-level function defined under runner/, the tree runner_sha
+    # hashes. Everything else refuses (see the field-list comment above): a closure's
+    # qualname is shared by every instance its factory returns whatever state each
+    # closes over, a lambda has no name at all, a bound method's name says nothing
+    # about its instance, and an external module's code has no content identity in
+    # this fingerprint. An unstable or ambiguous marker would let two different
+    # behaviors share a behavior key — the exact lie this fingerprint exists to
+    # prevent.
     if serving["responder"] is not None:
         resp = serving["responder"]
-        module = getattr(resp, "__module__", None)
-        qualname = getattr(resp, "__qualname__", None)
-        if not module or not qualname:
+        module = getattr(resp, "__module__", None) or ""
+        qualname = getattr(resp, "__qualname__", None) or ""
+        in_runner = module == "runner" or module.startswith("runner.")
+        top_level = qualname.isidentifier()  # no dots, no <locals>, no <lambda>
+        if not (inspect.isfunction(resp) and in_runner and top_level):
+            described = f"{module}.{qualname}" if module or qualname else type(resp).__name__
             raise RuntimeError(
-                "cannot fingerprint the provider's responder: it has no stable "
-                "qualified name to record — use a module-level callable"
+                f"cannot fingerprint the provider's responder ({described}): only a "
+                f"top-level function defined under runner/ can be recorded — "
+                f"module.qualname is a stable identity only there (closures and "
+                f"lambdas share or lose their names, bound methods carry instance "
+                f"state no name captures, and code outside runner/ is not pinned by "
+                f"runner_sha). Use a module-level responder in runner/, or drop the "
+                f"responder from the suite-level provider."
             )
         serving["responder"] = f"{module}.{qualname}"
     guard.assert_serving_pinned(

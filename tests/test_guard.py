@@ -225,3 +225,71 @@ def test_malformed_port_reads_as_remote_everywhere():
     assert guard.normalize_base_url(url) == url  # verbatim; cannot be normalized
     with pytest.raises(guard.UnpinnedServing):
         guard.assert_serving_pinned(url, None, None)
+
+
+@pytest.mark.parametrize(
+    "url,part",
+    [
+        ("http://user:sk-secret@host.example:notaport/v1", "credentials"),
+        ("http://host.example:notaport/v1?tenant=a", "query"),
+        ("http://host.example:notaport/v1#frag", "fragment"),
+        # urlsplit RAISES outright on the bad bracket — the checks must not sit
+        # behind any parser at all, or this authority carries its credential
+        # through the verbatim fallback exactly like the malformed port did.
+        ("http://user:sk-secret@[bad/v1", "credentials"),
+        # even a bare delimiter breaks the /chat/completions concatenation, and
+        # the old parsed check (`parts.query` is falsy-empty) waved it through.
+        ("http://host.example/v1?", "query"),
+        ("http://host.example/v1#", "fragment"),
+    ],
+)
+def test_forbidden_parts_refuse_even_with_a_malformed_port(url, part):
+    """The ordering bug: the full parse bailed on the malformed PORT and passed
+    the URL through verbatim, so the userinfo/query/fragment refusals never ran —
+    a credential could ride a bad port past the boundary. The forbidden-part
+    checks run on the raw STRING, before anything that can fail to parse."""
+    with pytest.raises(guard.MalformedBaseUrl, match=part):
+        guard.normalize_base_url(url)
+
+
+def test_refusals_never_echo_the_raw_url():
+    """The refusal must not disclose what it refuses: the raw URL may embed a
+    credential, and exception text ends up in logs, records and tracebacks. Host
+    only — in str, repr, AND full traceback renderings."""
+    import traceback
+
+    poison = "http://user:sk-secret@host.example:notaport/v1?tenant=a#frag"
+    with pytest.raises(guard.MalformedBaseUrl) as exc:
+        guard.normalize_base_url(poison)
+    rendered = str(exc.value) + repr(exc.value) + "".join(traceback.format_exception(exc.value))
+    assert "sk-secret" not in rendered
+    assert poison not in rendered
+    assert "host.example" in str(exc.value)  # the host alone identifies the endpoint
+
+
+def test_refusal_on_an_unsplittable_authority_still_never_echoes():
+    """urlsplit raises outright on a bad IPv6 bracket, so there is no host to
+    name — the refusal says so generically and still discloses nothing."""
+    import traceback
+
+    poison = "http://user:sk-secret@[bad/v1"
+    with pytest.raises(guard.MalformedBaseUrl) as exc:
+        guard.normalize_base_url(poison)
+    rendered = str(exc.value) + repr(exc.value) + "".join(traceback.format_exception(exc.value))
+    assert "sk-secret" not in rendered
+    assert poison not in rendered
+    assert "unparseable" in str(exc.value)
+
+
+def test_unpinned_refusal_names_the_host_never_the_raw_url():
+    """Same no-echo rule for the pin gate: a malformed-port URL reaches it
+    VERBATIM (the normalizer cannot canonicalize it), so echoing the raw string
+    would disclose whatever the URL carries. Name the host, nothing more."""
+    import traceback
+
+    url = "http://internal-host.example:notaport/v1"
+    with pytest.raises(guard.UnpinnedServing) as exc:
+        guard.assert_serving_pinned(url, None, None)
+    rendered = str(exc.value) + repr(exc.value) + "".join(traceback.format_exception(exc.value))
+    assert url not in rendered
+    assert "internal-host.example" in str(exc.value)
