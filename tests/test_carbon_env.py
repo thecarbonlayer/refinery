@@ -38,9 +38,9 @@ def _scripted_responder(messages, **kwargs):
 
 
 def _runner_tree_responder(messages, **kwargs):
-    """A top-level function posing as runner-tree code (unit seam: the marker
-    policy reads __module__/__qualname__, so faking the module string tests the
-    policy without planting a real function in runner/)."""
+    """A top-level function POSING as runner-tree code via a spoofed __module__.
+    Round 3 accepted this (the policy trusted the module string); the code-object
+    checks refuse it — its co_filename is this tests file, outside runner/."""
     raise AssertionError("never called — only its identity is fingerprinted")
 
 
@@ -310,13 +310,65 @@ def test_fingerprint_records_a_marker_for_a_top_level_runner_responder(monkeypat
     if one ever reaches the suite-level provider, the fingerprint must say so.
     The callable itself is uncapturable; its qualified name is recorded, and the
     ONLY callables whose qualified name is a stable identity are top-level
-    functions under runner/ — the tree runner_sha hashes."""
-    _patch(monkeypatch, _CLEAN, provider=_provider_with(_runner_tree_responder))
+    functions under runner/ — the tree runner_sha hashes. A REAL runner function
+    (never called; only its identity is read), so every check runs against the
+    truth: name, code file, co_qualname, and closure all agree."""
+    _patch(monkeypatch, _CLEAN, provider=_provider_with(ge.runner_sha))
     fp = ge.carbon_fingerprint(ROOT)
-    assert fp["responder"] == "runner.tasks.cluster_h._runner_tree_responder"
+    assert fp["responder"] == "runner.carbon_env.runner_sha"
     from runner import guard
 
     assert fp["behavior_key"] == guard.fingerprint_behavior_key(fp)
+
+
+def test_fingerprint_refuses_a_spoofed_module_string(monkeypatch):
+    """A __module__ that SAYS runner-tree is a name, not evidence: this function's
+    code object lives in the tests file, which runner_sha does not hash, so the
+    marker would pin nothing. The code-object check reads co_filename, which no
+    attribute assignment can move."""
+    _patch(monkeypatch, _CLEAN, provider=_provider_with(_runner_tree_responder))
+    with pytest.raises(RuntimeError, match="code object"):
+        ge.carbon_fingerprint(ROOT)
+
+
+def test_fingerprint_refuses_a_wraps_wrapped_external_function(monkeypatch):
+    """functools.wraps copies __module__ and __qualname__ onto the wrapper —
+    ordinary decorator behavior, not spoofing — so the NAME passes every naming
+    check while the CODE that would actually run is external and unhashed. The
+    code object cannot be copied that way: co_qualname still names the wrapper
+    and co_filename its real file."""
+    import functools
+
+    def _wrapper(messages, **kwargs):
+        return None
+
+    functools.update_wrapper(_wrapper, ge.runner_sha)
+    assert _wrapper.__module__ == "runner.carbon_env"  # the copied name...
+    assert _wrapper.__qualname__ == "runner_sha"  # ...claims runner code
+    assert _wrapper.__closure__ is None  # not even closure-backed
+    _patch(monkeypatch, _CLEAN, provider=_provider_with(_wrapper))
+    with pytest.raises(RuntimeError, match="code object"):
+        ge.carbon_fingerprint(ROOT)
+
+
+def test_fingerprint_refuses_a_wraps_wrapped_closure(monkeypatch):
+    """The commonest decorator shape: the wrapper closes over the function it
+    wraps. Same copied runner name, plus closure state no name captures."""
+    import functools
+
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            return fn(*args, **kwargs)
+
+        return wrapper
+
+    wrapped = deco(ge.runner_sha)
+    assert wrapped.__qualname__ == "runner_sha"  # the copied name is top-level-shaped
+    assert wrapped.__closure__ is not None  # the state the name cannot capture
+    _patch(monkeypatch, _CLEAN, provider=_provider_with(wrapped))
+    with pytest.raises(RuntimeError, match="code object"):
+        ge.carbon_fingerprint(ROOT)
 
 
 def test_fingerprint_refuses_a_closure_responder(monkeypatch):

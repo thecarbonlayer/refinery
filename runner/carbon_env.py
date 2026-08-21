@@ -70,11 +70,14 @@ PROVIDER_FIELDS_FINGERPRINTED = (
     "quantization",
     # Recorded as a MARKER, not the callable: None for a network provider, else the
     # responder's qualified name — accepted ONLY for a top-level function defined
-    # under runner/, because that is the one case where module.qualname is a stable,
-    # truthful identity (closures and lambdas share or lose their names, bound
-    # methods carry instance state no name captures, and code outside runner/ is
-    # not pinned by ``runner_sha``, which hashes runner/**/*.py alone). Anything
-    # else REFUSES to fingerprint — a marker that lies is worse than a refusal.
+    # under runner/ whose CODE OBJECT attests the name (same co_qualname, source
+    # file under runner/, no closure cells), because that is the one case where
+    # module.qualname is a stable, truthful identity (closures and lambdas share or
+    # lose their names, bound methods carry instance state no name captures,
+    # functools.wraps copies a runner name onto foreign code, and code outside
+    # runner/ is not pinned by ``runner_sha``, which hashes runner/**/*.py alone).
+    # Anything else REFUSES to fingerprint — a marker that lies is worse than a
+    # refusal.
     # Scripted responders are REAL in this suite — cluster H builds
     # ``Provider(..., responder=...)`` per task (as closures), and those results
     # record under the suite's environment fingerprint — but those live on per-task
@@ -165,29 +168,46 @@ def carbon_fingerprint(root: Path = CARBON_ROOT) -> dict:
     # The responder marker: the callable itself is uncapturable, so what is recorded
     # is WHICH callable — and only where module.qualname is a stable, truthful
     # identity: a top-level function defined under runner/, the tree runner_sha
-    # hashes. Everything else refuses (see the field-list comment above): a closure's
-    # qualname is shared by every instance its factory returns whatever state each
-    # closes over, a lambda has no name at all, a bound method's name says nothing
-    # about its instance, and an external module's code has no content identity in
-    # this fingerprint. An unstable or ambiguous marker would let two different
-    # behaviors share a behavior key — the exact lie this fingerprint exists to
-    # prevent.
+    # hashes, with the code object agreeing (the checks below). Everything else
+    # refuses (see the field-list comment above): a closure's qualname is shared by
+    # every instance its factory returns whatever state each closes over, a lambda
+    # has no name at all, a bound method's name says nothing about its instance, a
+    # functools.wraps wrapper wears the wrapped function's name over foreign code,
+    # and an external module's code has no content identity in this fingerprint. An
+    # unstable or ambiguous marker would let two different behaviors share a
+    # behavior key — the exact lie this fingerprint exists to prevent.
     if serving["responder"] is not None:
         resp = serving["responder"]
         module = getattr(resp, "__module__", None) or ""
         qualname = getattr(resp, "__qualname__", None) or ""
         in_runner = module == "runner" or module.startswith("runner.")
         top_level = qualname.isidentifier()  # no dots, no <locals>, no <lambda>
-        if not (inspect.isfunction(resp) and in_runner and top_level):
+        # The NAME alone can lie without any spoofing: functools.wraps copies
+        # __module__ and __qualname__ onto every wrapper it decorates, so an
+        # external wrapper around a runner function wears a runner name while
+        # running foreign, unhashed code. The CODE OBJECT cannot be copied that
+        # way — it must agree with the name (co_qualname), live in the tree
+        # runner_sha actually hashes (co_filename resolves under runner/), and
+        # close over nothing (closure cells are behavior no name captures).
+        code = getattr(resp, "__code__", None)
+        code_agrees = (
+            code is not None
+            and code.co_qualname == qualname
+            and getattr(resp, "__closure__", None) is None
+            and Path(code.co_filename).resolve().is_relative_to(RUNNER_ROOT)
+        )
+        if not (inspect.isfunction(resp) and in_runner and top_level and code_agrees):
             described = f"{module}.{qualname}" if module or qualname else type(resp).__name__
             raise RuntimeError(
                 f"cannot fingerprint the provider's responder ({described}): only a "
-                f"top-level function defined under runner/ can be recorded — "
-                f"module.qualname is a stable identity only there (closures and "
-                f"lambdas share or lose their names, bound methods carry instance "
-                f"state no name captures, and code outside runner/ is not pinned by "
-                f"runner_sha). Use a module-level responder in runner/, or drop the "
-                f"responder from the suite-level provider."
+                f"top-level function defined under runner/ can be recorded, and its "
+                f"code object must attest that (same qualname, source file under "
+                f"runner/, no closure cells) — module.qualname is a stable identity "
+                f"only there (closures and lambdas share or lose their names, bound "
+                f"methods carry instance state no name captures, functools.wraps "
+                f"copies a runner name onto foreign code, and code outside runner/ "
+                f"is not pinned by runner_sha). Use a module-level responder in "
+                f"runner/, or drop the responder from the suite-level provider."
             )
         serving["responder"] = f"{module}.{qualname}"
     guard.assert_serving_pinned(

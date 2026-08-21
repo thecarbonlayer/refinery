@@ -339,6 +339,56 @@ def test_delta_refuses_mismatched_responder():
         delta(network, scripted)
 
 
+def test_delta_refuses_a_poisoned_recorded_base_url_without_echoing():
+    """A results file written by the PRE-fix runner can carry a verbatim poisoned
+    base_url (the vulnerable path recorded it when pinned). The serving-mismatch
+    message formats both raw values, and the returned dict carries both
+    fingerprints into the CLI's JSON print — so comparing records must not become
+    the disclosure path the live boundary closed. The same raw-string checks gate
+    the RECORDS first, refusing host-only and naming which file to re-record."""
+    import traceback
+
+    from runner import guard
+
+    poison = "http://user:sk-secret@host.example:notaport/v1?tenant=a#frag"
+    tasks = {"A1": ("held_in", 0.0), "A3": ("held_out", 0.4)}
+    clean = _results(tasks)
+    for poisoned_side in ("baseline", "candidate"):
+        poisoned = _results(tasks, base_url=poison)
+        pair = (poisoned, clean) if poisoned_side == "baseline" else (clean, poisoned)
+        with pytest.raises(guard.MalformedBaseUrl) as exc:
+            delta(*pair)
+        rendered = str(exc.value) + repr(exc.value) + "".join(traceback.format_exception(exc.value))
+        assert "sk-secret" not in rendered
+        assert poison not in rendered
+        assert poisoned_side in str(exc.value)  # names WHICH record to re-record
+        assert "host.example" in str(exc.value)  # host-only naming
+
+
+def test_delta_refuses_matching_poisoned_records_before_returning_fingerprints():
+    """Two identically poisoned records pass every parity gate — the old path
+    RETURNED both fingerprints verbatim and the CLI printed them as JSON. The
+    record gate must refuse before the returned dict even exists."""
+    from runner import guard
+
+    poison = "http://user:sk-secret@host.example:notaport/v1"
+    tasks = {"A1": ("held_in", 0.0), "A3": ("held_out", 0.4)}
+    with pytest.raises(guard.MalformedBaseUrl):
+        delta(_results(tasks, base_url=poison), _results(tasks, base_url=poison))
+
+
+def test_delta_refuses_a_control_whitespace_recorded_base_url():
+    """The control-whitespace class reaches records too: a tab-split authority
+    hides a credential from raw scans while parsing to a clean-looking identity."""
+    from runner import guard
+
+    poison = "https:/\t/user:sk-secret@localhost:1234/v1"
+    tasks = {"A1": ("held_in", 0.0), "A3": ("held_out", 0.4)}
+    with pytest.raises(guard.MalformedBaseUrl) as exc:
+        delta(_results(tasks, base_url=poison), _results(tasks))
+    assert "sk-secret" not in str(exc.value)
+
+
 def test_delta_serving_gate_covers_every_fingerprinted_provider_field():
     """Cross-module consistency: the parity gate's field list plus the dedicated
     model gate must cover exactly the Provider fields the fingerprint records —

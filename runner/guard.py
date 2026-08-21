@@ -167,6 +167,38 @@ def assert_resumable(prior_fingerprint: dict, current_fingerprint: dict) -> None
 _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
+def _has_control_or_whitespace(base_url: str) -> bool:
+    """Any whitespace or control character, anywhere in the URL — nothing is
+    stripped, leading and trailing included. ``urlsplit`` deletes tab/newline/CR
+    BEFORE parsing (WHATWG alignment), so such a character can hide an authority
+    from a raw-string scan while the parsed result grows one — and the HTTP
+    client sends the RAW string, which cannot carry control characters on the
+    wire at all. A URL the wire cannot carry has no honest identity to record."""
+    return any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in base_url)
+
+
+def _forbidden_parts(base_url: str) -> list[str]:
+    """The raw-string scan for parts a base URL must never carry: userinfo,
+    query, fragment. Deliberately parser-free — nothing here can raise — so no
+    malformed authority (bad port, bad bracket) can short-circuit past it. '?'
+    and '#' are reserved delimiters wherever they appear unencoded, and '@'
+    marks userinfo inside the authority, which ends at the first '/', '?' or
+    '#'. Callers refuse whitespace/control characters FIRST
+    (``_has_control_or_whitespace``); this scan assumes the string is clean of
+    them."""
+    authority = base_url.partition("//")[2]
+    for stop in "/?#":
+        authority = authority.partition(stop)[0]
+    offending = []
+    if "@" in authority:
+        offending.append("embedded credentials (userinfo)")
+    if "?" in base_url:
+        offending.append("a query string")
+    if "#" in base_url:
+        offending.append("a fragment")
+    return offending
+
+
 def _split_base_url(base_url):
     """FULL parse of a base URL, or None when any part of it fails to parse.
 
@@ -175,8 +207,13 @@ def _split_base_url(base_url):
     a netloc whose PORT is garbage (``localhost:notaport``), which once let a
     malformed URL classify as local and record unpinned. Hostname AND port must both
     parse, or the URL reads as unparseable — and unparseable reads as remote, so it
-    can never record unpinned."""
+    can never record unpinned. A URL carrying whitespace or control characters is
+    unparseable BY RULE: urlsplit would silently strip tab/newline and parse an
+    authority the raw string does not have, which once classified
+    ``https:/<TAB>/user:...@localhost`` as local."""
     try:
+        if _has_control_or_whitespace(base_url):
+            return None
         parts = urlsplit(base_url)
         host = parts.hostname
         port = parts.port  # raises ValueError on a malformed port
@@ -229,27 +266,32 @@ def normalize_base_url(base_url: str) -> str:
     combination can carry a forbidden part through the verbatim fallback. The
     refusal names the host, never the URL itself.
 
+    Whitespace and control characters refuse FIRST, before even the raw scan:
+    ``urlsplit`` deletes tab/newline before parsing, so
+    ``https:/<TAB>/user:secret@host`` shows the raw scan no authority while
+    parsing to a credentialed one — the normalizer would then record a
+    SANITIZED identity for a request the client cannot even issue. The rule is
+    total: any whitespace or control character anywhere refuses, nothing is
+    stripped, leading and trailing included.
+
     A URL that does not parse, or has no host or no parseable port, passes
     through verbatim ONCE it is known to carry no forbidden part: what cannot
     be parsed cannot be quietly rewritten, and the shared classification above
     reads it as remote (fail closed), so it can never record unpinned."""
     if not base_url:
         return base_url
-    # Forbidden parts FIRST, detected on the raw string — nothing here can
-    # raise, so no parser stands in front of the checks. '?' and '#' are
-    # reserved delimiters wherever they appear unencoded (even a bare trailing
-    # one breaks the /chat/completions concatenation), and '@' marks userinfo
-    # inside the authority, which ends at the first '/', '?' or '#'.
-    authority = base_url.partition("//")[2]
-    for stop in "/?#":
-        authority = authority.partition(stop)[0]
-    offending = []
-    if "@" in authority:
-        offending.append("embedded credentials (userinfo)")
-    if "?" in base_url:
-        offending.append("a query string")
-    if "#" in base_url:
-        offending.append("a fragment")
+    if _has_control_or_whitespace(base_url):
+        raise MalformedBaseUrl(
+            f"refusing base URL for {_describe_base(base_url)}: it contains whitespace or "
+            f"control characters. urlsplit strips tab/newline BEFORE parsing, so such a "
+            f"URL can parse to an identity the raw string does not have, while the HTTP "
+            f"client sends the raw string — which cannot carry control characters on the "
+            f"wire at all. Nothing is stripped here; remove the character from "
+            f"LLM_BASE_URL."
+        )
+    # Forbidden parts next, still on the raw string (see _forbidden_parts): no
+    # parser stands in front of these checks either.
+    offending = _forbidden_parts(base_url)
     if offending:
         raise MalformedBaseUrl(
             f"refusing base URL for {_describe_base(base_url)}: it carries "
@@ -304,4 +346,32 @@ def assert_serving_pinned(
             f"LLM_QUANTIZATION to one quantization label in carbon's .env (fallbacks are "
             f"disabled automatically when a pin is set), or point LLM_BASE_URL at a "
             f"local endpoint."
+        )
+
+
+def assert_recorded_base_url_clean(base_url, origin: str) -> None:
+    """The record-side twin of the live boundary: a RECORDED fingerprint's
+    base_url must pass the same raw-string checks before anything formats,
+    returns, or serializes it.
+
+    Result files written by a PRE-fix runner can carry a verbatim poisoned URL
+    (the vulnerable path recorded it when pinned) — a mismatch message that
+    echoes recorded values, a returned fingerprint dict, or a CLI JSON print
+    would become the disclosure path the live gate closed. So the reader
+    refuses first, naming the host and WHICH record (``origin``), never the
+    URL. None passes: unset is a real recorded state. A non-string refuses —
+    what cannot be scanned cannot be declared clean (fail closed)."""
+    if base_url is None:
+        return
+    if (
+        not isinstance(base_url, str)
+        or _has_control_or_whitespace(base_url)
+        or _forbidden_parts(base_url)
+    ):
+        raise MalformedBaseUrl(
+            f"refusing to read {origin}: its recorded base_url "
+            f"({_describe_base(base_url)}) carries a forbidden part (credentials, "
+            f"query, fragment, or control/whitespace characters). The record was "
+            f"written by a pre-fix runner; re-record it — and treat any credential "
+            f"it embeds as disclosed."
         )

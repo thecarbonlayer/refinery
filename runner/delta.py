@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from fractions import Fraction
 
+from runner import guard
+
 # The recorded Provider fields the serving-parity gate compares. ``model`` is absent
 # only because it has its own dedicated gate (with a message naming both models);
 # together they cover exactly ``runner.carbon_env.PROVIDER_FIELDS_FINGERPRINTED`` —
@@ -100,6 +102,21 @@ def delta(baseline: dict, candidate: dict) -> dict:
         raise ValueError(
             "results file lacks a fingerprint — refusing to compare unattributed measurements"
         )
+    # Record-side no-echo gate, BEFORE any gate that formats a fingerprint value
+    # and before the returned dict can exist: a results file written by a
+    # PRE-fix runner can carry a verbatim poisoned base_url (credential and
+    # all), and every path out of this function would disclose it — the
+    # serving-mismatch message below formats both raw values, the returned dict
+    # carries both fingerprints, and the CLI prints that dict as JSON. The
+    # recorded values pass the live boundary's raw-string checks here or the
+    # comparison refuses host-only (guard.MalformedBaseUrl). Once past this
+    # gate, a recorded base_url is credential-free by construction, so the
+    # mismatch message below may format it.
+    for origin, fp in (
+        ("the baseline results file", base_fp),
+        ("the candidate results file", cand_fp),
+    ):
+        guard.assert_recorded_base_url_clean(fp.get("base_url"), origin)
     # model parity: a Δ across models measures the model swap, not the edit.
     base_model = base_fp.get("model")
     cand_model = cand_fp.get("model")
