@@ -374,8 +374,8 @@ Five findings, all "can affect behavior or safety":
 - [ ] **Step 3: Sabotage proofs**, each reverted immediately with the observed failure recorded verbatim: (a) drop the `CARBON_SCRATCH_DIR` injection → the shell-route test goes red; (b) remove the symlink guard → the through-write test goes red; (c) make durable `cleanup()` delete → the reopen test goes red; (d) restore `recording_tool`'s no-except form → the raising-tool test goes red.
 - [ ] **Step 4: Codex review of both repos' unpushed ranges** (the companion resolves the repo from the working directory, so run each from its own repo root):
   ```bash
-  cd /Users/adesai/Projects/carbon && node "/Users/adesai/.claude/plugins/cache/openai-codex/codex/1.0.6/scripts/codex-companion.mjs" review --base origin/self-improvement --background
-  cd /Users/adesai/Projects/refinery && node "/Users/adesai/.claude/plugins/cache/openai-codex/codex/1.0.6/scripts/codex-companion.mjs" review --base origin/main --background
+  cd <HOME>/Projects/carbon && node "<HOME>/.claude/plugins/cache/openai-codex/codex/1.0.6/scripts/codex-companion.mjs" review --base origin/self-improvement --background
+  cd <HOME>/Projects/refinery && node "<HOME>/.claude/plugins/cache/openai-codex/codex/1.0.6/scripts/codex-companion.mjs" review --base origin/main --background
   ```
   Triage every finding; fix what affects behavior or safety before r9.
 
@@ -386,7 +386,7 @@ Five findings, all "can affect behavior or safety":
 - [ ] **Step 1: Preflight** — both trees clean (carbon's dev-notes stashes belong to another session; check `git stash list` and do not disturb them), model endpoint answering, `runner_sha` noted as changed.
 - [ ] **Step 2:** Start the tree watchdog, then:
   ```bash
-  cd /Users/adesai/Projects/refinery && caffeinate -is uv run python -m runner.cli run --label baseline-r9 > /tmp/r9.log 2>&1; echo "exit=$?" >> /tmp/r9.log
+  cd <HOME>/Projects/refinery && caffeinate -is uv run python -m runner.cli run --label baseline-r9 > /tmp/r9.log 2>&1; echo "exit=$?" >> /tmp/r9.log
   ```
 - [ ] **Step 3:** Expect zero mechanical criticals. **A mechanical critical in the BASELINE is a carbon bug — stop and fix before proceeding.** Record E4's baseline (expected 0/N: `head_tail` still cannot recover) and C3's behavioral count.
 

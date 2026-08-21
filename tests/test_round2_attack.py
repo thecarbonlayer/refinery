@@ -22,6 +22,23 @@ by the parity gate before any rule runs, which is behavior pinned elsewhere
 THE ARM LIST IS SPELLED OUT, never globbed. Appending an arm to the protocol must
 force a deliberate edit here, because a new arm is new evidence this claim has to be
 re-established against.
+
+WHERE THIS STANDS AT THE CLOSE OF PHASE 2. The calibrated half of the sweep is
+SUSPENDED, and the reason has moved. It was once "the artifact rates four tasks and the
+loader pins seven". The Phase 2c campaign ran to completion — ten `p2c-null-*` arms,
+all seven tasks, at one runner hash — and the artifact it produced records
+`fitness.fit = false`: STABILITY refused, because one arm moves the held-in quantile
+from 4/9 to 1/3. So the artifact still does not install, now by its own verdict rather
+than by shape, and there is still nothing calibrated to sweep WITH. That is the
+fail-closed design working, not a defect.
+
+Restoration has one condition: a FIT artifact at the arms' own runner hash or a
+successor (the close-out's `attempted` metric has since advanced the branch's). The
+`calibration` fixture below resolves the installed artifact on every run, so the moment
+one exists the sweep stops skipping and runs — and it will go red until its arm list
+and its task set are re-keyed to that artifact's own pooling, which is the deliberate
+edit the paragraph above demands. Restoring the artifact without restoring the sweep is
+not a state this file lets anyone stay in quietly.
 """
 
 from __future__ import annotations
@@ -62,6 +79,24 @@ ALL_ARMS = FULL_ARMS + SUBSET_ARMS
 SUPPORTED = ("A1", "G2", "G4", "G5")
 SPLIT_OF = {"A1": "held_in", "G4": "held_in", "G5": "held_in", "G2": "held_out"}
 
+# The Phase 2c campaign's own arms, in the order `calibrate_model` pooled them. Spelled
+# out for the same reason the round-2 list is: the committed artifact IS this pooling,
+# and a claim about "the artifact" that globbed its inputs would not notice one moving.
+P2C_ARMS = (
+    "p2c-null-full-a",
+    "p2c-null-full-b",
+    "p2c-null-full-c",
+    "p2c-null-cmp-a",
+    "p2c-null-cmp-b",
+    "p2c-null-cmp-c",
+    "p2c-null-cmp-d",
+    "p2c-null-cmp-e",
+    "p2c-null-cmp-f",
+    "p2c-null-cmp-g",
+)
+# What the artifact rates: the gain set plus the three scenario guards.
+COVERED = frozenset(SUPPORTED) | {"CMP-5", "CMP-6", "CMP-7"}
+
 
 def _arm(label: str) -> dict:
     return json.loads((RESULTS / f"{label}.json").read_text())
@@ -76,18 +111,39 @@ def _restrict(results: dict, names) -> dict:
 def refusal() -> str:
     """Why the installed artifact does not load — the state this sweep is suspended in.
 
-    Through Phase 2b this fixture returned the calibration itself and the sweeps below
-    judged the real arms with it. Both halves of that pairing are now superseded: the
-    artifact pools four tasks and the loader pins seven, and the arms themselves were
-    recorded before CMP-5/6/7 existed, so no seven-task model could judge them either.
-    Fabricating rates for the guards to keep the sweep running would be the one thing
-    this file exists to prevent — a claim resting on numbers nobody measured.
+    Asked at the artifact's OWN provenance (the campaign's first arm), so nothing about
+    a stale fingerprint can be doing the refusing: this is the artifact judged against
+    the very measurements it was pooled from, and it still comes back None. That makes
+    this fixture the tripwire. A fit artifact at this hash installs here, `cal` stops
+    being None, and every test taking `refusal` fails until someone restores the sweeps
+    below rather than only the artifact.
     """
-    cal, why = calibration_status(
-        "compaction", _arm("r2-null-full-a")["fingerprint"], model_path=MODEL
+    cal, why = calibration_status("compaction", _arm(P2C_ARMS[0])["fingerprint"], model_path=MODEL)
+    assert cal is None, (
+        "the committed artifact must not install: it records fitness.fit=false. If it "
+        "now installs, the calibrated sweeps in this file are no longer suspended and "
+        "must be re-keyed to the pooling that installs — see the module docstring."
     )
-    assert cal is None, "the four-task artifact must not install at the seven-task pin"
     return why
+
+
+@pytest.fixture(scope="module")
+def calibration():
+    """The installed artifact, when one installs — otherwise the sweep skips, saying why.
+
+    Resolved per run rather than pinned to a decision made once: the suspension is a
+    fact about what is on disk today, so the code asks disk. A fit artifact turns the
+    skip off by itself, which is the point — the alternative is a static `skip` marker
+    that stays in force long after its reason has gone and quietly retires the attack.
+    """
+    cal, why = calibration_status("compaction", _arm(P2C_ARMS[0])["fingerprint"], model_path=MODEL)
+    if cal is None:
+        pytest.skip(
+            f"calibrated sweep suspended — {why} Restored by a FIT artifact at this "
+            "runner hash or a successor; when one lands, re-key ALL_ARMS and the "
+            "restricted task set below to that artifact's own pooling."
+        )
+    return cal
 
 
 def _same_shape_pairs():
@@ -103,24 +159,35 @@ def test_the_sweep_covers_every_same_shape_ordered_pair_of_the_eight_arms():
     assert {label for pair in pairs for label in pair} == set(ALL_ARMS)
 
 
-def test_the_calibrated_null_sweep_is_suspended_until_the_campaign_recalibrates(refusal):
-    """The sweep's own precondition, asserted rather than assumed.
+def test_the_calibrated_null_sweep_is_suspended_by_the_artifacts_own_refusal(refusal):
+    """The sweep's own precondition, asserted rather than assumed — and NAMED.
 
     "Every same-shape ordered pair judged by the REAL rule under the REAL artifact" is
-    a claim about a pairing that no longer exists. It is restored by the Phase 2c
-    campaign (three full-suite arms and four subset arms at the new runner hash, then
-    `calibrate_model`), not by loosening anything here — so this test states the two
-    facts that make the suspension honest and will go red the moment either changes.
+    a claim about a pairing that does not exist while nothing installs. What is doing
+    the refusing has moved, and this test pins the current reason rather than the one it
+    used to have: the campaign is complete (ten arms, all seven tasks, one runner hash)
+    and the artifact it produced sets `fitness.fit = false` because STABILITY refused.
+    "The arms are missing" and "the arms are in and the model is not stable" are
+    different remedies, so the refusal has to say which one this is.
+
+    Restoration condition, stated once and asserted here: a FIT artifact at this runner
+    hash or a successor. Nothing weaker — not a hand-edited `fit`, which the loader
+    re-derives and rejects, and not a fresh pooling that still fails stability.
     """
     assert "not calibrated" in refusal
-    for guard in ("CMP-5", "CMP-6", "CMP-7"):
-        assert guard in refusal, "the refusal must name what the artifact is missing"
-    # And the recorded arms could not be judged by a seven-task model either: they
-    # predate the guards, so re-recording is the only route back, which is exactly what
-    # the campaign does.
-    for label in ALL_ARMS:
-        tasks = set(_arm(label)["tasks"])
-        assert not tasks & {"CMP-5", "CMP-6", "CMP-7"}, label
+    assert "fitness.fit=False" in refusal, "the refusal must name the artifact's own verdict"
+    assert "failed: stability" in refusal, "and which check produced it"
+    assert "re-run the arms" in refusal
+
+    # The same two facts read off the artifact, so the refusal cannot be the only thing
+    # saying them. `fit` is false, and stability is the check that made it false.
+    fitness = json.loads(MODEL.read_text())["fitness"]
+    assert fitness["fit"] is False
+    assert fitness["stability"]["pass"] is False
+    assert fitness["grain"]["pass"] is True and fitness["goodness"]["pass"] is True, (
+        "stability alone refuses here — if another check has started failing too, the "
+        "suspension reason above is no longer the whole reason"
+    )
 
 
 def _carrier_sets():
@@ -134,12 +201,6 @@ def _carrier_sets():
                 yield split, combo
 
 
-@pytest.mark.skip(
-    reason="suspended with the calibrated sweep above: the installed artifact does not "
-    "load at the seven-task pin and the recorded arms predate the guards. The Phase 2c "
-    "campaign restores both, and this attack is re-established against the new arms "
-    "there rather than against numbers nobody measured."
-)
 def test_no_fabricated_first_confirm_can_be_accepted_on_a_null_pair(calibration):
     """Stage 2, attacked directly. `evaluate()` refuses to CONFIRM any of these
     pairs, so the only way to reach `confirmed()` with them is to hand it a first
@@ -151,8 +212,15 @@ def test_no_fabricated_first_confirm_can_be_accepted_on_a_null_pair(calibration)
     else. Under the round-2 rule each carrier is judged against its OWN null
     distribution at these counts, and the pair has to survive the guard gate and the
     positivity gate as well.
+
+    Suspended while nothing installs (the `calibration` fixture skips), and it comes
+    back on its own the moment something does. `judged` is counted and asserted against
+    the sweep's own denominator so that return cannot be a quiet one: a restored
+    artifact pooled over other arms than `ALL_ARMS`, or over a wider task set than the
+    `_restrict` below hands it, makes this sweep cover nothing or raise — never pass.
     """
     accepted = []
+    judged = 0
     for a, b in _same_shape_pairs():
         base, cand = _arm(a), _arm(b)
         fb, fc = _restrict(base, SUPPORTED), _restrict(cand, SUPPORTED)
@@ -180,19 +248,35 @@ def test_no_fabricated_first_confirm_can_be_accepted_on_a_null_pair(calibration)
                 first, raw={**first.raw, "decision_digest": decision_digest(first)}
             )
             decision = confirmed(first, fb, fc, calibration=calibration)
+            judged += 1
             if decision.outcome == ACCEPT:
                 accepted.append((f"{a}::{b}", carriers, decision.reasons))
+    assert judged == 62 * 8, (
+        "the sweep must actually have judged every same-shape pair against every "
+        "carrier set — a restored artifact that covers other arms proves nothing here"
+    )
     assert not accepted, accepted
 
 
-def test_the_committed_artifact_is_still_the_one_this_file_talks_about(refusal):
-    """The artifact is superseded, not gone: it is still the committed record, still
-    measured at the arms' own runner hash, and still the file the loader names when it
-    refuses. A sweep — or a refusal — about some other model would prove nothing."""
+def test_the_committed_artifact_is_the_ten_arm_seven_task_pooling(refusal):
+    """The artifact this file talks about, identified rather than assumed.
+
+    It is the Phase 2c pooling: ten arms, seven rated tasks, computed at those arms' own
+    runner hash — and it is still the file the loader names when it refuses. A refusal
+    about some other model would prove nothing, and neither would a sweep against one.
+
+    This is the second tripwire. It reads the artifact whole, so swapping in a different
+    pooling — a fit one included — fails here as well as at the `refusal` fixture, and
+    whoever swaps it has to come through this file rather than around it.
+    """
     model = json.loads(MODEL.read_text())
-    assert set(model["null_model"]) == {"A1", "G2", "G4", "G5"}
-    assert model["computed_at_runner_sha"] == _arm("r2-null-full-a")["fingerprint"]["runner_sha"]
+    assert set(model["null_model"]) == COVERED
+    assert tuple(p["label"] for p in model["provenance"]) == P2C_ARMS
+    assert model["computed_at_runner_sha"] == _arm(P2C_ARMS[0])["fingerprint"]["runner_sha"]
     assert "model-r2.json" in refusal
+    # The old four-task round-2 pooling is genuinely gone, not merely widened: none of
+    # its arms is in this artifact's provenance.
+    assert not {p["label"] for p in model["provenance"]} & set(ALL_ARMS)
 
 
 # ---------------------------------------------------------------------------

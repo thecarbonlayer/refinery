@@ -1270,3 +1270,91 @@ def test_recompute_reads_the_gain_set_from_the_grain_rows_not_from_the_rates(tmp
     rates, problems = recompute_model(model)
     assert problems == []
     assert set(rates) == MODEL_TASKS, "every covered task's rate must survive recomputation"
+
+
+# ---------------------------------------------------------------------------
+# An uncomputed conditional is NULL, never zero (Phase 2c close-out)
+# ---------------------------------------------------------------------------
+
+
+def _pooling_without_the_designated_baseline(tmp_path) -> dict:
+    """A model over arms none of which is the designated baseline — the Phase 2c
+    pooling's own shape, where every label is `p2c-*` and `r2-null-full-a` is gone."""
+    from loop.calibrate import MODEL_TASKS, SUPPORTED
+
+    _write(tmp_path, "p2c-full-a", _seven_task_arm("p2c-full-a", filtered=False, attempts=4))
+    _write(tmp_path, "p2c-cmp-a", _seven_task_arm("p2c-cmp-a", filtered=True, attempts=10))
+    _write(tmp_path, "p2c-cmp-b", _seven_task_arm("p2c-cmp-b", filtered=True, attempts=6))
+    return calibrate_model(
+        ["p2c-full-a", "p2c-cmp-a", "p2c-cmp-b"], tmp_path, SUPPORTED, coverage=MODEL_TASKS
+    )
+
+
+def test_end_to_end_conditionals_are_null_when_the_designated_baseline_is_absent(tmp_path):
+    """A conditional rate nobody could compute is NULL, and says why.
+
+    With no designated baseline arm in the pooling there is no run to be conditional
+    ON, and the conditional stage-1 mass is an empty sum. Folding an empty sum into a
+    published field wrote `0/1` and `0.0` — a detection probability of exactly zero,
+    which is a strong and false claim rather than an absent one, and it sat beside a
+    real marginal number where a reader would compare the two. The false-CONFIRM block
+    already publishes `None` plus a `baseline_note` in exactly this case; the
+    end-to-end rows now do the same, from the same resolver and the same sentence.
+    """
+    model = _pooling_without_the_designated_baseline(tmp_path)
+    e2e = model["fitness"]["power"]["end_to_end"]
+    fc = model["fitness"]["false_confirm"]
+
+    assert e2e["baseline_arm"] is None
+    assert e2e["baseline_counts"] is None
+    assert e2e["baseline_note"] == fc["baseline_note"], (
+        "one resolver, one reason — two sentences would be two chances to disagree "
+        "about why the same number is missing"
+    )
+    assert "r2-null-full-a" in e2e["baseline_note"]
+
+    assert e2e["rows"], "the marginal rows are still published; only the conditional is absent"
+    for row in e2e["rows"]:
+        assert row["conditional_stage1_confirm"] is None, row
+        assert row["conditional_stage1_confirm_float"] is None, row
+        assert row["conditional_joint"] is None, row
+        assert row["conditional_joint_float"] is None, row
+        assert row["baseline_note"] == e2e["baseline_note"], (
+            "a row read on its own must carry the reason its conditional is null"
+        )
+        for split_row in row["by_evidence_split"].values():
+            assert split_row["conditional_stage1_confirm"] is None, row
+            assert split_row["conditional_joint"] is None, row
+            assert split_row["conditional_joint_float"] is None, row
+        # The marginal half is untouched: this is an absent number, not a missing block.
+        assert Fraction(row["joint"]) <= Fraction(row["stage1_confirm"])
+        assert 0 <= row["joint_float"] <= 1
+
+
+def test_end_to_end_conditionals_are_computed_when_the_designated_baseline_is_present(tmp_path):
+    """The other half of the same claim, so "null" cannot pass by never computing
+    anything. Rename one arm to the designated label and every conditional field fills
+    in, with no `baseline_note` anywhere — the number exists, so nothing needs excusing.
+    """
+    from loop.calibrate import DESIGNATED_BASELINE, MODEL_TASKS, SUPPORTED
+
+    _write(
+        tmp_path,
+        DESIGNATED_BASELINE,
+        _seven_task_arm(DESIGNATED_BASELINE, filtered=False, attempts=4),
+    )
+    _write(tmp_path, "p2c-cmp-a", _seven_task_arm("p2c-cmp-a", filtered=True, attempts=10))
+    _write(tmp_path, "p2c-cmp-b", _seven_task_arm("p2c-cmp-b", filtered=True, attempts=6))
+    model = calibrate_model(
+        [DESIGNATED_BASELINE, "p2c-cmp-a", "p2c-cmp-b"], tmp_path, SUPPORTED, coverage=MODEL_TASKS
+    )
+
+    e2e = model["fitness"]["power"]["end_to_end"]
+    assert e2e["baseline_arm"] == DESIGNATED_BASELINE
+    assert e2e["baseline_counts"] is not None
+    assert "baseline_note" not in e2e
+    for row in e2e["rows"]:
+        assert "baseline_note" not in row
+        assert Fraction(row["conditional_joint"]) <= Fraction(row["conditional_stage1_confirm"])
+        total = sum(Fraction(v["conditional_joint"]) for v in row["by_evidence_split"].values())
+        assert total == Fraction(row["conditional_joint"])

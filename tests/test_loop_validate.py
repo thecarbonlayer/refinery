@@ -1101,23 +1101,30 @@ def test_every_declared_compaction_guard_has_a_rate_the_pinned_model_must_carry(
     assert "G4" in covered and "G4" not in guards
 
 
-def test_the_installed_four_task_artifact_no_longer_installs_and_says_why():
+def test_the_committed_artifact_refuses_to_install_itself_and_says_why():
     """The transition, stated out loud rather than left to be discovered.
 
-    `model-r2.json` was pooled over {A1, G2, G4, G5} at a runner hash this branch has
-    already moved past. Under the seven-task pin it does not install, and the section is
-    loudly uncalibrated until Task 5's campaign re-records at this hash. That is the
-    designed state, not a defect — but "not calibrated" has to NAME the reason, because
-    "re-run the arms" and "someone edited the artifact" are different remedies.
+    The reason has moved once already and this test moves with it. `model-r2.json` used
+    to be refused for its SHAPE: pooled over {A1, G2, G4, G5} while the loader pinned
+    seven tasks. The Phase 2c campaign closed that gap — ten arms, all seven tasks, at
+    one runner hash — and the artifact it produced refuses itself instead:
+    `fitness.fit = false`, because STABILITY did not hold. The section stays loudly
+    uncalibrated, which is the fail-closed design working.
+
+    Asked at the artifact's OWN provenance, so shape and freshness are both satisfied
+    and the refusal can only be the artifact's own verdict. "Re-run the arms",
+    "someone edited the artifact" and "the pooling is not stable" are three different
+    remedies, so the sentence has to say which one this is.
     """
     import json
 
     from loop.validate import _SECTION_MODEL, calibration_status
 
     installed = json.loads(_SECTION_MODEL["compaction"].read_text())
-    assert set(installed["null_model"]) == {"A1", "G2", "G4", "G5"}, (
-        "fixture precondition: the committed artifact is the four-task round-2 model"
+    assert set(installed["null_model"]) == {"A1", "G2", "G4", "G5", "CMP-5", "CMP-6", "CMP-7"}, (
+        "fixture precondition: the committed artifact is the Phase 2c seven-task pooling"
     )
+    assert len(installed["provenance"]) == 10, "over the campaign's ten arms"
     arm = installed["provenance"][0]
     cal, why = calibration_status(
         "compaction",
@@ -1131,4 +1138,6 @@ def test_the_installed_four_task_artifact_no_longer_installs_and_says_why():
     )
     assert cal is None
     assert "not calibrated" in why
-    assert "CMP-5" in why and "CMP-6" in why and "CMP-7" in why
+    assert "fitness.fit=False" in why, "the refusal must quote the artifact's own verdict"
+    assert "failed: stability" in why, "and name the check that produced it"
+    assert "re-run the arms" in why, "and say what fixes it"

@@ -1366,6 +1366,7 @@ def _end_to_end_row(
     guards: frozenset[str],
     attempts: int,
     baseline_counts: dict[str, int] | None,
+    baseline_note: str = "",
 ) -> dict:
     """One published joint detection rate: P(stage 1 CONFIRMs AND stage 2 ACCEPTs).
 
@@ -1382,6 +1383,14 @@ def _end_to_end_row(
     a detection rate beside a false-alarm rate without silently comparing a
     conditional number against a marginal one -- which is what the first version of
     this artifact invited.
+
+    When this pooling has NO designated baseline arm, there is nothing to be
+    conditional on and every conditional field is `None`, with `baseline_note`
+    carrying the resolver's own reason -- the same shape the false-CONFIRM block
+    publishes. It is written that way because the alternative is worse than useless:
+    folding an empty mass into a fraction wrote `0/1` and `0.0`, i.e. "this pipeline
+    detects a real improvement with probability exactly zero", a strong false claim
+    sitting beside a real marginal number a reader would compare it against.
     """
     alt = {
         t: min(Fraction(1), rates[t] + (offset if carrier in (None, t) else Fraction(0)))
@@ -1440,8 +1449,9 @@ def _end_to_end_row(
         )
 
     stage1_total, joint_total = totals(marginal_split, "")
+    have_baseline = baseline_counts is not None
     cond_stage1_total, cond_joint_total = totals(conditional_split, "conditional_")
-    return {
+    row = {
         "kind": kind,
         "offset": _fraction_str(offset),
         "carrier": carrier,
@@ -1452,25 +1462,39 @@ def _end_to_end_row(
         "stage1_confirm_float": float(stage1_total),
         "joint": _fraction_str(joint_total),
         "joint_float": float(joint_total),
-        "conditional_stage1_confirm": _fraction_str(cond_stage1_total),
-        "conditional_stage1_confirm_float": float(cond_stage1_total),
-        "conditional_joint": _fraction_str(cond_joint_total),
-        "conditional_joint_float": float(cond_joint_total),
+        "conditional_stage1_confirm": (_fraction_str(cond_stage1_total) if have_baseline else None),
+        "conditional_stage1_confirm_float": (float(cond_stage1_total) if have_baseline else None),
+        "conditional_joint": _fraction_str(cond_joint_total) if have_baseline else None,
+        "conditional_joint_float": float(cond_joint_total) if have_baseline else None,
         "by_evidence_split": {
             split: {
                 "stage1_confirm": _fraction_str(marginal_split[split]["stage1_confirm"]),
                 "stage1_confirm_float": float(marginal_split[split]["stage1_confirm"]),
                 "joint": _fraction_str(marginal_split[split]["joint"]),
                 "joint_float": float(marginal_split[split]["joint"]),
-                "conditional_stage1_confirm": _fraction_str(
-                    conditional_split[split]["conditional_stage1_confirm"]
+                "conditional_stage1_confirm": (
+                    _fraction_str(conditional_split[split]["conditional_stage1_confirm"])
+                    if have_baseline
+                    else None
                 ),
-                "conditional_joint": _fraction_str(conditional_split[split]["conditional_joint"]),
-                "conditional_joint_float": float(conditional_split[split]["conditional_joint"]),
+                "conditional_joint": (
+                    _fraction_str(conditional_split[split]["conditional_joint"])
+                    if have_baseline
+                    else None
+                ),
+                "conditional_joint_float": (
+                    float(conditional_split[split]["conditional_joint"]) if have_baseline else None
+                ),
             }
             for split in sorted(marginal_split)
         },
     }
+    if not have_baseline:
+        # On the ROW as well as on the block: rows are read one at a time (keyed by
+        # carrier or offset), and a null with no reason beside it invites the reader
+        # to supply one.
+        row["baseline_note"] = baseline_note
+    return row
 
 
 def _check_end_to_end(
@@ -1482,6 +1506,7 @@ def _check_end_to_end(
     guards: frozenset[str],
     baseline: tuple[str, dict[str, int]] | None,
     *,
+    baseline_note: str = "",
     offset: Fraction = POWER_OFFSET,
     attempts: int = POWER_ATTEMPTS,
     uniform_offsets: tuple[Fraction, ...] = END_TO_END_UNIFORM_OFFSETS,
@@ -1503,7 +1528,9 @@ def _check_end_to_end(
     or None when this pooling has no such arm. Every row carries a conditional rate
     against it beside the marginal one, so the detection rates and the false-CONFIRM
     rate published in the same artifact are conditional on the same recorded run and
-    can honestly be read against each other.
+    can honestly be read against each other. With no such arm, the conditional fields
+    are `None` and `baseline_note` (the resolver's own reason, shared verbatim with
+    the false-CONFIRM block) says so on the block and on every row.
     """
     rates = {t: Fraction(*null_counts[t]) for t in sorted(supported)}
     split_tasks = {
@@ -1553,6 +1580,7 @@ def _check_end_to_end(
             guards,
             attempts,
             baseline[1] if baseline else None,
+            baseline_note,
         )
         for carrier in sorted(supported)
     ]
@@ -1571,10 +1599,11 @@ def _check_end_to_end(
             guards,
             attempts,
             baseline[1] if baseline else None,
+            baseline_note,
         )
         for uniform in uniform_offsets
     ]
-    return {
+    block = {
         "confirmation_attempts": attempts,
         "guards": sorted(guards),
         "baseline_arm": baseline[0] if baseline else None,
@@ -1595,6 +1624,9 @@ def _check_end_to_end(
         ),
         "rows": rows,
     }
+    if baseline is None:
+        block["baseline_note"] = baseline_note
+    return block
 
 
 def designated_baseline_counts(
@@ -1736,6 +1768,7 @@ def _check_power(
     *,
     guards: frozenset[str] = CONFIRMATION_GUARDS,
     baseline: tuple[str, dict[str, int]] | None = None,
+    baseline_note: str = "",
     offset: Fraction = POWER_OFFSET,
     attempts: int = POWER_ATTEMPTS,
 ) -> dict:
@@ -1826,6 +1859,7 @@ def _check_power(
             level,
             guards,
             baseline,
+            baseline_note=baseline_note,
             offset=offset,
             attempts=attempts,
         ),
@@ -1895,8 +1929,12 @@ def calibrate_model(
     )
     # Resolved once, so the conditional detection rates and the conditional
     # false-CONFIRM rate are conditional on the SAME recorded arm -- the whole point
-    # of publishing them together.
-    baseline_counts, _ = designated_baseline_counts(arm_results, supported, standard_attempts)
+    # of publishing them together. The REASON travels with the resolution for the same
+    # reason: when there is no such arm, both blocks publish nulls, and both explain
+    # the nulls with the one sentence this call produced.
+    baseline_counts, baseline_note = designated_baseline_counts(
+        arm_results, supported, standard_attempts
+    )
     baseline = (DESIGNATED_BASELINE, baseline_counts) if baseline_counts is not None else None
     power = _check_power(
         null_counts,
@@ -1905,6 +1943,7 @@ def calibrate_model(
         standard_attempts,
         COVERAGE_LEVEL,
         baseline=baseline,
+        baseline_note=baseline_note,
     )
     false_confirm = _check_false_confirm(
         arm_results, null_counts, supported, task_split, standard_attempts, COVERAGE_LEVEL

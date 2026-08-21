@@ -549,9 +549,18 @@ def cmp5_outcome(reply: str) -> tuple[bool, str, str | None]:
     and a reply that ignores it entirely — including one whose PROSE is correct — says
     nothing about what compaction carried. It is ``not_attempted``.
 
-    This matters more here than it would on a miner, because CMP-5's pooled rate becomes
-    its own GATE: a drop past its null quantile REJECTs a candidate. Formatting outcomes
-    in that denominator would make the gate a measurement of obedience.
+    This matters more here than it would on a miner, because CMP-5's pooled rate would
+    become its own GATE: a drop past its null quantile would REJECT a candidate, and
+    formatting outcomes in that denominator make such a gate a measurement of obedience.
+
+    WHICH IS WHAT THEY STILL ARE, corrected here because the paragraph above once read
+    as if this classification fixed it. It does not. ``not_attempted`` is a LABEL on the
+    record; ``TaskResult.pass_fraction`` (runner/run.py) divides passes by EVERY
+    recorded attempt, so a non-answer is a non-pass in the published rate exactly like a
+    wrong answer. What the label buys is that the two are TELLABLE APART afterwards --
+    which is how the 29%/74% decomposition in ``run_cmp5`` was recoverable at all. It
+    buys nothing for the gate, and until the Phase 3 rework recorded in ``run_cmp5``
+    lands, this task does not gate candidates.
 
     The line is drawn at the parse, and only there. Neither role parsed means the reply
     never entered the form; once EITHER role parses, the model answered, and a wrong or
@@ -616,6 +625,23 @@ def run_cmp5() -> Attempt:
     compactions that never saw the supersession. Filler continues until the message
     has actually left the transcript; if it never leaves, the attempt is ``error`` —
     the task never reached the thing it measures.
+
+    WHAT THIS TASK'S RATE ACTUALLY MEASURES, stated plainly because an earlier version
+    of this docstring implied otherwise. ``not_attempted`` is a LABEL and nothing more:
+    ``TaskResult.pass_fraction`` (runner/run.py) is passes over EVERY recorded attempt,
+    so a non-answer stays in the denominator exactly like a wrong answer. The
+    classification separates the two in the record; it does not protect the rate.
+
+    So the published rate is a PRODUCT of two unrelated things. Over the ten committed
+    Phase 2c arms: 23 of 79 attempts answered in the requested two-role form (29%), and
+    17 of those 23 named both codes correctly (74%). (23/79) x (17/23) is exactly the
+    17/79 the null model carries. Most of the movement available to this "guard" is
+    movement in template obedience, not in what compaction carried.
+
+    RECORDED PHASE 3 ITEM: format-robustness rework — replace the regex role parse with
+    judge-based answer extraction (the same judge seam CMP-6 already uses), so the
+    verdict reads what the reply MEANS rather than whether it matched a template. Until
+    that lands, this task reports; it does not gate candidates.
     """
     a = _plain_agent(context_limit=900)
     try:
@@ -640,7 +666,9 @@ def run_cmp5() -> Attempt:
                 f"supersession never left the live transcript (compactions={compactions} "
                 f"still_verbatim={not superseded})",
                 turns=len(a.messages),
-                metrics=agent_metrics(a),
+                # Published on EVERY exit, this one included — see `run_g2` for why a
+                # metric that skips an exit reports a mean over a shrunken denominator.
+                metrics={**agent_metrics(a), "attempted": 0.0},
             )
         result = a.run(CMP5_QUESTION)
         reply = result.text
@@ -658,7 +686,7 @@ def run_cmp5() -> Attempt:
         # extractor reads everything after it as the reply.
         + f"reply={reply[:240]!r}",
         turns=len(a.messages),
-        metrics=agent_metrics(a, result=result),
+        metrics={**agent_metrics(a, result=result), "attempted": float(outcome != "not_attempted")},
     )
 
 
@@ -680,6 +708,19 @@ def run_cmp6() -> Attempt:
     falls back to a substring check. A silent fallback would publish a mechanical
     measurement under a judged task's name, which is the one failure that would make
     every number this task produces uninterpretable.
+
+    ``attempted`` is published on every exit, as it is on G2 and CMP-5. This task has no
+    ``not_attempted`` outcome — the judge returns a verdict on whatever came back — so
+    the metric answers a narrower question here: what fraction of attempts got past the
+    judge gate and the compaction setup to a real answer at all. Emitted from every exit
+    for the same reason as elsewhere: a metric a failing exit stays silent about is
+    averaged over the attempts that survived, not over the attempts that were made.
+
+    RECORDED PHASE 3 ITEM, shared with CMP-5: format-robustness rework — judge-based
+    role/answer extraction across the scenario guards, so a verdict turns on what a
+    reply MEANS and not on a template. CMP-6 already judges its verdict, and CMP-5's
+    pooled rate is mostly a format score until it does too; neither guard gates
+    candidates before that rework lands.
     """
     validated, why = validation_status()
     if not validated:
@@ -687,7 +728,10 @@ def run_cmp6() -> Attempt:
             False,
             "error",
             f"judge not validated: {why}",
-            metrics={},
+            # `attempted` alone: this exit precedes the agent, so there are no agent
+            # metrics to report beside it. It still reports the zero rather than
+            # nothing, or the metric's mean would skip the attempts that never started.
+            metrics={"attempted": 0.0},
         )
     a = _plain_agent(context_limit=900)
     try:
@@ -705,7 +749,7 @@ def run_cmp6() -> Attempt:
                 "error",
                 f"repeated-compaction setup did not fire twice (count={compactions})",
                 turns=len(a.messages),
-                metrics=agent_metrics(a),
+                metrics={**agent_metrics(a), "attempted": 0.0},
             )
         result = a.run(CMP6_QUESTION)
         reply = result.text
@@ -722,6 +766,7 @@ def run_cmp6() -> Attempt:
         turns=len(a.messages),
         metrics={
             **agent_metrics(a, result=result),
+            "attempted": 1.0,
             "judge_verdict": float(ok),
             # The judge is a SECOND model call per attempt. Its cost is recorded
             # beside the agent's own, or CMP-6's per-task token mean reports only

@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+from fractions import Fraction
 from pathlib import Path
 
 from runner.spec import ATTEMPTS
@@ -2628,6 +2629,107 @@ def test_g2_publishes_whether_the_attempt_produced_an_answer_at_all():
     returns = source.count("return Attempt(")
     assert returns == 2, f"run_g2 has {returns} exits; every one must publish `attempted`"
     assert source.count('"attempted"') == returns
+
+
+def test_cmp5_and_cmp6_publish_whether_the_attempt_produced_an_answer_at_all():
+    """The same seam G2 has, on the two scenario guards that lacked it.
+
+    Whether an attempt reached an answer at all is the number that decides how to read
+    the pass rate beside it, and it was only knowable for CMP-5 by parsing prose out of
+    the detail string. It is a metric now. Emitted on EVERY exit, the setup and gate
+    errors included, for G2's reason: `runner/suite.py`'s `_collect` averages a metric
+    over the attempts that reported it, so an exit that stays silent shrinks the
+    denominator instead of contributing a zero.
+    """
+    import inspect
+
+    from runner.tasks import cluster_g
+
+    for fn in (cluster_g.run_cmp5, cluster_g.run_cmp6):
+        source = inspect.getsource(fn)
+        returns = source.count("return Attempt(")
+        published = source.count('"attempted"')
+        assert returns >= 2, fn.__name__
+        assert published == returns, (
+            f"{fn.__name__} has {returns} exits and {published} `attempted` metrics; "
+            "every exit must publish one"
+        )
+
+
+def _p2c_outcomes(task: str) -> dict[str, int]:
+    """This task's outcome tally over the ten committed Phase 2c arms."""
+    import collections
+
+    labels = [f"p2c-null-full-{c}" for c in "abc"] + [f"p2c-null-cmp-{c}" for c in "abcdefg"]
+    seen: collections.Counter = collections.Counter()
+    for label in labels:
+        path = REPO_ROOT / "results" / f"{label}.jsonl"
+        for line in path.read_text().splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if record["task"] == task:
+                seen[record["outcome"]] += 1
+    return dict(seen)
+
+
+def test_cmp5s_docstring_states_what_its_pooled_rate_actually_compounds():
+    """The correction, checked against the record rather than merely written down.
+
+    `not_attempted` is a LABEL. It does not leave the denominator: `TaskResult`'s
+    `pass_fraction` is passes over every recorded attempt (`runner/run.py`), so CMP-5's
+    published rate is one number carrying two very different things — how often the
+    model answered in the requested form at all, and how often the answer was right
+    given that it did. An earlier version of the docstring implied the classification
+    protected the rate. It does not, and a guard whose rate is mostly a format score
+    fires on formatting.
+
+    Asserted against the committed arms, so the docstring cannot drift away from the
+    numbers it quotes: the two factors are recomputed here and must round to the
+    percentages the docstring states.
+    """
+    import inspect
+
+    from runner.tasks import cluster_g
+
+    seen = _p2c_outcomes("CMP-5")
+    total = sum(seen.values())
+    attempted = total - seen.get("not_attempted", 0)
+    assert total == 79 and attempted == 23, seen
+    format_rate = round(100 * attempted / total)
+    conditional = round(100 * seen["pass"] / attempted)
+    assert (format_rate, conditional) == (29, 74), (format_rate, conditional)
+    # And the two really do compound to the published pooled rate.
+    assert Fraction(seen["pass"], total) == Fraction(attempted, total) * Fraction(
+        seen["pass"], attempted
+    )
+
+    doc = inspect.getdoc(cluster_g.run_cmp5) or ""
+    assert f"{format_rate}%" in doc and f"{conditional}%" in doc, (
+        "the docstring must state the two factors its pooled rate compounds"
+    )
+    assert "pass_fraction" in doc, "and say that non-answers stay in the denominator"
+
+
+def test_both_scenario_guards_record_the_format_robustness_rework_as_a_phase_3_item():
+    """A known weakness with no recorded next step is a weakness that gets forgotten.
+
+    CMP-5 reads mostly as a format score and CMP-6's judged verdict has the same
+    exposure from the other side, so neither should gate a candidate until answer
+    extraction stops depending on the model obeying a template. That rework is recorded
+    as Phase 3 work, in both task docstrings, where whoever next reads the task will be.
+    """
+    import inspect
+
+    from runner.tasks import cluster_g
+
+    for fn in (cluster_g.run_cmp5, cluster_g.run_cmp6):
+        # Whitespace-normalized: these are wrapped docstrings, and a claim that a
+        # sentence is present must not turn on where the line broke.
+        doc = " ".join((inspect.getdoc(fn) or "").lower().split())
+        assert "phase 3" in doc, fn.__name__
+        assert "judge" in doc and "extraction" in doc, fn.__name__
+        assert "gate candidates" in doc or "gates candidates" in doc, fn.__name__
 
 
 def test_no_scenario_guards_fact_lands_in_the_verbatim_head_window():
