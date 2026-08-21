@@ -104,8 +104,10 @@ policy improvement is a `strategy_surface_gap`; a broken invariant is a
 
 ## Layout
 
-- runner/tasks/ — the task specs (mechanical verifiers only; sentinels,
-  pinned commands, and seed-file sha256s authored at import time)
+- runner/tasks/ — the task specs (deterministic verifiers by default; sentinels,
+  pinned commands, and seed-file sha256s authored at import time; the one judged
+  seam is the hash-pinned meaning judge in runner/judge.py, activation-gated on a
+  committed validation artifact)
 - runner/{run,suite}.py — attempt/suite drivers; runner/delta.py — Δ + rule
 - runner/helpers.py — approve-and-log approver, environ guard,
   transcript/hash utilities

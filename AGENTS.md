@@ -52,9 +52,14 @@ Never move suite code into carbon. Never let carbon's config reach into `runner/
 - **Averages, never majority.** A task that passes some attempts and fails others is a
   fraction, not a pass. Held-out carries the generalization claim, so it gets more
   samples than held-in.
-- **Verifiers are mechanical** — string, hash, and exit-code checks, never model
-  judgment. Oracles are hash-pinned at import; a deleted or altered oracle is a spoofed
-  task, not a passing one.
+- **Verifiers are deterministic by default** — string, hash, and exit-code checks,
+  and the only deciders where integrity is at stake. The one exception is meaning:
+  where a mechanical check would manufacture false failures on free prose, a
+  hash-pinned judge prompt (runner/judge.py) with a committed validation artifact
+  decides equivalence — and the task refuses loudly (outcome `error`) when that
+  artifact is missing, failing, or measured for a different prompt or parser
+  version. Never a silent fallback in either direction. Oracles are hash-pinned at
+  import; a deleted or altered oracle is a spoofed task, not a passing one.
 - **Tests read carbon's live config.** Fixtures copy the real file, so a change in
   carbon can turn this suite red on its own. Derive expectations from disk, never
   hardcode a value.
