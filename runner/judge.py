@@ -84,21 +84,49 @@ AGREEMENT_PATH = (
 )
 
 
-def validation_status(path: Path | None = None) -> tuple[bool, str]:
-    """Is this judge validated for THIS prompt? ``(ok, reason)``.
+# The version of the SCORING COMPUTATION that turns per-pair judge outputs into
+# the artifact's agreement numbers and its ``pass`` verdict — the fourth pin of
+# the artifact's identity, beside the prompt sha, the parser version, and the
+# model. It lives HERE, not in ``loop.judge_validate`` where the computation
+# runs, for ``AGREEMENT_PATH``'s reason: the reader (this gate) may not import
+# ``loop``, and one constant imported by the writer keeps the stamp and the
+# check from drifting apart.
+#
+# BUMP THIS, in the same commit, on any change to ``run_validation``'s scoring
+# or pass logic that could alter agreement, the clean-denial gate, or ``pass``
+# for the same judge outputs. The gate refuses an artifact stamped with any
+# other version — or with none, which is what every artifact written before
+# this pin carries. History: 1 = verdict-equality agreement (an undelivered
+# judgment's fail-closed False could count as a correct NO); 2 = delivered-
+# verdict agreement (undelivered pairs never agree; delivered/undelivered
+# counts recorded per artifact, ``ran`` per record).
+VALIDATION_COMPUTATION_VERSION = 2
 
-    Contract §4: CMP-6's activation is gated on
+
+def validation_status(path: Path | None = None, *, judge_model: str) -> tuple[bool, str]:
+    """Is this judge validated for THIS prompt, parser, and model? ``(ok, reason)``.
+
+    Contract §4: the judged verifiers' activation (CMP-6's verdict, CMP-5's
+    extraction lane) is gated on
     ``iterations/judge-validation/agreement.json`` existing, recording
-    ``pass: true``, AND carrying the CURRENT ``JUDGE_PROMPT_SHA``. Any other
-    state returns False with the reason, and CMP-6 turns that into an
+    ``pass: true``, AND carrying the CURRENT ``JUDGE_PROMPT_SHA``,
+    ``JUDGE_PARSER_VERSION``, ``VALIDATION_COMPUTATION_VERSION``, and the model
+    the live judge will actually run on (``judge_model`` — required, so no
+    caller can forget the binding). Any
+    other state returns False with the reason, and the tasks turn that into an
     ``error`` outcome — never a mechanical fallback, which would silently
     replace a meaning check with a substring check and report the result under
     the same task name.
 
-    The sha comparison is the half that is easy to forget and the one that
-    matters most: the artifact is a measurement of a SPECIFIC prompt's
-    agreement with mechanical ground truth, and a prompt edit leaves the file
-    on disk, passing, describing a judge that no longer exists.
+    The identity comparisons are the half that is easy to forget and the one
+    that matters most: the artifact is a measurement of a SPECIFIC prompt read
+    by a SPECIFIC parser on a SPECIFIC model, and a change to any of the three
+    leaves the file on disk, passing, describing a judge that no longer
+    exists. Serving identity beyond the model string (provider, quantization)
+    is NOT bound yet, deliberately: those fields do not exist on the provider
+    seam today — they arrive with the queued fingerprint extension for the new
+    serving base, and the artifact and this check must grow them in that same
+    change rather than pretend to bind what is not recorded.
 
     Fails CLOSED on every unreadable state (missing file, bad JSON, an OSError)
     — the same discipline as ``_parse_judgment``.
@@ -117,6 +145,35 @@ def validation_status(path: Path | None = None) -> tuple[bool, str]:
         return False, (
             f"validation artifact was measured for judge_prompt_sha={str(recorded_sha)[:12]!r}, "
             f"this judge is {JUDGE_PROMPT_SHA[:12]!r} — re-run the validation"
+        )
+    # The parser half of the identity, same discipline as the sha: an artifact is a
+    # measurement of a (prompt, parser) PAIR. A missing key is an artifact measured
+    # before the parser was versioned at all — refused for the same reason a
+    # mismatch is, because "the parser it describes no longer exists" covers both.
+    recorded_parser = artifact.get("judge_parser_version")
+    if recorded_parser != JUDGE_PARSER_VERSION:
+        return False, (
+            f"validation artifact was measured for judge_parser_version={recorded_parser!r}, "
+            f"this parser is {JUDGE_PARSER_VERSION} — re-run the validation"
+        )
+    # The scoring-computation half: an artifact scored under another rule (or
+    # before scoring was versioned at all — the missing-key case) may carry a
+    # ``pass: true`` the current rule would refuse.
+    recorded_computation = artifact.get("validation_computation_version")
+    if recorded_computation != VALIDATION_COMPUTATION_VERSION:
+        return False, (
+            "validation artifact was scored under "
+            f"validation_computation_version={recorded_computation!r}, this scorer is "
+            f"{VALIDATION_COMPUTATION_VERSION} — re-run the validation"
+        )
+    # The model half of the identity: agreement measured on one model says nothing
+    # about another. A missing key refuses too — an artifact that never said which
+    # model it measured is not evidence about any.
+    recorded_model = artifact.get("model")
+    if recorded_model != judge_model:
+        return False, (
+            f"validation artifact was measured with judge model {recorded_model!r}, "
+            f"this run's judge is {judge_model!r} — re-run the validation"
         )
     if artifact.get("pass") is not True:
         return False, f"validation artifact records pass={artifact.get('pass')!r}"
@@ -137,11 +194,20 @@ class Judgment:
     Zero when the provider reported no usage (a scripted provider, a transport
     failure) — never an estimate, which would put a fabricated number in the
     same field as measured ones.
+
+    ``ran`` separates two kinds of False verdict. True means a verdict actually
+    came back in the pinned two-line format — a real NO, or a YES the grounding
+    rule refused (the judge decided; the decision failed the pair). False means
+    NO decision exists: the provider call failed or the output never parsed.
+    Both fail closed to ``verdict=False``, but a verifier that recorded the
+    second kind as a task failure would be blaming the strategy under test for
+    a judge outage — ``ran`` is what lets it refuse (outcome ``error``) instead.
     """
 
     verdict: bool
     quote: str
     raw: str
+    ran: bool = True
     tokens: int = 0
 
 
@@ -162,6 +228,24 @@ def _usage_tokens(usage: dict) -> int:
         return int(usage.get("prompt_tokens", 0) or 0) + int(usage.get("completion_tokens", 0) or 0)
     except (TypeError, ValueError):
         return 0
+
+
+# The parser's behavior version, pinned by the activation gate BESIDE the prompt
+# sha. The sha pins what the judge is ASKED; it cannot see a change in how the
+# reply is READ — and that reading is the three functions below (``_normalized``,
+# ``quote_is_grounded``, ``_parse_judgment``). The validation artifact records the
+# version it was measured under, and ``validation_status`` refuses any artifact
+# measured under a different one, so a parser change makes the judge loudly
+# unvalidated instead of silently re-scoring history under a new rule.
+#
+# BUMP THIS, in the same commit, on any change to those functions that could alter
+# a verdict or quote for the same raw judge output — a new refusal rule, a
+# loosened or tightened match, a reordered check. Additive metadata that leaves
+# every verdict and quote untouched does not bump. ``tests/test_judge.py`` pins
+# the three functions' source by digest, so no edit can skip this decision
+# silently. History: 1 = the strict two-line parse; 2 = the grounding rule (a YES
+# must cite a verbatim span of the answer).
+JUDGE_PARSER_VERSION = 2
 
 
 def _normalized(text: str) -> str:
@@ -197,8 +281,9 @@ def quote_is_grounded(quote: str, answer: str) -> bool:
 def _parse_judgment(raw: str, answer: str) -> Judgment:
     """Strict two-line parse plus the grounding rule: first line ``VERDICT: YES``
     or ``VERDICT: NO`` exactly, second line starting ``QUOTE:``. Anything else
-    fails CLOSED (verdict False, quote "") with ``raw`` preserved. Lines after the
-    second are ignored — the contract pins the first two, not the total length.
+    fails CLOSED (verdict False, quote "", and ``ran=False`` — no verdict ever
+    came back) with ``raw`` preserved. Lines after the second are ignored — the
+    contract pins the first two, not the total length.
 
     A parsed YES then has to earn its verdict: its quote must be grounded in
     ``answer``. An ungrounded YES fails closed the same way a malformed one does,
@@ -210,13 +295,13 @@ def _parse_judgment(raw: str, answer: str) -> Judgment:
     """
     lines = raw.splitlines()
     if len(lines) < 2:
-        return Judgment(False, "", raw)
+        return Judgment(False, "", raw, ran=False)
     verdict_line = lines[0].strip()
     quote_line = lines[1].strip()
     if verdict_line not in ("VERDICT: YES", "VERDICT: NO"):
-        return Judgment(False, "", raw)
+        return Judgment(False, "", raw, ran=False)
     if not quote_line.startswith("QUOTE:"):
-        return Judgment(False, "", raw)
+        return Judgment(False, "", raw, ran=False)
     quote = quote_line[len("QUOTE:") :].strip()
     if verdict_line == "VERDICT: NO":
         return Judgment(False, quote, raw)
@@ -270,4 +355,4 @@ def judged_equivalent(expected: str, answer: str, provider) -> Judgment:
         return replace(judgment, tokens=_usage_tokens(response.usage))
     except Exception as exc:
         error_msg = f"<provider error: {exc}>"
-        return Judgment(False, "", error_msg)
+        return Judgment(False, "", error_msg, ran=False)

@@ -10,7 +10,6 @@ import subprocess
 import sys
 import tempfile
 import textwrap
-from fractions import Fraction
 from pathlib import Path
 
 from runner.spec import ATTEMPTS
@@ -2029,51 +2028,268 @@ def test_cmp5_passes_only_when_both_roles_parse_to_the_right_codes():
     assert cmp5_verdict("I do not have that decision.") == (False, None, None)
 
 
-def test_cmp5_records_a_reply_that_never_used_the_form_as_not_attempted():
-    """G2's contract-§5 principle, applied to the new guard.
+def _judge_never_called(expected: str, answer: str):
+    raise AssertionError("the judge was consulted where determinism already had the verdict")
 
-    CMP-5 asks for a two-role form, and a reply that ignores it entirely — including one
-    whose PROSE is correct — is not evidence about what compaction carried. Recording it
-    as `fail` would put a formatting outcome into the pooled rate, and that rate is this
-    guard's own gate: a drop past its null quantile REJECTs a candidate. A gate whose
-    denominator is polluted by non-answers is measuring the wrong thing.
 
-    The line is drawn where the parse is: neither role parsed means the reply never
-    entered the form at all. Once EITHER role parses, the model did answer and a wrong
-    or missing code is a real failure, exactly as before.
+def test_cmp5_duplicate_role_assignments_resolve_last_wins():
+    """Review finding: ``found.setdefault`` made the FIRST assignment win, so
+    "approved=A retired=B ... Correction: approved=B retired=A" passed on the stale
+    first pair while the reversed order failed — the verdict depended on which half
+    the model said first. Last-wins is the fix, chosen over routing duplicates to
+    the judge because a duplicated form is still an in-form answer (deterministic
+    ground, decision 12's default) and because it is the reading CMP-5's own
+    premise demands of the model: a later statement supersedes an earlier one."""
+    from runner.tasks.cluster_g import CMP5_CURRENT, CMP5_RETIRED, cmp5_outcome, cmp5_verdict
+
+    right = f"approved={CMP5_CURRENT} retired={CMP5_RETIRED}"
+    wrong = f"approved={CMP5_RETIRED} retired={CMP5_CURRENT}"
+    correction = "... wait, that is backwards. Correction:"
+
+    # The correction is the answer — in both directions, symmetrically.
+    fixed = cmp5_outcome(f"{wrong} {correction} {right}", _judge_never_called)
+    assert (fixed.passed, fixed.outcome, fixed.verifier) == (True, "pass", "mechanical")
+    broken = cmp5_outcome(f"{right} {correction} {wrong}", _judge_never_called)
+    assert (broken.passed, broken.outcome) == (False, "fail")
+
+    # And the parsed roles report the codes that WON, not the stale ones.
+    ok, approved, retired = cmp5_verdict(f"{right} {correction} {wrong}")
+    assert ok is False and approved == CMP5_RETIRED and retired == CMP5_CURRENT
+
+    # Last-wins is PER ROLE: a correction that restates only one role supersedes
+    # only that role, and the un-corrected role's earlier value stands. Pinned so
+    # a future clear-everything-on-correction implementation cannot pass silently
+    # — under that reading the retired role would come back empty and this pass
+    # would flip.
+    partial = f"approved={CMP5_RETIRED} retired={CMP5_RETIRED} {correction} approved={CMP5_CURRENT}"
+    v = cmp5_outcome(partial, _judge_never_called)
+    assert (v.passed, v.outcome, v.verifier) == (True, "pass", "mechanical")
+    ok, approved, retired = cmp5_verdict(partial)
+    assert (ok, approved, retired) == (True, CMP5_CURRENT, CMP5_RETIRED)
+
+
+def test_cmp5_outcome_decides_mechanically_wherever_determinism_has_the_verdict():
+    """Decision 12's rule, as the layer order: mechanical checks decide wherever they
+    can, and the judge is consulted exactly where a mechanical check would manufacture
+    a false failure out of formatting — nowhere else. Every branch here hands the
+    verifier a judge that raises, so a judge call on any of them is itself the failure.
     """
-    from runner.tasks.cluster_g import CMP5_CURRENT, CMP5_RETIRED, cmp5_outcome
-
-    assert cmp5_outcome(f"approved={CMP5_CURRENT} retired={CMP5_RETIRED}") == (
-        True,
-        "pass",
-        None,
+    from runner.tasks.cluster_g import (
+        CMP5_CURRENT,
+        CMP5_NO_CODE,
+        CMP5_RETIRED,
+        CMP5_WRONG_IN_FORM,
+        G2_TRUNCATION_MARKER,
+        NON_ANSWER_TOOL_SYNTAX,
+        NON_ANSWER_TRUNCATED,
+        cmp5_outcome,
     )
 
-    # Correct in prose, never in the form: the answer is right and the attempt still
-    # tells us nothing about the two-role question that was asked.
+    # Both roles in the form, both right: the model answered the exact question in
+    # the exact form — determinism read it, pass.
+    v = cmp5_outcome(f"approved={CMP5_CURRENT} retired={CMP5_RETIRED}", _judge_never_called)
+    assert (v.passed, v.outcome, v.classification, v.verifier) == (True, "pass", None, "mechanical")
+
+    # The review's probe, kept: a COMPLETE form answer followed by leaked tool
+    # syntax is still a complete answer. The decision precedes the taxonomy —
+    # classifying this `not_attempted` recorded an answered question as unanswered.
+    leaky = (
+        f"approved={CMP5_CURRENT} retired={CMP5_RETIRED}\n<|tool_call>call:bash {{}}<tool_call|>"
+    )
+    v = cmp5_outcome(leaky, _judge_never_called)
+    assert (v.passed, v.outcome, v.classification, v.verifier) == (True, "pass", None, "mechanical")
+
+    # Both roles in the form, wrong or missing values: the form IS the model's
+    # answer, and a wrong code in it is a real recall failure — no prose rescue,
+    # and a trailing leak does not un-answer it either.
+    for reply in (
+        f"approved={CMP5_RETIRED} retired={CMP5_CURRENT}",  # swapped roles
+        f"approved={CMP5_CURRENT} retired=None",  # a recorded shape, verbatim
+        f"approved={CMP5_CURRENT} retired=None <|tool_call>call:bash {{}}<tool_call|>",
+    ):
+        v = cmp5_outcome(reply, _judge_never_called)
+        assert (v.passed, v.outcome, v.verifier) == (False, "fail", "mechanical")
+        assert v.classification == CMP5_WRONG_IN_FORM
+
+    # The taxonomy classifies only what nothing could decide: no complete form, no
+    # code for the judge lane to read — a non-answer, labeled.
+    for reply, label in (
+        (f"\n{G2_TRUNCATION_MARKER}", NON_ANSWER_TRUNCATED),
+        ("<|tool_call>call:bash {}<tool_call|>", NON_ANSWER_TOOL_SYNTAX),
+    ):
+        v = cmp5_outcome(reply, _judge_never_called)
+        assert (v.passed, v.outcome, v.classification) == (False, "not_attempted", label)
+
+    # Neither code anywhere in the reply: no extraction could find what is not
+    # there — the codes did not survive compaction, a mechanical fail. This is
+    # where an explicit denial lands, and it is a REAL failure now, not the
+    # conservative `not_attempted` the format-only verdict used to record.
+    denial = "I do not have information regarding which approach is approved or retired."
+    v = cmp5_outcome(denial, _judge_never_called)
+    assert (v.passed, v.outcome, v.verifier) == (False, "fail", "mechanical")
+    assert v.classification == CMP5_NO_CODE
+
+
+def test_cmp5_extraction_reads_role_claims_out_of_free_prose_with_the_judge():
+    """The rework's whole point: a reply that carries an approach code but skipped the
+    form is no longer failed on format. The validated judge is asked whether the prose
+    states each pinned role claim — and it sees ONLY that claim and the reply, the
+    same two-field constraint every judge call in this suite obeys (contract §4)."""
+    from runner.judge import Judgment
+    from runner.tasks.cluster_g import (
+        CMP5_APPROVED_FACT,
+        CMP5_CURRENT,
+        CMP5_RETIRED,
+        CMP5_RETIRED_FACT,
+        CMP5_ROLES_NOT_PRESERVED,
+        cmp5_outcome,
+    )
+
     prose = f"The approved approach is {CMP5_CURRENT}, and {CMP5_RETIRED} was retired earlier."
-    assert cmp5_outcome(prose) == (False, "not_attempted", "did not answer in the requested form")
+    calls = []
 
-    # Parsed, and wrong: a real failure, unchanged.
-    swapped = cmp5_outcome(f"approved={CMP5_RETIRED} retired={CMP5_CURRENT}")
-    assert swapped[:2] == (False, "fail")
-    # One role answered is still an answer — the other is a real miss, not a non-answer.
-    assert cmp5_outcome(f"approved={CMP5_CURRENT}")[:2] == (False, "fail")
+    def judge_yes(expected, answer):
+        calls.append((expected, answer))
+        return Judgment(True, "span", "VERDICT: YES\nQUOTE: span")
+
+    v = cmp5_outcome(prose, judge_yes)
+    assert (v.passed, v.outcome, v.classification, v.verifier) == (True, "pass", None, "judged")
+    # Both pinned role claims were asked, against the reply and nothing else.
+    assert calls == [(CMP5_APPROVED_FACT, prose), (CMP5_RETIRED_FACT, prose)]
+    assert len(v.judgments) == 2
+
+    # One role claim missing from the prose: the judge says NO to it, and the
+    # attempt is a real judged failure — the retirement fact did not survive.
+    def judge_approved_only(expected, answer):
+        return Judgment(expected == CMP5_APPROVED_FACT, "s", "VERDICT: ...\nQUOTE: s")
+
+    partial = f"The approved approach is {CMP5_CURRENT}."
+    v = cmp5_outcome(partial, judge_approved_only)
+    assert (v.passed, v.outcome, v.verifier) == (False, "fail", "judged")
+    assert v.classification == CMP5_ROLES_NOT_PRESERVED
+
+    # A single-role FORM answer with a code is the same case: the form did not
+    # deliver a complete answer, so the prose (which is all there is) is judged.
+    v = cmp5_outcome(f"approved={CMP5_CURRENT}", judge_approved_only)
+    assert (v.passed, v.outcome, v.verifier) == (False, "fail", "judged")
+
+    # The judge reads THROUGH a leak: a code-bearing prose answer with trailing
+    # tool syntax is still judged, and a delivered grounded YES on both roles
+    # passes — the leak does not veto an answer the judge could read.
+    v = cmp5_outcome(prose + "\n<|tool_call>call:bash {}<tool_call|>", judge_yes)
+    assert (v.passed, v.outcome, v.verifier) == (True, "pass", "judged")
+
+    # But a delivered non-pass on a leak-bearing reply falls back to the taxonomy:
+    # what remains is a non-answer with a code caught in it, not evidence the
+    # roles were lost — same call G2 makes for a leak with one sentinel in it.
+    from runner.tasks.cluster_g import NON_ANSWER_TOOL_SYNTAX
+
+    v = cmp5_outcome(
+        f"<|tool_call>call:bash {{command: 'grep {CMP5_CURRENT}'}}<tool_call|>",
+        judge_approved_only,
+    )
+    assert (v.passed, v.outcome) == (False, "not_attempted")
+    assert v.classification == NON_ANSWER_TOOL_SYNTAX
 
 
-def test_cmp5_only_the_non_answer_branch_publishes_its_reason():
-    """The detail string, pinned where it lands: `run_cmp5` records the parsed roles on
-    every attempt and the non-answer reason only on the branch that has one — the same
-    shape `run_g2` uses, so an analysis reading either task's records can count
-    non-answers the same way in both."""
+def test_cmp5_extraction_fails_closed_when_the_judge_never_delivers():
+    """The fail-closed constraint, verbatim: if extraction cannot run, the attempt
+    gets a taxonomy classification — never a silent pass, and never a `fail` that
+    blames the strategy under test for a judge outage."""
+    from runner.judge import Judgment
+    from runner.tasks.cluster_g import (
+        CMP5_APPROVED_FACT,
+        CMP5_CURRENT,
+        JUDGE_UNAVAILABLE,
+        cmp5_outcome,
+    )
+
+    prose = f"The approved approach is {CMP5_CURRENT}."
+
+    def outage(expected, answer):
+        return Judgment(False, "", "<provider error: service down>", ran=False)
+
+    v = cmp5_outcome(prose, outage)
+    assert (v.passed, v.outcome, v.verifier) == (False, "error", "judged")
+    assert v.classification == JUDGE_UNAVAILABLE
+
+    # A partial outage is still an outage: one role judged, the other never came
+    # back — no verdict exists for the pair, so no pass and no blame.
+    def half_outage(expected, answer):
+        if expected == CMP5_APPROVED_FACT:
+            return Judgment(True, "s", "VERDICT: YES\nQUOTE: s")
+        return Judgment(False, "", "garbled", ran=False)
+
+    v = cmp5_outcome(prose, half_outage)
+    assert (v.passed, v.outcome, v.classification) == (False, "error", JUDGE_UNAVAILABLE)
+
+    # Unless the deterministic taxonomy already explains the reply: a code caught
+    # inside a tool-syntax leak stays a classified non-answer even when the judge
+    # is down — that classification never depended on the judge, so judge health
+    # must not turn it into an `error`.
+    from runner.tasks.cluster_g import NON_ANSWER_TOOL_SYNTAX
+
+    leak = f"<|tool_call>call:bash {{command: 'grep {CMP5_CURRENT}'}}<tool_call|>"
+    v = cmp5_outcome(leak, outage)
+    assert (v.passed, v.outcome) == (False, "not_attempted")
+    assert v.classification == NON_ANSWER_TOOL_SYNTAX
+
+
+def test_cmp5_a_delivered_no_decides_even_beside_an_undelivered_call():
+    """Review residual: the mixed pair — one role's judgment delivered, the other's
+    not — used to route on all-delivered and error out before a delivered NO could
+    decide. A delivered NO on EITHER role conclusively decides fail: a pass needs
+    both claims carried, so one refused claim settles the attempt regardless of
+    what happened to the other call. Error remains only where NO delivered verdict
+    decides — a lone YES (the undelivered half could still swing it) or no delivery
+    at all. All five mixed rows, pinned."""
+    from runner.judge import Judgment
+    from runner.tasks.cluster_g import (
+        CMP5_APPROVED_FACT,
+        CMP5_CURRENT,
+        CMP5_ROLES_NOT_PRESERVED,
+        JUDGE_UNAVAILABLE,
+        cmp5_outcome,
+    )
+
+    no = Judgment(False, "q", "VERDICT: NO\nQUOTE: q")
+    yes = Judgment(True, "s", "VERDICT: YES\nQUOTE: s")
+    undelivered = Judgment(False, "", "<provider error: down>", ran=False)
+    prose = f"The approved approach is {CMP5_CURRENT}."  # code-bearing, no fragment
+
+    def judge_with(approved_j, retired_j):
+        def judge(expected, answer):
+            return approved_j if expected == CMP5_APPROVED_FACT else retired_j
+
+        return judge
+
+    rows = [
+        (no, undelivered, "fail", CMP5_ROLES_NOT_PRESERVED),
+        (undelivered, no, "fail", CMP5_ROLES_NOT_PRESERVED),
+        (undelivered, undelivered, "error", JUDGE_UNAVAILABLE),
+        (yes, undelivered, "error", JUDGE_UNAVAILABLE),
+        (undelivered, yes, "error", JUDGE_UNAVAILABLE),
+    ]
+    for approved_j, retired_j, outcome, classification in rows:
+        v = cmp5_outcome(prose, judge_with(approved_j, retired_j))
+        assert (v.passed, v.outcome, v.classification) == (False, outcome, classification), (
+            (approved_j.ran, approved_j.verdict),
+            (retired_j.ran, retired_j.verdict),
+            (v.outcome, v.classification),
+        )
+
+
+def test_cmp5_publishes_its_classification_and_keeps_the_reply_last():
+    """The detail string, pinned where it lands: `run_cmp5` records the parsed roles
+    on every attempt, the taxonomy classification on every non-pass, and keeps
+    `reply=` last — the trailing-match convention `loop.judge_validate` reads."""
     import inspect
 
     from runner.tasks import cluster_g
 
     source = inspect.getsource(cluster_g.run_cmp5)
-    assert "cmp5_outcome(reply)" in source
-    assert "non_answer=" in source
+    assert "cmp5_outcome(reply" in source
+    assert "classification=" in source
     assert "reply={reply[:240]!r}" in source
 
 
@@ -2127,6 +2343,23 @@ def test_cmp6_states_its_fact_in_plain_words_with_no_sentinel_to_match_on():
     assert "30" in CMP6_EXPECTED and "45" in CMP6_EXPECTED and "because" in CMP6_EXPECTED
 
 
+def _gate_probe(monkeypatch, tmp_path, judge_model="judge-test-model"):
+    """The shared setup for the activation-gate tests: an agent stand-in that raises
+    (the gate must fire before any live run), and a pinned fake provider so the
+    model half of the artifact identity is deterministic and offline."""
+    from types import SimpleNamespace
+
+    import runner.judge as judge_mod
+    from runner.tasks import cluster_g
+
+    def _no_agent(**kwargs):
+        raise AssertionError("the task built an agent before checking the judge gate")
+
+    monkeypatch.setattr(cluster_g, "_plain_agent", _no_agent)
+    monkeypatch.setattr(cluster_g, "make_provider", lambda: SimpleNamespace(model=judge_model))
+    return judge_mod, cluster_g
+
+
 def test_cmp6_refuses_loudly_when_the_judge_has_no_validation_artifact(monkeypatch, tmp_path):
     """Contract §2/§4: with no agreement artifact the task returns ``error``,
     never a mechanical fallback and never a live run.
@@ -2134,14 +2367,8 @@ def test_cmp6_refuses_loudly_when_the_judge_has_no_validation_artifact(monkeypat
     The agent stand-in raises: if the gate were checked after setup, an attempt
     would burn a live model run before discovering the judge was never validated.
     """
-    import runner.judge as judge_mod
-    from runner.tasks import cluster_g
-
-    def _no_agent(**kwargs):
-        raise AssertionError("CMP-6 built an agent before checking the judge gate")
-
+    judge_mod, cluster_g = _gate_probe(monkeypatch, tmp_path)
     monkeypatch.setattr(judge_mod, "AGREEMENT_PATH", tmp_path / "absent.json")
-    monkeypatch.setattr(cluster_g, "_plain_agent", _no_agent)
 
     attempt = cluster_g.run_cmp6()
     assert attempt.passed is False
@@ -2153,13 +2380,7 @@ def test_cmp6_refuses_a_stale_prompt_sha_and_a_failing_artifact(monkeypatch, tmp
     """The two states that are NOT "missing file", and the sha one is the subtle
     half: a passing artifact stays on disk after a prompt edit, describing the
     agreement of a judge that no longer exists."""
-    import runner.judge as judge_mod
-    from runner.tasks import cluster_g
-
-    def _no_agent(**kwargs):
-        raise AssertionError("CMP-6 built an agent before checking the judge gate")
-
-    monkeypatch.setattr(cluster_g, "_plain_agent", _no_agent)
+    judge_mod, cluster_g = _gate_probe(monkeypatch, tmp_path)
 
     stale = tmp_path / "stale.json"
     stale.write_text(json.dumps({"pass": True, "judge_prompt_sha": "0" * 64}))
@@ -2167,34 +2388,193 @@ def test_cmp6_refuses_a_stale_prompt_sha_and_a_failing_artifact(monkeypatch, tmp
     assert cluster_g.run_cmp6().outcome == "error"
 
     failing = tmp_path / "failing.json"
-    failing.write_text(json.dumps({"pass": False, "judge_prompt_sha": judge_mod.JUDGE_PROMPT_SHA}))
+    failing.write_text(
+        json.dumps(
+            {
+                "pass": False,
+                "judge_prompt_sha": judge_mod.JUDGE_PROMPT_SHA,
+                "judge_parser_version": judge_mod.JUDGE_PARSER_VERSION,
+                "validation_computation_version": judge_mod.VALIDATION_COMPUTATION_VERSION,
+                "model": "judge-test-model",
+            }
+        )
+    )
     monkeypatch.setattr(judge_mod, "AGREEMENT_PATH", failing)
     attempt = cluster_g.run_cmp6()
     assert attempt.outcome == "error" and "pass=False" in attempt.detail
 
 
+def test_cmp5_and_cmp6_refuse_an_artifact_validated_for_another_judge_model(monkeypatch, tmp_path):
+    """Review finding: validate with model A, flip the provider to model B, and both
+    guards kept activating — the artifact never named which judge it measured to the
+    gate. Now the gate takes the LIVE provider's model and refuses the mismatch, the
+    same construction as the prompt-sha and parser-version pins."""
+    judge_mod, cluster_g = _gate_probe(monkeypatch, tmp_path, judge_model="model-B")
+
+    validated_for_a = tmp_path / "agreement.json"
+    validated_for_a.write_text(
+        json.dumps(
+            {
+                "pass": True,
+                "judge_prompt_sha": judge_mod.JUDGE_PROMPT_SHA,
+                "judge_parser_version": judge_mod.JUDGE_PARSER_VERSION,
+                "validation_computation_version": judge_mod.VALIDATION_COMPUTATION_VERSION,
+                "model": "model-A",
+            }
+        )
+    )
+    monkeypatch.setattr(judge_mod, "AGREEMENT_PATH", validated_for_a)
+
+    for run in (cluster_g.run_cmp5, cluster_g.run_cmp6):
+        attempt = run()
+        assert attempt.outcome == "error", run.__name__
+        assert "model-A" in attempt.detail and "model-B" in attempt.detail, run.__name__
+
+
+def test_cmp5_checks_the_judge_gate_before_any_live_model_call(monkeypatch, tmp_path):
+    """CMP-5's verifier now has a judge lane, so it inherits CMP-6's activation gate.
+
+    The mechanical parse decides most attempts without the judge — but whether THIS
+    attempt will need one is only knowable after the live run is already spent, and
+    an attempt whose judged lane silently could not open would be a heterogeneous
+    record (mechanical attempts measured, judged ones erroring after the fact). So
+    the gate is checked first, before the agent exists, exactly as CMP-6 does."""
+    judge_mod, cluster_g = _gate_probe(monkeypatch, tmp_path)
+    monkeypatch.setattr(judge_mod, "AGREEMENT_PATH", tmp_path / "absent.json")
+
+    attempt = cluster_g.run_cmp5()
+    assert attempt.passed is False
+    assert attempt.outcome == "error"
+    assert "judge not validated" in attempt.detail
+    assert attempt.metrics == {"attempted": 0.0}
+
+
+def test_cmp6_outcome_judges_first_and_classifies_what_the_judge_refused():
+    """The G2 taxonomy, applied to the judged guard: a reply that is nothing but
+    carbon's truncation marker or a tool-call fragment never attempted the
+    constraint. CMP-6 has no mechanical layer that can DECIDE (no sentinel), so the
+    judge is its deciding layer and runs first — G2's ordering with the judge in
+    the mechanical slot: a delivered grounded YES passes even past a trailing tool
+    leak (the judge reads through it), and the taxonomy classifies only what the
+    judge refused."""
+    from runner.judge import Judgment
+    from runner.tasks.cluster_g import (
+        CMP6_EXPECTED,
+        CMP6_NOT_EQUIVALENT,
+        G2_TRUNCATION_MARKER,
+        NON_ANSWER_TOOL_SYNTAX,
+        NON_ANSWER_TRUNCATED,
+        cmp6_outcome,
+    )
+
+    def judge_no(expected, answer):
+        return Judgment(False, "q", "VERDICT: NO\nQUOTE: q")
+
+    # Refused by the judge AND explicable as a non-answer: classified, not lumped.
+    for reply, label in (
+        (f"  {G2_TRUNCATION_MARKER}", NON_ANSWER_TRUNCATED),
+        ("<|tool_call>call:list_files []<tool_call|>", NON_ANSWER_TOOL_SYNTAX),
+    ):
+        v = cmp6_outcome(reply, judge_no)
+        assert (v.passed, v.outcome, v.classification, v.verifier) == (
+            False,
+            "not_attempted",
+            label,
+            "mechanical",
+        )
+
+    calls = []
+
+    def judge_yes(expected, answer):
+        calls.append((expected, answer))
+        return Judgment(True, "q", "VERDICT: YES\nQUOTE: q")
+
+    v = cmp6_outcome("backoff caps at 30s for gateway headroom", judge_yes)
+    assert (v.passed, v.outcome, v.classification, v.verifier) == (True, "pass", None, "judged")
+    assert calls == [(CMP6_EXPECTED, "backoff caps at 30s for gateway headroom")]
+
+    # The review's ordering point, CMP-6 side: a real answer with a trailing leak
+    # is decided by the judge, not vetoed by the taxonomy.
+    v = cmp6_outcome("backoff caps at 30s\n<|tool_call>call:bash {}<tool_call|>", judge_yes)
+    assert (v.passed, v.outcome, v.verifier) == (True, "pass", "judged")
+
+    v = cmp6_outcome("something unrelated", judge_no)
+    assert (v.passed, v.outcome, v.verifier) == (False, "fail", "judged")
+    assert v.classification == CMP6_NOT_EQUIVALENT
+
+
+def test_cmp6_outcome_refuses_on_a_judge_that_never_delivered():
+    """A judge outage is not evidence about compaction. The old shape recorded a
+    provider exception as a plain `fail` — serving noise landing in a guard's rate.
+    Now it is an `error` with the shared classification, and `Judgment.ran` is what
+    tells the two kinds of False verdict apart. The one exception cuts the other
+    way: a reply the deterministic taxonomy already explains keeps its non-answer
+    classification even with the judge down — that label never depended on the
+    judge, so judge health must not turn it into an `error`."""
+    from runner.judge import Judgment
+    from runner.tasks.cluster_g import JUDGE_UNAVAILABLE, NON_ANSWER_TOOL_SYNTAX, cmp6_outcome
+
+    def outage(expected, answer):
+        return Judgment(False, "", "<provider error: connection refused>", ran=False)
+
+    v = cmp6_outcome("a real prose answer about the backoff", outage)
+    assert (v.passed, v.outcome, v.verifier) == (False, "error", "judged")
+    assert v.classification == JUDGE_UNAVAILABLE
+
+    v = cmp6_outcome("<|tool_call>call:list_files []<tool_call|>", outage)
+    assert (v.passed, v.outcome, v.classification) == (
+        False,
+        "not_attempted",
+        NON_ANSWER_TOOL_SYNTAX,
+    )
+
+
 def test_judge_validation_status_accepts_only_a_passing_artifact_at_this_prompt(tmp_path):
-    from runner.judge import JUDGE_PROMPT_SHA, validation_status
+    from runner.judge import (
+        JUDGE_PARSER_VERSION,
+        JUDGE_PROMPT_SHA,
+        VALIDATION_COMPUTATION_VERSION,
+        validation_status,
+    )
 
     good = tmp_path / "agreement.json"
-    good.write_text(json.dumps({"pass": True, "judge_prompt_sha": JUDGE_PROMPT_SHA}))
-    assert validation_status(good) == (True, "")
+    good.write_text(
+        json.dumps(
+            {
+                "pass": True,
+                "judge_prompt_sha": JUDGE_PROMPT_SHA,
+                "judge_parser_version": JUDGE_PARSER_VERSION,
+                "validation_computation_version": VALIDATION_COMPUTATION_VERSION,
+                "model": "m",
+            }
+        )
+    )
+    assert validation_status(good, judge_model="m") == (True, "")
 
+    current = {
+        "judge_prompt_sha": JUDGE_PROMPT_SHA,
+        "judge_parser_version": JUDGE_PARSER_VERSION,
+        "validation_computation_version": VALIDATION_COMPUTATION_VERSION,
+        "model": "m",
+    }
     for artifact in (
-        {"pass": True, "judge_prompt_sha": "deadbeef"},
-        {"pass": False, "judge_prompt_sha": JUDGE_PROMPT_SHA},
-        {"judge_prompt_sha": JUDGE_PROMPT_SHA},
+        {**current, "pass": True, "judge_prompt_sha": "deadbeef"},
+        {**current, "pass": True, "judge_parser_version": JUDGE_PARSER_VERSION + 1},
+        {**current, "pass": True, "validation_computation_version": 1},
+        {**current, "pass": True, "model": "someone-elses-judge"},
+        {**current, "pass": False},
+        current,
         [],
     ):
         path = tmp_path / "candidate.json"
         path.write_text(json.dumps(artifact))
-        ok, why = validation_status(path)
+        ok, why = validation_status(path, judge_model="m")
         assert ok is False and why
 
     broken = tmp_path / "broken.json"
     broken.write_text("{not json")
-    assert validation_status(broken)[0] is False
-    assert validation_status(tmp_path / "nothing.json")[0] is False
+    assert validation_status(broken, judge_model="m")[0] is False
+    assert validation_status(tmp_path / "nothing.json", judge_model="m")[0] is False
 
 
 def test_cmp7_noise_fixture_is_bulky_opaque_and_never_carries_the_ticket(tmp_path):
@@ -2617,6 +2997,36 @@ def test_g2_decomposition_replays_every_recorded_pass_fraction_unchanged():
     assert sum(seen.values()) == 95
 
 
+def test_non_answer_taxonomy_is_one_classifier_shared_by_name():
+    """The taxonomy G2 owns (contract §5), hoisted where CMP-5 and CMP-6 can share it.
+
+    Three tasks now classify the same two non-answer shapes — a reply that is nothing
+    but carbon's truncation marker, and a tool-call fragment emitted instead of an
+    answer. Three inline copies of those strings would drift: an analysis counting
+    `non_answer=` reasons across tasks needs one spelling, so the labels are module
+    constants and the classification is one function all three call.
+    """
+    from runner.tasks.cluster_g import (
+        G2_TRUNCATION_MARKER,
+        NON_ANSWER_TOOL_SYNTAX,
+        NON_ANSWER_TRUNCATED,
+        classify_non_answer,
+        g2_verdict,
+    )
+
+    assert classify_non_answer(f"\n\n{G2_TRUNCATION_MARKER}") == NON_ANSWER_TRUNCATED
+    assert classify_non_answer("<|tool_call>call:bash {}<tool_call|>") == NON_ANSWER_TOOL_SYNTAX
+    assert classify_non_answer("a real answer") is None
+    # G2's strict starts-with rule survives the hoist: prose that produced an answer
+    # and THEN hit the limit did attempt, and stays a plain fail.
+    assert classify_non_answer(f"The codes are{G2_TRUNCATION_MARKER}") is None
+
+    # g2_verdict emits the SAME constants, so the replay test above and every
+    # cross-task count read one vocabulary.
+    assert g2_verdict(f"{G2_TRUNCATION_MARKER}", False, False)[2] == NON_ANSWER_TRUNCATED
+    assert g2_verdict("<|tool_call>x", False, False)[2] == NON_ANSWER_TOOL_SYNTAX
+
+
 def test_g2_publishes_whether_the_attempt_produced_an_answer_at_all():
     """Contract §5's metric. ``attempted`` is emitted on EVERY G2 attempt, including
     the setup-guard error, or its mean would be a fraction of whichever attempts
@@ -2673,51 +3083,144 @@ def _p2c_outcomes(task: str) -> dict[str, int]:
     return dict(seen)
 
 
-def test_cmp5s_docstring_states_what_its_pooled_rate_actually_compounds():
-    """The correction, checked against the record rather than merely written down.
+def test_cmp5_extraction_replays_the_campaign_record_changing_no_verdict():
+    """The rework's effect on the committed record, proved by replay: NONE.
 
-    `not_attempted` is a LABEL. It does not leave the denominator: `TaskResult`'s
-    `pass_fraction` is passes over every recorded attempt (`runner/run.py`), so CMP-5's
-    published rate is one number carrying two very different things — how often the
-    model answered in the requested form at all, and how often the answer was right
-    given that it did. An earlier version of the docstring implied the classification
-    protected the rate. It does not, and a guard whose rate is mostly a format score
-    fires on formatting.
-
-    Asserted against the committed arms, so the docstring cannot drift away from the
-    numbers it quotes: the two factors are recomputed here and must round to the
-    percentages the docstring states.
+    Every recorded CMP-5 reply across the ten Phase 2c arms goes back through the
+    new layered verifier with a judge that RAISES if consulted. Every `passed`
+    comes back identical and every arm's pooled numbers reproduce the summary —
+    the judge lane changes nothing on this record, because zero recorded replies
+    carried an approach code in prose outside the form. That is the number that
+    undercuts the rework's own story, pinned so it stays told: on THIS serving
+    base the non-answers were tool-syntax leaks and denials, not format-trapped
+    correct answers. What changes is only classification: the 9 denials become
+    real `fail`s and the leaks/truncations keep their taxonomy labels.
     """
+    from loop.judge_validate import _extract_reply
+    from runner.tasks.cluster_g import (
+        CMP5_NO_CODE,
+        CMP5_WRONG_IN_FORM,
+        NON_ANSWER_TOOL_SYNTAX,
+        NON_ANSWER_TRUNCATED,
+        cmp5_outcome,
+    )
+
+    labels = [f"p2c-null-full-{c}" for c in "abc"] + [f"p2c-null-cmp-{c}" for c in "abcdefg"]
+    seen: dict[str, int] = {}
+    for label in labels:
+        summary = json.loads((REPO_ROOT / "results" / f"{label}.json").read_text())
+        passes = attempts = 0
+        for line in (REPO_ROOT / "results" / f"{label}.jsonl").read_text().splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if record.get("task") != "CMP-5":
+                continue
+            attempts += 1
+            reply = _extract_reply(record.get("detail", ""))
+            if reply is None:  # a setup guard fired; there is no reply to re-verify
+                passes += int(record["passed"])
+                continue
+            v = cmp5_outcome(reply, _judge_never_called)
+            assert v.passed is bool(record["passed"]), (
+                f"{label} attempt {record.get('attempt')}: replay says passed={v.passed}, "
+                f"the record says {record['passed']}"
+            )
+            seen[v.classification or v.outcome] = seen.get(v.classification or v.outcome, 0) + 1
+            passes += int(v.passed)
+        recorded = summary["tasks"]["CMP-5"]
+        assert (passes, attempts) == (recorded["passes"], recorded["attempts"]), label
+
+    # The exact split, pinned — the docstring test below quotes these numbers.
+    assert seen == {
+        "pass": 17,
+        CMP5_WRONG_IN_FORM: 6,
+        CMP5_NO_CODE: 9,
+        NON_ANSWER_TOOL_SYNTAX: 43,
+        NON_ANSWER_TRUNCATED: 4,
+    }, seen
+    assert sum(seen.values()) == 79
+
+
+def test_cmp6_taxonomy_replays_the_campaign_record_changing_no_pass():
+    """CMP-6's half of the same replay. The judge verdicts themselves cannot be
+    re-run offline, so each recorded verdict is fed back through the new router:
+    the judge decides FIRST (every reply is consulted — the review's ordering fix,
+    so a real answer with a trailing leak can still pass), the taxonomy classifies
+    what the judge refused, and with the recorded verdicts in place every `passed`
+    comes back identical. What was recorded as 68 plain `fail`s decomposes into
+    64 leaks and 4 real judged failures; no label and no verdict flips."""
+    from loop.judge_validate import _extract_bool, _extract_reply
+    from runner.judge import Judgment
+    from runner.tasks.cluster_g import CMP6_NOT_EQUIVALENT, NON_ANSWER_TOOL_SYNTAX, cmp6_outcome
+
+    labels = [f"p2c-null-full-{c}" for c in "abc"] + [f"p2c-null-cmp-{c}" for c in "abcdefg"]
+    seen: dict[str, int] = {}
+    consulted = 0
+    for label in labels:
+        for line in (REPO_ROOT / "results" / f"{label}.jsonl").read_text().splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if record.get("task") != "CMP-6":
+                continue
+            detail = record.get("detail", "")
+            reply = _extract_reply(detail)
+            recorded_verdict = _extract_bool(detail, "judge_verdict")
+            assert reply is not None and recorded_verdict is not None, (label, record["attempt"])
+
+            def replay_judge(expected, answer, verdict=recorded_verdict):
+                nonlocal consulted
+                consulted += 1
+                return Judgment(verdict, "q", "VERDICT: ...\nQUOTE: q")
+
+            v = cmp6_outcome(reply, replay_judge)
+            assert v.passed is bool(record["passed"]), (label, record["attempt"])
+            seen[v.classification or v.outcome] = seen.get(v.classification or v.outcome, 0) + 1
+
+    assert seen == {
+        "pass": 17,
+        CMP6_NOT_EQUIVALENT: 4,
+        NON_ANSWER_TOOL_SYNTAX: 64,
+    }, seen
+    assert sum(seen.values()) == 85
+    # Judge-first means every reply is consulted — 85, not the 21 the taxonomy-first
+    # router sent. On the record the recorded verdicts make the outcome split
+    # identical; the cost difference is live-path only, and it is the price of a
+    # leak-bearing real answer being decidable at all.
+    assert consulted == 85, "judge-first: every recorded reply is consulted on replay"
+
+
+def test_cmp5s_docstring_states_the_records_real_composition():
+    """The honest numbers, kept honest: the docstring quotes what the replay above
+    proves. An earlier version of this file learned the hard way that a docstring
+    quoting rates the record no longer supports is worse than no docstring — so the
+    claims are asserted against the same committed arms they describe."""
     import inspect
 
     from runner.tasks import cluster_g
 
     seen = _p2c_outcomes("CMP-5")
-    total = sum(seen.values())
-    attempted = total - seen.get("not_attempted", 0)
-    assert total == 79 and attempted == 23, seen
-    format_rate = round(100 * attempted / total)
-    conditional = round(100 * seen["pass"] / attempted)
-    assert (format_rate, conditional) == (29, 74), (format_rate, conditional)
-    # And the two really do compound to the published pooled rate.
-    assert Fraction(seen["pass"], total) == Fraction(attempted, total) * Fraction(
-        seen["pass"], attempted
-    )
+    assert sum(seen.values()) == 79 and seen.get("not_attempted") == 56, seen
 
-    doc = inspect.getdoc(cluster_g.run_cmp5) or ""
-    assert f"{format_rate}%" in doc and f"{conditional}%" in doc, (
-        "the docstring must state the two factors its pooled rate compounds"
-    )
-    assert "pass_fraction" in doc, "and say that non-answers stay in the denominator"
+    doc = " ".join((inspect.getdoc(cluster_g.run_cmp5) or "").split())
+    # The replay's split (pinned there): 43 leaks + 4 truncations + 9 denials, and
+    # zero prose replies carrying a code outside the form — the judge lane's real
+    # workload on this record.
+    assert "43 of the 56" in doc
+    assert "4 are truncations" in doc
+    assert "9 are explicit denials" in doc
+    assert "zero" in doc.lower(), "the docstring must state the judge lane's record workload"
+    assert "does not gate candidates" in doc
 
 
-def test_both_scenario_guards_record_the_format_robustness_rework_as_a_phase_3_item():
-    """A known weakness with no recorded next step is a weakness that gets forgotten.
-
-    CMP-5 reads mostly as a format score and CMP-6's judged verdict has the same
-    exposure from the other side, so neither should gate a candidate until answer
-    extraction stops depending on the model obeying a template. That rework is recorded
-    as Phase 3 work, in both task docstrings, where whoever next reads the task will be.
+def test_both_scenario_guards_describe_the_landed_extraction_layer():
+    """The Phase 3 rework these docstrings used to queue has now LANDED, and a
+    docstring still deferring to it would be a signpost to nowhere. Both guards
+    must describe the layered verifier as present behavior — judge where prose
+    needs reading, taxonomy for non-answers, fail-closed on an unavailable judge —
+    and must still say the honest thing about gating: nothing gates candidates
+    until re-measurement and a fresh judge validation land on the new serving base.
     """
     import inspect
 
@@ -2727,9 +3230,9 @@ def test_both_scenario_guards_record_the_format_robustness_rework_as_a_phase_3_i
         # Whitespace-normalized: these are wrapped docstrings, and a claim that a
         # sentence is present must not turn on where the line broke.
         doc = " ".join((inspect.getdoc(fn) or "").lower().split())
-        assert "phase 3" in doc, fn.__name__
-        assert "judge" in doc and "extraction" in doc, fn.__name__
-        assert "gate candidates" in doc or "gates candidates" in doc, fn.__name__
+        assert "phase 3" not in doc, f"{fn.__name__} still queues the rework it contains"
+        assert "judge" in doc and "not_attempted" in doc.replace("``", ""), fn.__name__
+        assert "gate candidates" in doc, fn.__name__
 
 
 def test_no_scenario_guards_fact_lands_in_the_verbatim_head_window():

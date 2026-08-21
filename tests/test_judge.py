@@ -46,6 +46,190 @@ def test_the_committed_agreement_artifact_was_measured_for_this_prompt():
     assert artifact["judge_prompt_sha"] == PINNED_JUDGE_PROMPT_SHA
 
 
+# The parsing code's own digest, a LITERAL like the prompt sha above and for the same
+# reason: `_normalized` + `quote_is_grounded` + `_parse_judgment` ARE the judge's
+# reading of its model's output, and the prompt sha cannot see them change. This pin
+# goes red on ANY edit to those three functions. The discipline it enforces: decide,
+# per edit, whether the change can alter a verdict or quote for the same raw output —
+# if yes, bump JUDGE_PARSER_VERSION in the same commit (the activation gate then
+# refuses the stale validation artifact until a re-run); if no (comments, formatting),
+# update this digest alone and say so in the commit.
+PINNED_JUDGE_PARSER_SOURCE_SHA = "97a91f9ae6892c13b3ff92eaa0445f07a0eea75143998428c43020f965ffe6b5"
+
+
+def _parser_source() -> str:
+    import inspect
+
+    from runner import judge
+
+    return "".join(
+        inspect.getsource(f)
+        for f in (judge._normalized, judge.quote_is_grounded, judge._parse_judgment)
+    )
+
+
+def test_judge_parser_version_is_pinned_against_the_parsing_source():
+    """Handoff item: the prompt sha alone cannot see parser-behavior changes. The
+    version constant is the artifact-facing half (the activation gate compares it);
+    this source pin is the discipline-facing half — it makes forgetting the bump
+    impossible by turning every parser edit into a deliberate decision."""
+    from runner.judge import JUDGE_PARSER_VERSION
+
+    assert JUDGE_PARSER_VERSION == 2  # 1 = strict two-line parse; 2 = grounding rule
+    digest = hashlib.sha256(_parser_source().encode()).hexdigest()
+    assert digest == PINNED_JUDGE_PARSER_SOURCE_SHA, (
+        "the judge parser's source changed: if the change can alter any verdict or "
+        "quote for the same raw judge output, bump JUDGE_PARSER_VERSION in the same "
+        "commit and queue a re-validation; either way update the pinned digest "
+        "deliberately, never reflexively"
+    )
+
+
+def test_validation_status_requires_the_artifact_to_match_the_parser_version(tmp_path):
+    """The activation gate's new conjunct: an artifact is a measurement of a
+    (prompt, parser) PAIR, and either half changing leaves it describing a judge
+    that no longer exists. Missing and mismatched versions both refuse — a missing
+    key is an artifact measured before the parser was versioned at all."""
+    from runner.judge import (
+        JUDGE_PARSER_VERSION,
+        JUDGE_PROMPT_SHA,
+        VALIDATION_COMPUTATION_VERSION,
+        validation_status,
+    )
+
+    good = tmp_path / "agreement.json"
+    good.write_text(
+        json.dumps(
+            {
+                "pass": True,
+                "judge_prompt_sha": JUDGE_PROMPT_SHA,
+                "judge_parser_version": JUDGE_PARSER_VERSION,
+                "validation_computation_version": VALIDATION_COMPUTATION_VERSION,
+                "model": "m",
+            }
+        )
+    )
+    assert validation_status(good, judge_model="m") == (True, "")
+
+    for version in (None, JUDGE_PARSER_VERSION + 1, "2"):
+        artifact = {
+            "pass": True,
+            "judge_prompt_sha": JUDGE_PROMPT_SHA,
+            "validation_computation_version": VALIDATION_COMPUTATION_VERSION,
+            "model": "m",
+        }
+        if version is not None:
+            artifact["judge_parser_version"] = version
+        stale = tmp_path / "stale.json"
+        stale.write_text(json.dumps(artifact))
+        ok, why = validation_status(stale, judge_model="m")
+        assert ok is False
+        assert "judge_parser_version" in why and "re-run" in why
+
+
+def test_validation_status_binds_the_artifact_to_the_live_judge_model(tmp_path):
+    """The third identity pin, same construction as the prompt sha and the parser
+    version: agreement is a measurement of a specific JUDGE, and the judge is a
+    model as much as it is a prompt and a parser. Validate with model A, flip the
+    provider to model B, and the artifact used to keep activating CMP-5/6 —
+    describing a judge that is not the one running. The gate now takes the live
+    judge's model identity and refuses on mismatch; a missing key refuses too (an
+    artifact that never said which model it measured is not evidence about any)."""
+    from runner.judge import (
+        JUDGE_PARSER_VERSION,
+        JUDGE_PROMPT_SHA,
+        VALIDATION_COMPUTATION_VERSION,
+        validation_status,
+    )
+
+    artifact = {
+        "pass": True,
+        "judge_prompt_sha": JUDGE_PROMPT_SHA,
+        "judge_parser_version": JUDGE_PARSER_VERSION,
+        "validation_computation_version": VALIDATION_COMPUTATION_VERSION,
+        "model": "model-A",
+    }
+    path = tmp_path / "agreement.json"
+    path.write_text(json.dumps(artifact))
+    assert validation_status(path, judge_model="model-A") == (True, "")
+
+    ok, why = validation_status(path, judge_model="model-B")
+    assert ok is False
+    assert "model-A" in why and "model-B" in why and "re-run" in why
+
+    del artifact["model"]
+    path.write_text(json.dumps(artifact))
+    ok, why = validation_status(path, judge_model="model-A")
+    assert ok is False and "model" in why
+
+
+def test_validation_status_requires_the_current_validation_computation(tmp_path):
+    """The reopened half of the undelivered-verdict hole, closed at the GATE.
+
+    Fixing run_validation alone protected only artifacts the fixed scorer writes.
+    An artifact produced by the OLD scorer — no ``ran`` records, no delivery
+    counts — can carry the current prompt sha, parser version, and model with
+    ``pass: true`` stamped while its judge timed out on every negative, and the
+    gate would activate it: the exact hole, reintroduced through the artifact
+    store. So the artifact's identity gains a fourth pin, the same construction
+    as the parser version: ``run_validation`` stamps the version of the scoring
+    computation it ran, and the gate refuses any artifact stamped with another —
+    or with none, which is precisely what every pre-fix artifact carries. A
+    version pin rather than a keys-exist check, deliberately: the presence of
+    ``delivered_count`` proves a key exists, not that ``pass`` was computed under
+    the delivered-verdict rule — and the pin covers the NEXT scoring change with
+    a one-line bump, which a schema sniff never would."""
+    from runner.judge import (
+        JUDGE_PARSER_VERSION,
+        JUDGE_PROMPT_SHA,
+        VALIDATION_COMPUTATION_VERSION,
+        validation_status,
+    )
+
+    identity = {
+        "pass": True,
+        "judge_prompt_sha": JUDGE_PROMPT_SHA,
+        "judge_parser_version": JUDGE_PARSER_VERSION,
+        "model": "m",
+    }
+    path = tmp_path / "agreement.json"
+
+    # The current computation, stamped: accepted.
+    path.write_text(
+        json.dumps({**identity, "validation_computation_version": VALIDATION_COMPUTATION_VERSION})
+    )
+    assert validation_status(path, judge_model="m") == (True, "")
+
+    # No stamp — every artifact the pre-fix scorer wrote looks like this.
+    path.write_text(json.dumps(identity))
+    ok, why = validation_status(path, judge_model="m")
+    assert ok is False
+    assert "validation_computation_version" in why and "re-run" in why
+
+    # A stale stamp: the old verdict-equality scoring.
+    path.write_text(json.dumps({**identity, "validation_computation_version": 1}))
+    ok, why = validation_status(path, judge_model="m")
+    assert ok is False and "validation_computation_version" in why
+
+
+def test_the_committed_agreement_artifact_is_refused_until_revalidated_for_this_parser():
+    """The honest current state, pinned on purpose so it cannot look accidental.
+
+    The committed artifact was measured before the parser carried a version (and
+    before the grounding rule existed). The offline re-scoring below shows its
+    NUMBERS survive the stricter rule — but the gate's job is identity, not
+    arithmetic: an artifact measured under a different parser is not evidence about
+    this one. So CMP-5 and CMP-6 refuse (outcome `error`) until the queued live
+    re-validation on the new serving base writes an artifact stamped with the
+    current version. Fail closed is the designed state here, not a regression."""
+    from runner.judge import validation_status
+
+    # Any live model: the parser-version refusal comes first regardless.
+    ok, why = validation_status(judge_model="any-model")
+    assert ok is False
+    assert "judge_parser_version" in why
+
+
 def test_yes_verdict_parses_quote():
     raw = "VERDICT: YES\nQUOTE: never exceed 30 seconds"
     provider = fake(scripted=lambda messages: raw)
@@ -186,34 +370,34 @@ def test_garbage_output_fails_closed():
     raw = "I think the answer is probably related to the topic."
     provider = fake(scripted=lambda messages: raw)
     judgment = judged_equivalent("expected fact", "some answer", provider)
-    assert judgment == Judgment(False, "", raw)
+    assert judgment == Judgment(False, "", raw, ran=False)
 
 
 def test_empty_output_fails_closed():
     provider = fake(scripted=lambda messages: "")
     judgment = judged_equivalent("e", "a", provider)
-    assert judgment == Judgment(False, "", "")
+    assert judgment == Judgment(False, "", "", ran=False)
 
 
 def test_missing_quote_line_fails_closed():
     raw = "VERDICT: YES"
     provider = fake(scripted=lambda messages: raw)
     judgment = judged_equivalent("e", "a", provider)
-    assert judgment == Judgment(False, "", raw)
+    assert judgment == Judgment(False, "", raw, ran=False)
 
 
 def test_wrong_case_fails_closed():
     raw = "verdict: yes\nquote: something"
     provider = fake(scripted=lambda messages: raw)
     judgment = judged_equivalent("e", "a", provider)
-    assert judgment == Judgment(False, "", raw)
+    assert judgment == Judgment(False, "", raw, ran=False)
 
 
 def test_second_line_not_quote_prefixed_fails_closed():
     raw = "VERDICT: YES\nnever exceed 30 seconds"
     provider = fake(scripted=lambda messages: raw)
     judgment = judged_equivalent("e", "a", provider)
-    assert judgment == Judgment(False, "", raw)
+    assert judgment == Judgment(False, "", raw, ran=False)
 
 
 def test_trailing_lines_after_quote_are_ignored():
@@ -506,6 +690,11 @@ def test_run_validation_computes_agreement_and_disagreements():
     assert result["disagree_count"] == 1
     assert result["disagreements"][0]["expected"] == "E"
     assert result["judge_prompt_sha"] == JUDGE_PROMPT_SHA
+    # The artifact records the (prompt, parser) pair it measured — the activation
+    # gate refuses it the moment either half moves.
+    from runner.judge import JUDGE_PARSER_VERSION
+
+    assert result["judge_parser_version"] == JUDGE_PARSER_VERSION
     assert result["model"] == provider.model
 
 
@@ -542,6 +731,41 @@ def test_run_validation_fails_on_yes_for_clean_denial():
     assert result["pass"] is False
 
 
+def test_run_validation_never_counts_an_undelivered_verdict_as_agreement():
+    """The review's probe, kept as a test: a judge that delivers YES on positives and
+    times out on negatives used to score 100% agreement with a clean-denial gate pass
+    — and not one NO was ever delivered, because an undelivered judgment fails closed
+    to verdict=False, which happens to equal every negative ground truth. 306 of the
+    635 real corpus pairs are negative, so that hole was material.
+
+    A pair with no verdict is not evidence of agreement. It counts as NOT agreed, it
+    lands in the disagreement list, and the artifact says how many verdicts were
+    actually delivered — so a validation run the judge slept through cannot stamp
+    pass: true."""
+    corpus = [
+        _pair(answer="works", ground_truth=True),
+        _pair(answer="neg-denial", ground_truth=False, denial=True),
+        _pair(answer="neg-plain", ground_truth=False),
+    ]
+
+    def responder(messages):
+        text = messages[1]["content"]
+        if "works" in text:
+            return "VERDICT: YES\nQUOTE: works"
+        raise RuntimeError("timeout")  # ran=False: no verdict ever delivered
+
+    result = judge_validate.run_validation(corpus, fake(scripted=responder))
+
+    assert result["agree_count"] == 1
+    assert result["overall_agreement"] == 1 / 3
+    assert result["pass"] is False
+    assert result["delivered_count"] == 1
+    assert result["undelivered_count"] == 2
+    # The undelivered pairs are visible per record and in the disagreement list.
+    assert [r["ran"] for r in result["records"]] == [True, False, False]
+    assert result["disagree_count"] == 2
+
+
 def test_run_validation_empty_corpus_does_not_vacuously_pass():
     provider = fake(scripted=lambda messages: "VERDICT: YES\nQUOTE: q")
     result = judge_validate.run_validation([], provider)
@@ -559,8 +783,51 @@ def test_main_writes_agreement_artifact(tmp_path):
     on_disk = json.loads(output_path.read_text())
     assert on_disk == result
     assert on_disk["judge_prompt_sha"] == JUDGE_PROMPT_SHA
+    from runner.judge import JUDGE_PARSER_VERSION
+
+    assert on_disk["judge_parser_version"] == JUDGE_PARSER_VERSION
     assert on_disk["model"] == provider.model
     assert on_disk["total_pairs"] == len(judge_validate.build_corpus())
+
+
+# --- ran: a False verdict vs the absence of a verdict ----------------------------
+
+
+def test_a_judgment_says_whether_a_verdict_actually_came_back():
+    """``ran`` separates two kinds of False verdict that must not be conflated.
+
+    A judge that answered ``VERDICT: NO`` made a decision about the answer; a judge
+    whose call failed or whose output never parsed made NO decision at all. Both fail
+    closed to ``verdict=False`` — that stays — but a verifier that treats the second
+    kind as evidence about the strategy under test is recording a judge outage as a
+    task failure. ``ran`` is what lets such a caller refuse (outcome ``error``)
+    instead of blaming the strategy.
+    """
+    # Delivered verdicts, YES and NO: the judge decided.
+    yes = judged_equivalent(
+        "E", "the answer states E", fake(scripted=lambda m: "VERDICT: YES\nQUOTE: E")
+    )
+    assert yes.ran is True and yes.verdict is True
+    no = judged_equivalent("E", "unrelated", fake(scripted=lambda m: "VERDICT: NO\nQUOTE: q"))
+    assert no.ran is True and no.verdict is False
+
+    # An ungrounded YES also RAN: the judge delivered a verdict and the grounding
+    # rule refused it — a real (policy) failure of the pair, not a judge outage.
+    ungrounded = judged_equivalent(
+        "E", "nothing supporting it", fake(scripted=lambda m: "VERDICT: YES\nQUOTE: invented span")
+    )
+    assert ungrounded.ran is True and ungrounded.verdict is False
+
+    # No verdict came back: garbage, empty, and a provider exception.
+    for scripted in (lambda m: "I think so, probably.", lambda m: ""):
+        judgment = judged_equivalent("E", "a", fake(scripted=scripted))
+        assert judgment.ran is False and judgment.verdict is False
+
+    def boom(messages):
+        raise RuntimeError("service unavailable")
+
+    failed = judged_equivalent("E", "a", fake(scripted=boom))
+    assert failed.ran is False and failed.verdict is False
 
 
 # --- Transport/provider failures (fail-closed) ----------------------------------
