@@ -14,6 +14,8 @@ BASE = {
     "runner_sha": "runner1",
     "provider_order": None,
     "quantization": None,
+    "base_url": "http://localhost:1234/v1",
+    "reasoning_effort": None,
 }
 
 
@@ -38,10 +40,30 @@ def test_behavior_key_ignores_committed_gemma_sha():
         ("dirty_sha", "deadbeef"),
         ("provider_order", "deepinfra"),
         ("quantization", "fp8"),
+        ("base_url", "http://localhost:11434/v1"),
+        ("reasoning_effort", "high"),
     ],
 )
 def test_behavior_key_moves_on_any_real_behavior_input(field, value):
     assert _fp()["behavior_key"] != _fp(**{field: value})["behavior_key"]
+
+
+@pytest.mark.parametrize("field", guard._KEY_FIELDS)
+def test_every_declared_key_field_actually_moves_the_key(field):
+    """The structural half: `_KEY_FIELDS` is the load-bearing enumeration the key is
+    derived from, so a field DECLARED behavior-relevant that failed to move the key
+    would make the declaration a lie. Sweeps the declaration itself, not a copy."""
+    assert _fp()["behavior_key"] != _fp(**{field: "moved-value"})["behavior_key"]
+
+
+def test_two_local_endpoints_do_not_share_a_behavior_key():
+    """The Codex finding, pinned: LM Studio and Ollama on localhost with the same
+    model string are two serving bases. Both unpinned, both local — only base_url
+    tells them apart, and a baseline from one must not resume on the other."""
+    lmstudio = _fp(base_url="http://localhost:1234/v1")
+    ollama = _fp(base_url="http://localhost:11434/v1")
+    assert lmstudio["behavior_key"] != ollama["behavior_key"]
+    assert guard.baseline_status(lmstudio, ollama) == "stale"
 
 
 def test_behavior_key_moves_between_two_different_pins():
@@ -132,3 +154,39 @@ def test_unparseable_base_url_is_treated_as_remote():
     """Fail closed: a base URL whose host cannot be read is not provably local."""
     with pytest.raises(guard.UnpinnedServing):
         guard.assert_serving_pinned("not a url", None, None)
+
+
+# --- base_url normalization: cosmetic variants must not split behavior keys --
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        # trailing slash: the HTTP client rstrips it before use, so it never
+        # reaches the wire — recording it would split keys over nothing.
+        ("http://localhost:1234/v1/", "http://localhost:1234/v1"),
+        # scheme and host are case-insensitive per RFC; the path is not.
+        ("HTTP://LocalHost:1234/v1", "http://localhost:1234/v1"),
+        ("https://OpenRouter.ai/api/V1", "https://openrouter.ai/api/V1"),
+        # already canonical: unchanged.
+        ("http://localhost:1234/v1", "http://localhost:1234/v1"),
+        # IPv6 host keeps its brackets.
+        ("http://[::1]:1234/v1", "http://[::1]:1234/v1"),
+    ],
+)
+def test_normalize_base_url_collapses_cosmetic_variants(raw, expected):
+    assert guard.normalize_base_url(raw) == expected
+
+
+def test_normalize_base_url_never_records_userinfo_or_query():
+    """A credential embedded in the URL must not reach a fingerprint that gets
+    written into every record — same scrub rule as api_key."""
+    out = guard.normalize_base_url("http://user:sk-secret@host.example:8080/v1?key=tok#frag")
+    assert out == "http://host.example:8080/v1"
+    assert "sk-secret" not in out and "tok" not in out
+
+
+def test_normalize_base_url_passes_the_unparseable_through():
+    """What cannot be parsed cannot be normalized — it passes through verbatim and
+    the pin gate reads it as remote (fail closed), so it can never record unpinned."""
+    assert guard.normalize_base_url("not a url") == "not a url"

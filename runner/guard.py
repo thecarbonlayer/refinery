@@ -29,16 +29,20 @@ from __future__ import annotations
 import hashlib
 from urllib.parse import urlsplit
 
-# The fingerprint fields that fold into the behavior key, in order. ``gemma_sha`` is
+# The fingerprint fields that fold into the behavior key, in order — the LOAD-BEARING
+# enumeration: ``fingerprint_behavior_key`` derives the key from this tuple, and a
+# test sweeps it to prove every declared field actually moves the key. ``gemma_sha`` is
 # pointedly absent: a committed carbon move is provenance, not behavior (carbon's own
 # config_version is the behavior-version declaration we trust). ``dirty_sha`` stays,
 # because an uncommitted carbon edit changes behavior that no version counter attests.
-# ``provider_order`` and ``quantization`` (the serving pin) stay too: the model string
-# alone cannot distinguish serving bases — the same model name answers from different
-# providers at different quantizations, and that is a behavior change no other field
-# sees. None is real data for all three (clean tree / unpinned serving), read via
-# ``.get`` — but note a record that never carried the serving fields still cannot
-# resume, because its RECORDED key was computed by the pre-serving formula.
+# The serving fields (``base_url``, ``reasoning_effort``, ``provider_order``,
+# ``quantization``) stay too: the model string alone cannot distinguish serving bases —
+# the same model name answers from LM Studio on :1234, Ollama on :11434, or different
+# routed providers at different quantizations and effort levels, and every one of those
+# is a behavior change no other field sees. None is real data for the optional fields
+# (clean tree / unpinned local serving / no effort requested), read via ``.get`` — but
+# note a record that never carried the serving fields still cannot resume, because its
+# RECORDED key was computed by the pre-serving formula.
 _KEY_FIELDS = (
     "config_version",
     "model",
@@ -46,7 +50,14 @@ _KEY_FIELDS = (
     "dirty_sha",
     "provider_order",
     "quantization",
+    "base_url",
+    "reasoning_effort",
 )
+
+# The key fields a fingerprint MUST carry (``KeyError`` otherwise — a fingerprint that
+# cannot state its behavior identity is a bug, not a silent default). The rest read
+# through ``.get`` because None there is a real recorded state, not an absence.
+_REQUIRED_KEY_FIELDS = frozenset({"config_version", "model", "runner_sha"})
 
 
 class StaleBaseline(Exception):
@@ -67,30 +78,42 @@ def behavior_key(
     dirty_sha: str | None,
     provider_order: str | None,
     quantization: str | None,
+    base_url: str | None,
+    reasoning_effort: str | None,
 ) -> str:
     """Stable identity of the behavior-determining inputs. Additive carbon releases
-    (``config_version`` unchanged, no runner edit, clean tree, same serving pin) keep
+    (``config_version`` unchanged, no runner edit, clean tree, same serving base) keep
     this fixed; a model / verifier / config / working-tree / serving-base change moves
     it. Deliberately excludes the committed ``gemma_sha`` — that is provenance, not
-    behavior."""
-    raw = f"{config_version}|{model}|{runner_sha}|{dirty_sha}|{provider_order}|{quantization}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:12]
+    behavior. Thin explicit-signature wrapper over ``fingerprint_behavior_key``: one
+    derivation, one hash."""
+    return fingerprint_behavior_key(
+        {
+            "config_version": config_version,
+            "model": model,
+            "runner_sha": runner_sha,
+            "dirty_sha": dirty_sha,
+            "provider_order": provider_order,
+            "quantization": quantization,
+            "base_url": base_url,
+            "reasoning_effort": reasoning_effort,
+        }
+    )
 
 
 def fingerprint_behavior_key(fingerprint: dict) -> str:
     """The behavior key of a fingerprint dict — the currency this runner passes
-    around. Missing behavior-relevant fields raise ``KeyError`` (a fingerprint that
-    cannot state its behavior identity is a bug, not a silent default); ``dirty_sha``
-    and the serving-pin fields read through ``.get`` because None there is a real
-    recorded state (clean tree, unpinned local serving), not an absence."""
-    return behavior_key(
-        fingerprint["config_version"],
-        fingerprint["model"],
-        fingerprint["runner_sha"],
-        fingerprint.get("dirty_sha"),
-        fingerprint.get("provider_order"),
-        fingerprint.get("quantization"),
-    )
+    around. Derived from ``_KEY_FIELDS`` itself, so the declaration and the
+    derivation cannot drift apart. Missing required fields raise ``KeyError``;
+    the optional fields read through ``.get`` because None there is a real
+    recorded state (clean tree, unpinned local serving, no effort), not an
+    absence."""
+    values = [
+        fingerprint[field] if field in _REQUIRED_KEY_FIELDS else fingerprint.get(field)
+        for field in _KEY_FIELDS
+    ]
+    raw = "|".join(str(v) for v in values)
+    return hashlib.sha256(raw.encode()).hexdigest()[:12]
 
 
 def _key_of(fingerprint: dict) -> str:
@@ -135,9 +158,37 @@ def is_local_base_url(base_url: str) -> bool:
     a base that cannot prove it is local is not local."""
     try:
         host = urlsplit(base_url).hostname
-    except ValueError:
+    except (ValueError, TypeError):
         return False
     return (host or "") in _LOCAL_HOSTS
+
+
+def normalize_base_url(base_url: str) -> str:
+    """The canonical serving-base identity: ``scheme://host[:port]/path``.
+
+    Scheme and host are lowercased (both are case-insensitive on the wire) and
+    trailing slashes dropped (the HTTP client rstrips them before use), so a
+    cosmetic variant of the same endpoint cannot split behavior keys. Userinfo,
+    query and fragment are DROPPED: they never survive to the request the client
+    builds, and a credential embedded in a URL must not reach a fingerprint that
+    is written into every record — the same scrub rule that keeps ``api_key``
+    out entirely. A URL with no parseable host passes through verbatim: what
+    cannot be parsed cannot be quietly rewritten, and the pin gate reads it as
+    remote (fail closed) so it can never record unpinned anyway."""
+    if not base_url:
+        return base_url
+    try:
+        parts = urlsplit(base_url)
+        host = parts.hostname
+        port = parts.port
+    except (ValueError, TypeError):
+        return base_url
+    if not host:
+        return base_url
+    if ":" in host:  # IPv6 literal — urlsplit strips the brackets; restore them
+        host = f"[{host}]"
+    port_part = f":{port}" if port is not None else ""
+    return f"{parts.scheme.lower()}://{host}{port_part}{parts.path.rstrip('/')}"
 
 
 def assert_serving_pinned(

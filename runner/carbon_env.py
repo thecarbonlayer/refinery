@@ -55,6 +55,28 @@ def _git(root: Path, *args: str) -> str:
 
 RUNNER_ROOT = Path(__file__).resolve().parent
 
+# Every field on carbon's Provider dataclass is either recorded in the fingerprint
+# or named in the exclusion dict with the reason it is not. These lists are
+# LOAD-BEARING: ``carbon_fingerprint`` builds its serving section from the first,
+# and tests/test_carbon_env.py sweeps carbon's actual dataclass against both — so
+# a future Provider field that alters the wire request or the serving identity
+# cannot land without an explicit disposition here.
+PROVIDER_FIELDS_FINGERPRINTED = (
+    "model",
+    "base_url",
+    "reasoning_effort",
+    "provider_order",
+    "quantization",
+)
+PROVIDER_FIELDS_EXCLUDED = {
+    "api_key": "secret — identifies the account, never the served behavior; the "
+    "fingerprint is written into every record and results JSON, so recording it "
+    "would commit a credential (scrub rule). MUST NOT be fingerprinted.",
+    "responder": "code-level test seam (a callable, not config); Provider.from_env "
+    "never sets it, so a provider built from env — the only kind this suite "
+    "fingerprints — cannot carry one, and a callable has no stable identity to record.",
+}
+
 
 def runner_sha(root: Path = RUNNER_ROOT) -> str:
     """Content identity of the runner package itself — the verifier's version.
@@ -86,19 +108,26 @@ def carbon_fingerprint(root: Path = CARBON_ROOT) -> dict:
     status text, so they perturb the hash even though the diff misses them). Clean
     tree -> ``dirty_sha`` is None.
 
-    ``provider_order``/``quantization`` are the serving pin, read from the same
-    ``Provider`` carbon's own calls use: the model string alone cannot distinguish
-    serving bases (the same model name answers from different providers at different
-    quantizations behind a router), so the pin is part of the fingerprint and of the
-    behavior key. None means unpinned — the complete, honest identity of a LOCAL
-    endpoint, and read via ``getattr`` because a carbon Provider predating the pin
-    fields sends no pin whatever the env says. A REMOTE base without the full pin is
-    refused right here (``guard.assert_serving_pinned``): an unpinned remote serving
-    state is unattributable, so nothing downstream — recording, resume, the mid-suite
-    drift check — can even name it.
+    The serving section is every ``Provider`` field that alters the wire request or
+    the serving identity — enumerated in ``PROVIDER_FIELDS_FINGERPRINTED``, read from
+    the same ``Provider`` carbon's own calls use, and folded into the behavior key.
+    The model string alone cannot distinguish serving bases: the same model name
+    answers from LM Studio on :1234, Ollama on :11434, or different routed providers
+    at different quantizations and effort levels, and each of those is different
+    measured behavior. ``base_url`` is recorded NORMALIZED (see
+    ``guard.normalize_base_url``) so a cosmetic variant of one endpoint cannot split
+    keys. None means unset — the truthful record of a field that puts nothing on the
+    wire, read via ``getattr`` because a carbon Provider predating a field sends
+    nothing for it whatever the env says. ``api_key`` and ``responder`` are excluded
+    by name (``PROVIDER_FIELDS_EXCLUDED``) with the reasons stated there.
+
+    A REMOTE base without the full pin is refused right here
+    (``guard.assert_serving_pinned``): an unpinned remote serving state is
+    unattributable, so nothing downstream — recording, resume, the mid-suite drift
+    check — can even name it.
 
     ``behavior_key`` (see runner/guard.py) folds config_version + model + runner_sha +
-    dirty_sha + the serving pin — everything that determines behavior *except* the
+    dirty_sha + the serving fields — everything that determines behavior *except* the
     committed ``gemma_sha`` — so an additive carbon release resumes instead of forcing
     a re-baseline."""
     from carbon import provenance
@@ -116,20 +145,20 @@ def carbon_fingerprint(root: Path = CARBON_ROOT) -> dict:
         else None
     )
     provider = make_provider()
-    model = provider.model
-    provider_order = getattr(provider, "provider_order", None)
-    quantization = getattr(provider, "quantization", None)
-    guard.assert_serving_pinned(provider.base_url, provider_order, quantization)
+    serving = {field: getattr(provider, field, None) for field in PROVIDER_FIELDS_FINGERPRINTED}
+    serving["base_url"] = guard.normalize_base_url(serving["base_url"])
+    guard.assert_serving_pinned(
+        serving["base_url"] or "", serving["provider_order"], serving["quantization"]
+    )
+    model = serving["model"]
     prov = provenance(model=model, root=root)  # config_version + model (short sha unused)
     fp = {
         "gemma_sha": sha,
         "gemma_dirty": dirty,
         "dirty_sha": dirty_sha,
         "config_version": prov["config_version"],
-        "model": model,
         "runner_sha": runner_sha(),
-        "provider_order": provider_order,
-        "quantization": quantization,
+        **serving,
     }
     fp["behavior_key"] = guard.fingerprint_behavior_key(fp)
     return fp

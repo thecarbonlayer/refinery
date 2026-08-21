@@ -9,6 +9,8 @@ def _results(
     runner_sha: str = "rsha1",
     provider_order: str | None = None,
     quantization: str | None = None,
+    base_url: str = "http://localhost:1234/v1",
+    reasoning_effort: str | None = None,
 ) -> dict:
     """Minimal results-JSON shape: name -> (split, pass_fraction). Attempts
     mirror the real suite (3 held_in, 5 held_out) so parity checks pass."""
@@ -21,6 +23,8 @@ def _results(
             "runner_sha": runner_sha,
             "provider_order": provider_order,
             "quantization": quantization,
+            "base_url": base_url,
+            "reasoning_effort": reasoning_effort,
         },
         "tasks": {
             name: {"split": split, "pass_fraction": frac, "attempts": attempts[split]}
@@ -294,6 +298,41 @@ def test_delta_accepts_a_matching_serving_pin():
     cand = _results(tasks, provider_order="deepinfra", quantization="fp8")
     d = delta(base, cand)
     assert "delta_in" in d and "delta_ho" in d
+
+
+def test_delta_refuses_two_local_endpoints():
+    """LM Studio on :1234 vs Ollama on :11434, same model string: both unpinned,
+    both local, and still two serving bases — base_url is the only field that
+    tells them apart, so the parity gate must read it."""
+    import pytest
+
+    tasks = {"A1": ("held_in", 1.0), "B1": ("held_in", 1.0), "A3": ("held_out", 0.4)}
+    lmstudio = _results(tasks, base_url="http://localhost:1234/v1")
+    ollama = _results(tasks, base_url="http://localhost:11434/v1")
+    with pytest.raises(ValueError, match="base_url"):
+        delta(lmstudio, ollama)
+
+
+def test_delta_refuses_mismatched_reasoning_effort():
+    """reasoning_effort changes the request carbon sends; a Δ across efforts
+    measures the effort knob, not the edit."""
+    import pytest
+
+    tasks = {"A1": ("held_in", 1.0), "B1": ("held_in", 1.0), "A3": ("held_out", 0.4)}
+    low = _results(tasks, reasoning_effort="low")
+    high = _results(tasks, reasoning_effort="high")
+    with pytest.raises(ValueError, match="reasoning_effort"):
+        delta(low, high)
+
+
+def test_delta_serving_gate_covers_every_fingerprinted_provider_field():
+    """Cross-module consistency: the parity gate's field list plus the dedicated
+    model gate must cover exactly the Provider fields the fingerprint records —
+    a field recorded but not gated would be provenance theater."""
+    import runner.carbon_env as ge
+    from runner.delta import _SERVING_FIELDS
+
+    assert set(_SERVING_FIELDS) | {"model"} == set(ge.PROVIDER_FIELDS_FINGERPRINTED)
 
 
 def test_delta_refuses_missing_fingerprint():

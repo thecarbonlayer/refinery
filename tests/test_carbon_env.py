@@ -18,6 +18,7 @@ def _patch(
     provider = provider or SimpleNamespace(
         model="test-model",
         base_url="http://localhost:1234/v1",
+        reasoning_effort=None,
         provider_order=None,
         quantization=None,
     )
@@ -201,6 +202,98 @@ def test_fingerprint_reads_a_pre_pin_carbon_as_unpinned(monkeypatch):
     _patch(monkeypatch, _CLEAN, provider=remote)
     with pytest.raises(guard.UnpinnedServing):
         ge.carbon_fingerprint(ROOT)
+
+
+def test_fingerprint_records_the_base_url_normalized(monkeypatch):
+    """LM Studio on :1234 and Ollama on :11434 are two serving bases with the same
+    model string — base_url is what tells them apart, so it is fingerprinted.
+    Recorded normalized, so a trailing slash or host case cannot split keys."""
+    _patch(
+        monkeypatch,
+        _CLEAN,
+        provider=SimpleNamespace(
+            model="test-model",
+            base_url="HTTP://LocalHost:1234/v1/",
+            reasoning_effort=None,
+            provider_order=None,
+            quantization=None,
+        ),
+    )
+    fp = ge.carbon_fingerprint(ROOT)
+    assert fp["base_url"] == "http://localhost:1234/v1"
+
+
+def test_fingerprint_records_reasoning_effort(monkeypatch):
+    """reasoning_effort changes the wire request (carbon forwards it verbatim), so
+    two runs at different efforts are different measured behavior."""
+    _patch(
+        monkeypatch,
+        _CLEAN,
+        provider=SimpleNamespace(
+            model="test-model",
+            base_url="http://localhost:1234/v1",
+            reasoning_effort="high",
+            provider_order=None,
+            quantization=None,
+        ),
+    )
+    fp = ge.carbon_fingerprint(ROOT)
+    assert fp["reasoning_effort"] == "high"
+
+    _patch(monkeypatch, _CLEAN)
+    assert ge.carbon_fingerprint(ROOT)["reasoning_effort"] is None
+
+
+def test_every_provider_field_is_fingerprinted_or_named_excluded(monkeypatch):
+    """The future-field guard: every field on carbon's Provider dataclass must be
+    either fingerprinted or excluded BY NAME with a stated reason. A new Provider
+    field that alters the wire request cannot land silently — this test refuses it
+    until someone puts it in one of the two lists, and the fingerprint builds its
+    serving section from the fingerprinted list, so the list cannot drift from
+    what is actually recorded."""
+    from dataclasses import fields as dc_fields
+
+    from carbon import Provider
+
+    from runner import guard
+
+    provider_fields = {f.name for f in dc_fields(Provider)}
+    covered = set(ge.PROVIDER_FIELDS_FINGERPRINTED) | set(ge.PROVIDER_FIELDS_EXCLUDED)
+    assert provider_fields == covered, (
+        f"Provider fields not dispositioned: {sorted(provider_fields - covered)}; "
+        f"dispositioned but no longer on Provider: {sorted(covered - provider_fields)}"
+    )
+    # the two lists must not overlap — a field cannot be both recorded and excluded
+    assert not set(ge.PROVIDER_FIELDS_FINGERPRINTED) & set(ge.PROVIDER_FIELDS_EXCLUDED)
+    # every fingerprinted serving field must also fold into the behavior key,
+    # otherwise it is recorded but cannot gate resume/freshness.
+    assert set(ge.PROVIDER_FIELDS_FINGERPRINTED) <= set(guard._KEY_FIELDS)
+    # every exclusion carries a written reason
+    for field, reason in ge.PROVIDER_FIELDS_EXCLUDED.items():
+        assert reason.strip(), f"exclusion of {field!r} states no reason"
+
+
+def test_api_key_never_reaches_the_fingerprint(monkeypatch):
+    """The one hard exclusion: the fingerprint is written into every record and
+    results JSON, so a secret in it would be committed. Neither the key name nor
+    the secret value may appear anywhere in the fingerprint."""
+    import json
+
+    _patch(
+        monkeypatch,
+        _CLEAN,
+        provider=SimpleNamespace(
+            model="test-model",
+            base_url="http://localhost:1234/v1",
+            api_key="sk-super-secret-value",
+            reasoning_effort=None,
+            provider_order=None,
+            quantization=None,
+        ),
+    )
+    fp = ge.carbon_fingerprint(ROOT)
+    assert "api_key" not in fp
+    assert "sk-super-secret-value" not in json.dumps(fp)
 
 
 def test_git_raises_on_failure(monkeypatch):
