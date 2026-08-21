@@ -40,7 +40,13 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from runner.judge import AGREEMENT_PATH, JUDGE_PARSER_VERSION, JUDGE_PROMPT_SHA, judged_equivalent
+from runner.judge import (
+    AGREEMENT_PATH,
+    JUDGE_PARSER_VERSION,
+    JUDGE_PROMPT_SHA,
+    VALIDATION_COMPUTATION_VERSION,
+    judged_equivalent,
+)
 from runner.suite import RESULTS_DIR
 from runner.tasks.cluster_a import A1_SENTINEL
 from runner.tasks.cluster_g import G2_FACT_A, G2_FACT_B, G4_FILES, G4_NEXT, G4_REJECTED, G5_FILES
@@ -252,6 +258,11 @@ def run_validation(corpus: list[CorpusPair], provider) -> dict:
         # an artifact measured under any other parser version, exactly as it
         # refuses one measured for any other prompt.
         "judge_parser_version": JUDGE_PARSER_VERSION,
+        # And the scoring half: the version of THIS function's agreement/pass
+        # computation. The gate refuses an artifact scored under any other — a
+        # pre-pin artifact (no stamp) could carry a pass:true the delivered-
+        # verdict rule would refuse.
+        "validation_computation_version": VALIDATION_COMPUTATION_VERSION,
         "model": getattr(provider, "model", None),
         "agreement_threshold": AGREEMENT_THRESHOLD,
         "overall_agreement": overall_agreement,

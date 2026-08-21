@@ -90,7 +90,12 @@ def test_validation_status_requires_the_artifact_to_match_the_parser_version(tmp
     (prompt, parser) PAIR, and either half changing leaves it describing a judge
     that no longer exists. Missing and mismatched versions both refuse — a missing
     key is an artifact measured before the parser was versioned at all."""
-    from runner.judge import JUDGE_PARSER_VERSION, JUDGE_PROMPT_SHA, validation_status
+    from runner.judge import (
+        JUDGE_PARSER_VERSION,
+        JUDGE_PROMPT_SHA,
+        VALIDATION_COMPUTATION_VERSION,
+        validation_status,
+    )
 
     good = tmp_path / "agreement.json"
     good.write_text(
@@ -99,6 +104,7 @@ def test_validation_status_requires_the_artifact_to_match_the_parser_version(tmp
                 "pass": True,
                 "judge_prompt_sha": JUDGE_PROMPT_SHA,
                 "judge_parser_version": JUDGE_PARSER_VERSION,
+                "validation_computation_version": VALIDATION_COMPUTATION_VERSION,
                 "model": "m",
             }
         )
@@ -106,7 +112,12 @@ def test_validation_status_requires_the_artifact_to_match_the_parser_version(tmp
     assert validation_status(good, judge_model="m") == (True, "")
 
     for version in (None, JUDGE_PARSER_VERSION + 1, "2"):
-        artifact = {"pass": True, "judge_prompt_sha": JUDGE_PROMPT_SHA, "model": "m"}
+        artifact = {
+            "pass": True,
+            "judge_prompt_sha": JUDGE_PROMPT_SHA,
+            "validation_computation_version": VALIDATION_COMPUTATION_VERSION,
+            "model": "m",
+        }
         if version is not None:
             artifact["judge_parser_version"] = version
         stale = tmp_path / "stale.json"
@@ -124,12 +135,18 @@ def test_validation_status_binds_the_artifact_to_the_live_judge_model(tmp_path):
     describing a judge that is not the one running. The gate now takes the live
     judge's model identity and refuses on mismatch; a missing key refuses too (an
     artifact that never said which model it measured is not evidence about any)."""
-    from runner.judge import JUDGE_PARSER_VERSION, JUDGE_PROMPT_SHA, validation_status
+    from runner.judge import (
+        JUDGE_PARSER_VERSION,
+        JUDGE_PROMPT_SHA,
+        VALIDATION_COMPUTATION_VERSION,
+        validation_status,
+    )
 
     artifact = {
         "pass": True,
         "judge_prompt_sha": JUDGE_PROMPT_SHA,
         "judge_parser_version": JUDGE_PARSER_VERSION,
+        "validation_computation_version": VALIDATION_COMPUTATION_VERSION,
         "model": "model-A",
     }
     path = tmp_path / "agreement.json"
@@ -144,6 +161,55 @@ def test_validation_status_binds_the_artifact_to_the_live_judge_model(tmp_path):
     path.write_text(json.dumps(artifact))
     ok, why = validation_status(path, judge_model="model-A")
     assert ok is False and "model" in why
+
+
+def test_validation_status_requires_the_current_validation_computation(tmp_path):
+    """The reopened half of the undelivered-verdict hole, closed at the GATE.
+
+    Fixing run_validation alone protected only artifacts the fixed scorer writes.
+    An artifact produced by the OLD scorer — no ``ran`` records, no delivery
+    counts — can carry the current prompt sha, parser version, and model with
+    ``pass: true`` stamped while its judge timed out on every negative, and the
+    gate would activate it: the exact hole, reintroduced through the artifact
+    store. So the artifact's identity gains a fourth pin, the same construction
+    as the parser version: ``run_validation`` stamps the version of the scoring
+    computation it ran, and the gate refuses any artifact stamped with another —
+    or with none, which is precisely what every pre-fix artifact carries. A
+    version pin rather than a keys-exist check, deliberately: the presence of
+    ``delivered_count`` proves a key exists, not that ``pass`` was computed under
+    the delivered-verdict rule — and the pin covers the NEXT scoring change with
+    a one-line bump, which a schema sniff never would."""
+    from runner.judge import (
+        JUDGE_PARSER_VERSION,
+        JUDGE_PROMPT_SHA,
+        VALIDATION_COMPUTATION_VERSION,
+        validation_status,
+    )
+
+    identity = {
+        "pass": True,
+        "judge_prompt_sha": JUDGE_PROMPT_SHA,
+        "judge_parser_version": JUDGE_PARSER_VERSION,
+        "model": "m",
+    }
+    path = tmp_path / "agreement.json"
+
+    # The current computation, stamped: accepted.
+    path.write_text(
+        json.dumps({**identity, "validation_computation_version": VALIDATION_COMPUTATION_VERSION})
+    )
+    assert validation_status(path, judge_model="m") == (True, "")
+
+    # No stamp — every artifact the pre-fix scorer wrote looks like this.
+    path.write_text(json.dumps(identity))
+    ok, why = validation_status(path, judge_model="m")
+    assert ok is False
+    assert "validation_computation_version" in why and "re-run" in why
+
+    # A stale stamp: the old verdict-equality scoring.
+    path.write_text(json.dumps({**identity, "validation_computation_version": 1}))
+    ok, why = validation_status(path, judge_model="m")
+    assert ok is False and "validation_computation_version" in why
 
 
 def test_the_committed_agreement_artifact_is_refused_until_revalidated_for_this_parser():

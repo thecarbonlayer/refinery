@@ -2339,6 +2339,7 @@ def test_cmp6_refuses_a_stale_prompt_sha_and_a_failing_artifact(monkeypatch, tmp
                 "pass": False,
                 "judge_prompt_sha": judge_mod.JUDGE_PROMPT_SHA,
                 "judge_parser_version": judge_mod.JUDGE_PARSER_VERSION,
+                "validation_computation_version": judge_mod.VALIDATION_COMPUTATION_VERSION,
                 "model": "judge-test-model",
             }
         )
@@ -2362,6 +2363,7 @@ def test_cmp5_and_cmp6_refuse_an_artifact_validated_for_another_judge_model(monk
                 "pass": True,
                 "judge_prompt_sha": judge_mod.JUDGE_PROMPT_SHA,
                 "judge_parser_version": judge_mod.JUDGE_PARSER_VERSION,
+                "validation_computation_version": judge_mod.VALIDATION_COMPUTATION_VERSION,
                 "model": "model-A",
             }
         )
@@ -2473,7 +2475,12 @@ def test_cmp6_outcome_refuses_on_a_judge_that_never_delivered():
 
 
 def test_judge_validation_status_accepts_only_a_passing_artifact_at_this_prompt(tmp_path):
-    from runner.judge import JUDGE_PARSER_VERSION, JUDGE_PROMPT_SHA, validation_status
+    from runner.judge import (
+        JUDGE_PARSER_VERSION,
+        JUDGE_PROMPT_SHA,
+        VALIDATION_COMPUTATION_VERSION,
+        validation_status,
+    )
 
     good = tmp_path / "agreement.json"
     good.write_text(
@@ -2482,6 +2489,7 @@ def test_judge_validation_status_accepts_only_a_passing_artifact_at_this_prompt(
                 "pass": True,
                 "judge_prompt_sha": JUDGE_PROMPT_SHA,
                 "judge_parser_version": JUDGE_PARSER_VERSION,
+                "validation_computation_version": VALIDATION_COMPUTATION_VERSION,
                 "model": "m",
             }
         )
@@ -2491,11 +2499,13 @@ def test_judge_validation_status_accepts_only_a_passing_artifact_at_this_prompt(
     current = {
         "judge_prompt_sha": JUDGE_PROMPT_SHA,
         "judge_parser_version": JUDGE_PARSER_VERSION,
+        "validation_computation_version": VALIDATION_COMPUTATION_VERSION,
         "model": "m",
     }
     for artifact in (
         {**current, "pass": True, "judge_prompt_sha": "deadbeef"},
         {**current, "pass": True, "judge_parser_version": JUDGE_PARSER_VERSION + 1},
+        {**current, "pass": True, "validation_computation_version": 1},
         {**current, "pass": True, "model": "someone-elses-judge"},
         {**current, "pass": False},
         current,

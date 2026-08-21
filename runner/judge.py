@@ -84,6 +84,25 @@ AGREEMENT_PATH = (
 )
 
 
+# The version of the SCORING COMPUTATION that turns per-pair judge outputs into
+# the artifact's agreement numbers and its ``pass`` verdict — the fourth pin of
+# the artifact's identity, beside the prompt sha, the parser version, and the
+# model. It lives HERE, not in ``loop.judge_validate`` where the computation
+# runs, for ``AGREEMENT_PATH``'s reason: the reader (this gate) may not import
+# ``loop``, and one constant imported by the writer keeps the stamp and the
+# check from drifting apart.
+#
+# BUMP THIS, in the same commit, on any change to ``run_validation``'s scoring
+# or pass logic that could alter agreement, the clean-denial gate, or ``pass``
+# for the same judge outputs. The gate refuses an artifact stamped with any
+# other version — or with none, which is what every artifact written before
+# this pin carries. History: 1 = verdict-equality agreement (an undelivered
+# judgment's fail-closed False could count as a correct NO); 2 = delivered-
+# verdict agreement (undelivered pairs never agree; delivered/undelivered
+# counts recorded per artifact, ``ran`` per record).
+VALIDATION_COMPUTATION_VERSION = 2
+
+
 def validation_status(path: Path | None = None, *, judge_model: str) -> tuple[bool, str]:
     """Is this judge validated for THIS prompt, parser, and model? ``(ok, reason)``.
 
@@ -91,8 +110,9 @@ def validation_status(path: Path | None = None, *, judge_model: str) -> tuple[bo
     extraction lane) is gated on
     ``iterations/judge-validation/agreement.json`` existing, recording
     ``pass: true``, AND carrying the CURRENT ``JUDGE_PROMPT_SHA``,
-    ``JUDGE_PARSER_VERSION``, and the model the live judge will actually run
-    on (``judge_model`` — required, so no caller can forget the binding). Any
+    ``JUDGE_PARSER_VERSION``, ``VALIDATION_COMPUTATION_VERSION``, and the model
+    the live judge will actually run on (``judge_model`` — required, so no
+    caller can forget the binding). Any
     other state returns False with the reason, and the tasks turn that into an
     ``error`` outcome — never a mechanical fallback, which would silently
     replace a meaning check with a substring check and report the result under
@@ -135,6 +155,16 @@ def validation_status(path: Path | None = None, *, judge_model: str) -> tuple[bo
         return False, (
             f"validation artifact was measured for judge_parser_version={recorded_parser!r}, "
             f"this parser is {JUDGE_PARSER_VERSION} — re-run the validation"
+        )
+    # The scoring-computation half: an artifact scored under another rule (or
+    # before scoring was versioned at all — the missing-key case) may carry a
+    # ``pass: true`` the current rule would refuse.
+    recorded_computation = artifact.get("validation_computation_version")
+    if recorded_computation != VALIDATION_COMPUTATION_VERSION:
+        return False, (
+            "validation artifact was scored under "
+            f"validation_computation_version={recorded_computation!r}, this scorer is "
+            f"{VALIDATION_COMPUTATION_VERSION} — re-run the validation"
         )
     # The model half of the identity: agreement measured on one model says nothing
     # about another. A missing key refuses too — an artifact that never said which
