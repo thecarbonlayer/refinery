@@ -36,8 +36,10 @@ pair instead, where the higher attempt counts feed a predeclared one-sided Fishe
 exact test (``FISHER_ALPHA``) before any block is possible. A critical outcome with no
 recorded class (a legacy row) counts as behavioral — the routed direction is always
 MORE measurement, never a silently skipped veto. One extra MECHANICAL leak still must
-not disappear into a mean of twenty-eight numbers; that half of the guarantee is
-unchanged.
+not disappear into a suite-wide mean; that half of the guarantee is unchanged. (The
+count is deliberately not stated here: it moved from 28 to 31 when the Phase 2c
+scenario guards landed, and a prose number that has to be edited by every task
+addition is a fact that goes stale silently.)
 
 Thresholds are DERIVED from the suite the results actually ran — one attempt on the
 largest-grained task of each split — never hard-coded decimals. All arithmetic on the
@@ -183,9 +185,15 @@ class SectionCalibration:
     the resolution that run could even produce. The rates are the model; the bound is
     computed per judgment, from these rates and that judgment's own counts.
 
-    - ``supported``: the tasks the model covers. Gain and regression are judged on the
-      mean over THESE tasks, per split, and nothing else.
-    - ``null_rates``: each supported task's pooled null pass rate, as an EXACT
+    - ``supported``: the GAIN set. Gain and regression are judged on the mean over
+      THESE tasks, per split, and nothing else.
+    - ``covered``: every task the model carries a rate for — ``supported`` plus the
+      guards, which are judged one task at a time and never enter a split mean
+      (contract §6). Defaults to ``supported`` when omitted, which is what every
+      pre-Phase-2c artifact meant. Widening the GAIN set instead would change the
+      denominator of every mean the rule judges, which is a change to the rule; that
+      is exactly why these are two fields and not one.
+    - ``null_rates``: each covered task's pooled null pass rate, as an EXACT
       ``Fraction`` of the pooled integer counts, in a read-only mapping (the memos key
       on these values, so a post-construction edit would move the bound underneath
       quantiles already cached at the old rate). Every rate must be strictly interior,
@@ -202,7 +210,7 @@ class SectionCalibration:
     - ``guards``: tasks a confirmation must rerun even unmoved (added to
       ``always_confirm``) AND now adjudicate against their own null distribution
       the guard gate. A guard the model has no rate for could not be adjudicated at
-      all, so ``guards`` must be a subset of ``supported`` — a guard silently skipped
+      all, so ``guards`` must be a subset of ``covered`` — a guard silently skipped
       is exactly the not-a-gate this phase exists to remove.
     - ``source``: where the artifact came from, repo-relative — this string lands in
       a committed record, so it must never carry a machine path.
@@ -219,17 +227,30 @@ class SectionCalibration:
     guards: frozenset[str]
     source: str
     computed_at_runner_sha: str = ""
+    covered: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if not self.supported:
             raise ValueError("SectionCalibration: the supported set cannot be empty")
-        missing = sorted(set(self.supported) - set(self.null_rates))
-        extra = sorted(set(self.null_rates) - set(self.supported))
+        # An omitted `covered` means "the gain set is the whole model", which is what
+        # every artifact before the Phase 2c split said. Resolved once, here, so no
+        # reader below has to know which shape it was handed.
+        if not self.covered:
+            object.__setattr__(self, "covered", frozenset(self.supported))
+        uncovered = sorted(set(self.supported) - set(self.covered))
+        if uncovered:
+            raise ValueError(
+                f"SectionCalibration({self.section!r}): gain task(s) {uncovered} are "
+                "outside the covered set, so the mean the rule judges would average over "
+                "a task the model has no rate for"
+            )
+        missing = sorted(set(self.covered) - set(self.null_rates))
+        extra = sorted(set(self.null_rates) - set(self.covered))
         if missing or extra:
             raise ValueError(
                 f"SectionCalibration({self.section!r}): null_rates must cover exactly the "
-                f"supported set — missing a rate for {missing}, carrying a rate for the "
-                f"unsupported {extra}. A supported task with no null rate has no "
+                f"covered set — missing a rate for {missing}, carrying a rate for the "
+                f"uncovered {extra}. A covered task with no null rate has no "
                 "distribution to be judged against, and a rate for a task outside the "
                 "set is a number nothing will ever read."
             )
@@ -277,11 +298,11 @@ class SectionCalibration:
                 f"SectionCalibration({self.section!r}): coverage_level must be in (0, 1], "
                 f"got {self.coverage_level}"
             )
-        ungated = sorted(set(self.guards) - set(self.supported))
+        ungated = sorted(set(self.guards) - set(self.covered))
         if ungated:
             raise ValueError(
                 f"SectionCalibration({self.section!r}): guard(s) {ungated} are outside the "
-                "supported set, so the null model has no distribution to adjudicate their "
+                "covered set, so the null model has no distribution to adjudicate their "
                 "drop against. Contract §2 made guards GATES; a guard that cannot be "
                 "gated must not be installed as one."
             )
@@ -297,6 +318,7 @@ class SectionCalibration:
         return {
             "section": self.section,
             "supported": sorted(self.supported),
+            "covered": sorted(self.covered),
             "null_rates": {t: _frac(self.null_rates[t]) for t in sorted(self.null_rates)},
             "coverage_level": _frac(self.coverage_level),
             "guards": sorted(self.guards),
@@ -657,7 +679,7 @@ def _task_quantile(
     if rate is None:
         raise ValueError(
             f"{calibration.section!r} calibration has no null rate for {task!r} — its "
-            f"model covers {', '.join(sorted(calibration.supported))}, and a task's own "
+            f"model covers {', '.join(sorted(calibration.covered))}, and a task's own "
             "repeat or drop cannot be judged against another task's distribution or "
             "against a mean over several. Re-measure, or re-decide: do not substitute."
         )
@@ -692,7 +714,7 @@ def _quantile_record(
 
 
 def _require_supported(where: str, calibration: SectionCalibration, *results: dict) -> None:
-    """Every supported task must be present in every arm, or refuse.
+    """Every COVERED task must be present in every arm, or refuse.
 
     The quantile is computed over a mean across a NAMED set of tasks. Computing the
     observed mean over whatever subset happens to be present divides by a different
@@ -700,14 +722,19 @@ def _require_supported(where: str, calibration: SectionCalibration, *results: di
     one held-in task of three would be judged on 1/2 of a sum against a quantile
     enumerated over 1/3 of one. Nothing in the record would say so: the number simply
     moves. A short denominator is a broken comparison, not a smaller one.
+
+    COVERED, not merely the gain set: the guards are covered too, and each one is read
+    per task by ``confirmed()``'s guard gate. A missing guard there is not a shifted
+    denominator, it is a ``KeyError`` — or, worse, would have to be skipped, which is
+    the silently-ungated guard this whole phase exists to remove.
     """
     present = set.intersection(*(set(r["tasks"]) for r in results))
-    missing = sorted(calibration.supported - present)
+    missing = sorted(calibration.covered - present)
     if missing:
         raise ValueError(
-            f"{where}: calibrated section {calibration.section!r} is missing supported "
+            f"{where}: calibrated section {calibration.section!r} is missing covered "
             f"task(s) {', '.join(missing)} — the null model in {calibration.source} covers "
-            f"{', '.join(sorted(calibration.supported))}, and the quantile it produces is "
+            f"{', '.join(sorted(calibration.covered))}, and the quantile it produces is "
             "for a mean over all of them, not over whichever ones showed up"
         )
 
@@ -957,7 +984,10 @@ def evaluate(
     # reproduce the very quantity it exists to re-test.
     required = set(always_confirm)
     if calibration is not None:
-        required |= set(calibration.guards) | set(calibration.supported)
+        # COVERED, not just guards | supported: `_require_supported` demands every
+        # covered task in both arms of the confirmation, so a rerun that omitted one
+        # would refuse itself two functions later.
+        required |= set(calibration.covered)
     confirm = tuple(sorted(moved | set(base_sec) | set(cand_sec) | required))
     if calibration is None:
         confirm_reasons = [

@@ -22,8 +22,17 @@ Never move suite code into carbon. Never let carbon's config reach into `runner/
 ## Before you commit
 
 - **No absolute filesystem paths.** Logs and results are written by a real machine and
-  will record `/Users/<someone>/...`. This repo is public — grep `/Users/` and `/home/`
-  before committing under `results/` or `iterations/`.
+  will record `/Users/<someone>/...`. This repo is public. Grep `/Users/`, `/home/` and
+  `/var/folders/` before committing under `results/`, `iterations/` **or `docs/`** — a
+  plan document sat in public history with a home directory in three shell commands,
+  because the gate covered the record and not the prose beside it. Replace what you
+  find with `<HOME>` / `<TMPDIR>`, keeping the line's meaning.
+  `tests/test_results_are_scrubbed.py` enforces all of it: the machine-written record
+  (`results/*.json*`, `results/*.log`, `iterations/**/*.json*`) against the bare
+  patterns, and the prose beside it (`docs/**/*.md`, `iterations/**/*.md`) against the
+  same patterns anchored on a following path segment. The grep is for catching it
+  before the suite does. `iterations/` was in this instruction and outside the gate for
+  the whole of Phase 2; do not let a directory sit in that state again.
 - **No private names.** Sibling consumers and internal projects get described by role.
   If you cannot say it on a stranger's screen, it does not go in.
 - **Tests green** — all of them, not "all but the known ones". `uv run pytest`.

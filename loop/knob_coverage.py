@@ -98,8 +98,15 @@ SUITE_WIDE_KNOBS = frozenset({"system_prompt", "temperature"})
 # by clamping the evidence away — but that protects only their LEAK predicate, and each
 # verdict also needs a correct functional reply. They are held OUT of this row pending a
 # counterfactual sweep at small budgets, not excluded on a settled argument.
+# CMP-7 added 2026-08-20 (contract amendment 4): it runs a fixture emitting 2,964
+# characters per call and reads the result back three times. Below that budget the
+# noise stops arriving intact, which is a legal value moving what the task measures —
+# and in the direction that makes it EASIER, since less bulk means less competition
+# for the buried fact. So it is a guard on the row, not a miner: the regression it
+# watches for is a budget (or an offload strategy) that changes how much bulk the
+# fact has to survive.
 _TOOL_RESULT_READERS = (
-    "A2", "B1", "B2", "B3", "C3", "D1", "D2", "D3",
+    "A2", "B1", "B2", "B3", "C3", "CMP-7", "D1", "D2", "D3",
     "E1", "E2", "E3", "E4", "F1", "F2", "G3",
 )  # fmt: skip
 
@@ -108,6 +115,7 @@ _TOOL_RESULT_READERS = (
 # model calls. Kept as the evidence for the rows above, so the classification is
 # checkable rather than remembered.
 MEASURED_BREAK_BUDGETS: dict[str, int] = {
+    "CMP-7": 2964,  # the pinned noise fixture's own output, measured by running it
     "B1": 156,  # largest seeded source; bash output is 232
     "B2": 183,  # largest seeded source; bash output is 331
     "B3": 103,  # largest seeded source; bash output is 154
@@ -126,8 +134,10 @@ MEASURED_BREAK_BUDGETS: dict[str, int] = {
 # budget binds anything that takes rounds, and a legal `max_tool_steps` of 1 or 2 would
 # bind G5. This is what a hand-maintained table costs: the row was added for compaction
 # and nobody re-read this one.
+# CMP-7 makes three `bash` calls across three turns and needs a call-then-answer
+# round on each, so a `max_tool_steps` of 1 binds it.
 _TOOL_USERS = (
-    "A2", "B1", "B2", "B3", "C1", "C2", "C3", "D1", "D2", "D3",
+    "A2", "B1", "B2", "B3", "C1", "C2", "C3", "CMP-7", "D1", "D2", "D3",
     "E1", "E2", "E3", "E4", "F1", "F2", "G3", "G5",
 )  # fmt: skip
 
@@ -179,7 +189,21 @@ KNOB_COVERAGE: dict[str, dict[str, tuple[str, ...]]] = {
     "tool_output": {
         "observers": _TOOL_RESULT_READERS,
         "miners": ("E1", "E3", "E4"),
-        "guards": ("A2", "B1", "B2", "B3", "C3", "D1", "D2", "D3", "E2", "F1", "F2", "G3"),
+        "guards": (
+            "A2",
+            "B1",
+            "B2",
+            "B3",
+            "C3",
+            "CMP-7",
+            "D1",
+            "D2",
+            "D3",
+            "E2",
+            "F1",
+            "F2",
+            "G3",
+        ),  # fmt: skip
     },
     # F2 forces 10 model calls and fails at any budget <= 9 — the only binding
     # observer, so it must be a GUARD: omitting it left the declared guard set to
@@ -196,10 +220,17 @@ KNOB_COVERAGE: dict[str, dict[str, tuple[str, ...]]] = {
     # A1 measured 1.000 after Carbon's compaction fix landed, so it no longer mines
     # anything here — it defends the window instead. A3 never compacts at all, so the
     # knob has no failing observer left and is guard-only.
+    #
+    # CMP-7 added 2026-08-20 (contract amendment 4). It is the ONLY compaction task
+    # that runs at the shipped window — G2/G4/G5 and CMP-5/CMP-6 each pin their own
+    # `context_limit`, which makes them structurally blind to this knob — so it is the
+    # only one whose compaction behavior a change here can move at all. A guard, not a
+    # miner: lowering the window compacts it harder, raising it may stop compaction
+    # firing and trip the task's own setup guard.
     "default_context_limit": {
-        "observers": ("A1", "A3"),
+        "observers": ("A1", "A3", "CMP-7"),
         "miners": (),
-        "guards": ("A1", "A3"),
+        "guards": ("A1", "A3", "CMP-7"),
     },
     # Only tasks that actually reach `compact()`. G2 compacts three times at its
     # own 700-token limit, so it sees every sub-field and is the only real guard;
@@ -236,12 +267,33 @@ KNOB_COVERAGE: dict[str, dict[str, tuple[str, ...]]] = {
     # So: observer and GUARD on both rows. That is the real coverage this table gained —
     # a compaction candidate that loses the file list drops G5 from 1.00, and nothing
     # was watching that before. A weak guard, on the `uncertain` prior, exactly like D3.
+    #
+    # CMP-5/6/7 added 2026-08-20 (phase2c-guards-contract.md §6). Observers on the
+    # same argument G2/G4/G5 already carry — each drives repeated compaction and
+    # grades what came back through it, so every sub-field of this object (strategy,
+    # keep_head, keep_tail, trigger_fraction, summary_max_tokens) can move their
+    # verdicts. GUARDS, never miners, and that asymmetry is the point of the phase:
+    # they exist to catch a compaction fix mined from G4 that generalizes only to
+    # G4's shape. Mining against them would tune the candidate on the very tasks
+    # that are supposed to be able to refuse it.
+    #
+    # Each covers an axis the existing rows cannot: CMP-5 a SUPERSEDED decision (both
+    # G2 and G4 grade retention alone, so a summarizer that keeps every decision and
+    # loses their status passes both); CMP-6 MEANING with no sentinel to match on;
+    # CMP-7 a fact competing with bulky tool output at the DEFAULT window rather than
+    # a pinned small one.
     "compaction": {
-        "observers": ("A1", "G2", "G4", "G5"),
+        "observers": ("A1", "G2", "G4", "G5", "CMP-5", "CMP-6", "CMP-7"),
         "miners": ("G4",),
-        "guards": ("A1", "G2", "G5"),
+        "guards": ("A1", "G2", "G5", "CMP-5", "CMP-6", "CMP-7"),
     },
-    # Same observers, and for a sharper reason: H2 detects the summarizer by
+    # Same observers as compaction had BEFORE the Phase 2c guards, and deliberately
+    # not extended with them: this row is about the summarizer's PROMPT text, and the
+    # three new tasks have not been measured against a rewritten prompt at all. The
+    # contract extends `compaction` only, and a coverage row is an authored claim
+    # about carbon's internals — copying it across because the two rows have always
+    # matched would be exactly the padding the module docstring warns about.
+    # H2 stays out for the sharper reason: it detects the summarizer by
     # payload SHAPE precisely so that rewriting this knob cannot fool it, which by
     # construction makes it blind to the knob. `tests/test_registry.py` asserts
     # that invariance directly.

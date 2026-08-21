@@ -308,21 +308,32 @@ def test_the_real_gate_refuses_to_recurse_into_pytest():
 # --- the null-model loader and the rule's section gate (contract §1/§2) -----------
 
 
-_SPLIT_OF = {"A1": "held_in", "G4": "held_in", "G5": "held_in", "G2": "held_out"}
+_SPLIT_OF = {
+    "A1": "held_in",
+    "G4": "held_in",
+    "G5": "held_in",
+    "G2": "held_out",
+    "CMP-5": "held_in",
+    "CMP-6": "held_out",
+    "CMP-7": "held_in",
+}
 _STANDARD_ATTEMPTS = {t: (5 if s == "held_out" else 3) for t, s in _SPLIT_OF.items()}
 
-# Contract §3's arm protocol: three full-suite arms at standard attempts, four
-# `--only A1 G2 G4 G5 --attempts 10` subset arms, nothing changed between any of them.
+# The arm protocol (contract §3, extended by the Phase 2c amendment): three full-suite
+# arms at standard attempts, four `--only A1 G2 G4 G5 CMP-5 CMP-6 CMP-7 --attempts 10`
+# subset arms, nothing changed between any of them. The scenario guards carry counts
+# because the model must RATE every covered task — a guard with no rate cannot be
+# adjudicated, which is why the loader pins the covered set rather than the gain set.
 _FULL_ARMS = {
-    "r2-null-full-a": {"A1": 2, "G4": 1, "G5": 2, "G2": 3},
-    "r2-null-full-b": {"A1": 2, "G4": 1, "G5": 2, "G2": 2},
-    "r2-null-full-c": {"A1": 1, "G4": 0, "G5": 3, "G2": 3},
+    "r2-null-full-a": {"A1": 2, "G4": 1, "G5": 2, "G2": 3, "CMP-5": 1, "CMP-6": 3, "CMP-7": 2},
+    "r2-null-full-b": {"A1": 2, "G4": 1, "G5": 2, "G2": 2, "CMP-5": 2, "CMP-6": 2, "CMP-7": 1},
+    "r2-null-full-c": {"A1": 1, "G4": 0, "G5": 3, "G2": 3, "CMP-5": 1, "CMP-6": 3, "CMP-7": 2},
 }
 _SUBSET_ARMS = {
-    "r2-null-cmp-a": {"A1": 5, "G4": 2, "G5": 6, "G2": 5},
-    "r2-null-cmp-b": {"A1": 6, "G4": 1, "G5": 7, "G2": 6},
-    "r2-null-cmp-c": {"A1": 5, "G4": 2, "G5": 6, "G2": 4},
-    "r2-null-cmp-d": {"A1": 6, "G4": 1, "G5": 5, "G2": 7},
+    "r2-null-cmp-a": {"A1": 5, "G4": 2, "G5": 6, "G2": 5, "CMP-5": 4, "CMP-6": 5, "CMP-7": 6},
+    "r2-null-cmp-b": {"A1": 6, "G4": 1, "G5": 7, "G2": 6, "CMP-5": 5, "CMP-6": 4, "CMP-7": 5},
+    "r2-null-cmp-c": {"A1": 5, "G4": 2, "G5": 6, "G2": 4, "CMP-5": 4, "CMP-6": 6, "CMP-7": 6},
+    "r2-null-cmp-d": {"A1": 6, "G4": 1, "G5": 5, "G2": 7, "CMP-5": 5, "CMP-6": 5, "CMP-7": 4},
 }
 
 
@@ -338,6 +349,7 @@ def _model(
     force_passes=None,
     saturate=frozenset(),
     mutate=None,
+    gain=None,
 ):
     """A round-2 null-model artifact, MEASURED by `loop.calibrate.calibrate_model`
     from the seven fabricated null arms above — nothing here is a hand-written rate.
@@ -348,7 +360,7 @@ def _model(
     `mutate` edits the computed artifact before it is written, which is how the unfit
     and malformed cases are built without hand-authoring an artifact.
     """
-    from loop.calibrate import SUPPORTED, calibrate_model
+    from loop.calibrate import MODEL_TASKS, SUPPORTED, calibrate_model
 
     results_dir = tmp_path / f"arms-{name}"
     results_dir.mkdir()
@@ -381,7 +393,12 @@ def _model(
                 arm["filter"] = sorted(passes)
             (results_dir / f"{label}.json").write_text(json.dumps(arm))
     labels = sorted({**_FULL_ARMS, **_SUBSET_ARMS})
-    artifact = calibrate_model(labels, results_dir, SUPPORTED)
+    # SUPPORTED is the gain set; MODEL_TASKS is what the artifact must rate. `gain`
+    # overrides the former, which is how an artifact that chose its OWN gain set --
+    # internally consistent, and not the set the rule judges on -- gets built.
+    artifact = calibrate_model(
+        labels, results_dir, SUPPORTED if gain is None else gain, coverage=MODEL_TASKS
+    )
     if mutate is not None:
         mutate(artifact)
     path = tmp_path / name
@@ -397,6 +414,12 @@ _CMP = {
     "G4": ("held_in", 50, 8),
     "G5": ("held_in", 50, 31),
     "G2": ("held_out", 50, 27),
+    # The scenario guards: COVERED by the model, so every arm must carry them, and read
+    # per task by the guard gate. They are not in the gain set, so they never enter a
+    # supported-set mean.
+    "CMP-5": ("held_in", 50, 24),
+    "CMP-6": ("held_out", 50, 26),
+    "CMP-7": ("held_in", 50, 28),
     "X1": ("held_in", 3, 2),
     "X2": ("held_out", 4, 2),
 }
@@ -464,13 +487,17 @@ def test_a_fresh_calibration_loads_exactly_the_null_model_the_artifact_measured(
     artifact = json.loads(path.read_text())
     assert cal is not None
     assert cal.section == "compaction"
-    assert cal.supported == frozenset(artifact["null_model"])
+    # COVERED is the artifact's own key set; SUPPORTED is the narrower gain set,
+    # pinned by the section rather than read off the file (contract amendment 2).
+    assert cal.covered == frozenset(artifact["null_model"])
+    assert cal.supported == frozenset({"A1", "G2", "G4", "G5"})
     assert cal.null_rates == {
         task: Fraction(*(int(x) for x in row["null_rate"].split("/")))
         for task, row in artifact["null_model"].items()
     }
     assert cal.coverage_level == Fraction(artifact["coverage_level"])
-    assert cal.guards == _SECTION_CONFIRM_GUARDS["compaction"] == frozenset({"A1", "G2", "G5"})
+    assert cal.guards == _SECTION_CONFIRM_GUARDS["compaction"]
+    assert cal.guards == frozenset({"A1", "G2", "G5", "CMP-5", "CMP-6", "CMP-7"})
 
 
 def test_an_unfit_artifact_refuses_to_install_itself_and_says_which_check_failed(tmp_path):
@@ -488,6 +515,61 @@ def test_an_unfit_artifact_refuses_to_install_itself_and_says_which_check_failed
     assert cal is None
     assert "not calibrated" in why and "grain" in why
     assert "goodness" not in why, "only the checks that actually failed get named"
+
+
+def test_an_artifact_that_chose_its_own_gain_set_is_refused_naming_the_task(tmp_path):
+    """An artifact may not decide what the rule averages over.
+
+    Recomputation read the gain set off the artifact's OWN grain rows — the only place
+    that set was written down — so an artifact whose fitness was computed over three of
+    the four supported tasks re-derived cleanly, agreed with itself perfectly, and
+    installed. Every check then certified a judgment the rule does not make: the split
+    means it gates still average over four tasks, one of which nothing had checked.
+
+    G4 is the case that matters. It is the miner, the task every compaction candidate
+    is mined from, and a gain set quietly missing it is a rule whose evidence excludes
+    the task the evidence is about.
+    """
+    from loop.calibrate import SUPPORTED
+    from loop.validate import calibration_status
+
+    path = _model(
+        tmp_path,
+        stamped_sha=FP["runner_sha"],
+        gain=SUPPORTED - {"G4"},
+    )
+    artifact = json.loads(path.read_text())
+    assert artifact["fitness"]["fit"] is True, (
+        "fixture precondition: the artifact is internally consistent and certifies itself"
+    )
+    graded = {
+        t
+        for split, row in artifact["fitness"]["grain"].items()
+        if split not in ("pass", "per_task")
+        for t in row["tasks"]
+    }
+    assert graded == {"A1", "G2", "G5"}, "and its fitness genuinely covers a smaller set"
+
+    cal, why = calibration_status("compaction", FP, model_path=path)
+    assert cal is None
+    assert "G4" in why, "the refusal must name the task the artifact dropped"
+    assert "pinned" in why
+
+
+def test_a_per_task_block_missing_a_covered_task_is_refused(tmp_path):
+    """The other half of the same pin: the per-task blocks must cover what the model
+    RATES. Goodness, grain and stability each judge a guard on its own, so a per-task
+    row quietly absent is a guard nothing certified — recomputation rebuilds the block
+    over the covered set and names the row that is missing."""
+    from loop.validate import calibration_status
+
+    def drop_a_guard(artifact):
+        del artifact["fitness"]["goodness"]["per_task"]["CMP-7"]
+
+    path = _model(tmp_path, stamped_sha=FP["runner_sha"], mutate=drop_a_guard)
+    cal, why = calibration_status("compaction", FP, model_path=path)
+    assert cal is None
+    assert "recomput" in why and "goodness" in why and "CMP-7" in why
 
 
 def test_a_missing_provenance_value_is_a_mismatch_never_a_match(tmp_path):
@@ -808,7 +890,17 @@ def test_confirm_cli_judges_a_calibrated_claim_against_its_computed_quantile(
 
     def arms(gain: int):
         def run(label, only, attempts):
-            passes = {"A1": 27, "G4": 8, "G5": 31, "G2": 27 if label == "b" else gain}
+            # Every COVERED task, unmoved except the carrier: the confirmation reruns
+            # the guards too, and a pair missing one is refused before any judgment.
+            passes = {
+                "A1": 27,
+                "G4": 8,
+                "G5": 31,
+                "G2": 27 if label == "b" else gain,
+                "CMP-5": 24,
+                "CMP-6": 26,
+                "CMP-7": 28,
+            }
             return {
                 "fingerprint": dict(FP),
                 "tasks": {
@@ -1033,3 +1125,84 @@ def test_a_single_arm_disagreeing_on_runner_sha_is_stale(tmp_path):
     cal, why = calibration_status("compaction", FP, model_path=path)
     assert cal is None
     assert "runner_sha" in why and "STALE" in why
+
+
+def test_every_declared_compaction_guard_has_a_rate_the_pinned_model_must_carry():
+    """The invariant that ties the guard set to the calibration (contract amendment 2).
+
+    `SectionCalibration` refuses a guard the model carries no rate for, because a guard
+    that cannot be adjudicated is a guard silently skipped. The section therefore pins
+    two sets, not one: the COVERED set every artifact must rate (the seven), and the
+    GAIN set the split means average over (the four). Guards must sit inside the
+    covered set; the gain set must too; and both must sit inside the coverage the
+    calibration tool builds (`MODEL_TASKS`), or the campaign would produce an artifact
+    the loader then refuses.
+
+    The relation is what this asserts, not the membership alone: it kills the
+    flip-without-coverage mutation (a guard outside the pin) and the shrink-the-pin
+    mutation (a covered set that no longer holds the guards) alike.
+    """
+    from loop.calibrate import MODEL_TASKS, SUPPORTED
+    from loop.validate import _SECTION_CONFIRM_GUARDS, _SECTION_COVERED, _SECTION_SUPPORTED
+
+    guards = _SECTION_CONFIRM_GUARDS["compaction"]
+    covered = _SECTION_COVERED["compaction"]
+    gain = _SECTION_SUPPORTED["compaction"]
+
+    assert guards == frozenset({"A1", "G2", "G5", "CMP-5", "CMP-6", "CMP-7"})
+    assert guards <= covered <= MODEL_TASKS, (
+        f"guard(s) {sorted(guards - covered)} are declared but outside the section's "
+        "pinned covered set — the loader would build a calibration that cannot judge them"
+    )
+    assert gain <= covered
+    assert gain == SUPPORTED == frozenset({"A1", "G2", "G4", "G5"})
+    assert covered == MODEL_TASKS
+    # G4 is the miner: covered (the gain mean needs its rate) and never a guard.
+    assert "G4" in covered and "G4" not in guards
+
+
+def test_the_committed_artifact_refuses_to_install_itself_and_says_why():
+    """The transition, stated out loud rather than left to be discovered.
+
+    The reason has moved twice now and this test moves with it. `model-r2.json` used to
+    be refused for its SHAPE: pooled over {A1, G2, G4, G5} while the loader pinned seven
+    tasks. The Phase 2c campaign closed that gap — ten arms, all seven tasks, at one
+    runner hash — and the artifact it produced refuses itself instead: `fitness.fit =
+    false`, first because STABILITY did not hold, and now because GOODNESS does not
+    either. Fitness certifies the tasks the model rates as of the phase's close, and
+    the guards it had rated without checking do not survive that. The section stays
+    loudly uncalibrated, which is the fail-closed design working.
+
+    Asked at the artifact's OWN provenance, so shape and freshness are both satisfied
+    and the refusal can only be the artifact's own verdict. "Re-run the arms",
+    "someone edited the artifact" and "the pooling is not stable" are three different
+    remedies, so the sentence has to say which one this is.
+    """
+    import json
+
+    from loop.validate import _SECTION_MODEL, calibration_status
+
+    installed = json.loads(_SECTION_MODEL["compaction"].read_text())
+    assert set(installed["null_model"]) == {"A1", "G2", "G4", "G5", "CMP-5", "CMP-6", "CMP-7"}, (
+        "fixture precondition: the committed artifact is the Phase 2c seven-task pooling"
+    )
+    assert len(installed["provenance"]) == 10, "over the campaign's ten arms"
+    arm = installed["provenance"][0]
+    cal, why = calibration_status(
+        "compaction",
+        {
+            "runner_sha": arm["runner_sha"],
+            "config_version": arm["config_version"],
+            "model": arm["model"],
+            "gemma_sha": arm["carbon_sha"],
+            "dirty_sha": arm["dirty_sha"],
+        },
+    )
+    assert cal is None
+    assert "not calibrated" in why
+    assert "fitness.fit=False" in why, "the refusal must quote the artifact's own verdict"
+    assert "failed: goodness, stability" in why, "and name the checks that produced it"
+    assert "re-run the arms" in why, "and say what fixes it"
+    assert installed["fitness"]["grain"]["pass"] is True, (
+        "grain still holds — the refusal names exactly the two checks that do not"
+    )

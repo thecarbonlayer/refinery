@@ -22,10 +22,38 @@ the closing audit found them:
 9. PROVENANCE KEYS. An arm fingerprint MISSING `dirty_sha` read as clean.
 10. SELF-CONTAINED DOCS. Refinery code cited documents that do not live in this repo.
 
-The fixtures here prefer the REAL committed evidence — the eight `r2-null-*` result
-files and the installed `model-r2.json` — over fabricated arms wherever the point of
-the test survives it. A tamper test copies the real artifact and edits one field, so
-what it demonstrates is a tamper of the thing actually installed.
+The fixtures here prefer the REAL committed evidence — the `r2-null-*` result files
+and the committed `model-r2.json` — wherever the point of the test survives it, and
+`committed_model()` is that file: every claim about what `calibrate_model` PUBLISHES
+(the leave-one-out margins, the false-CONFIRM block, the end-to-end power rows) still
+reads it directly.
+
+THE TERMINAL STATE THIS FILE NOW SITS IN, stated plainly because the docstring above
+described a state that has been superseded twice.
+
+`iterations/calibration-compaction/model-r2.json` is the Phase 2c pooling: ten arms
+(`p2c-null-full-a/b/c` plus `p2c-null-cmp-a` through `-g`), seven rated tasks (the four
+supported plus the scenario guards CMP-5/6/7), one runner hash. It does NOT install,
+and it says why itself: `fitness.fit = false`, with GOODNESS and STABILITY both
+refusing. Goodness refuses on one arm's CMP-5 count (3 of 3 against a pooled 17/79,
+exact two-sided tail 0.00996, just inside the 0.01 alpha); stability refuses on the
+held-in split mean and on the per-task bounds of CMP-5, CMP-6 and G4, each of which
+crosses a grain bucket when one arm is dropped. GRAIN passes, guards included.
+
+So `compaction` is uncalibrated, deliberately and loudly, and every sweep in this
+repo that needs an installed calibration is suspended with that refusal asserted
+rather than described (`tests/test_round2_attack.py`,
+`tests/test_loop_validate.py::test_the_committed_artifact_refuses_to_install_itself_and_says_why`).
+The restoration condition is a FIT artifact at these arms' runner hash or a successor —
+not a hand-edited `fit`, which the loader re-derives and rejects.
+
+`committed_model()` is that file, and every claim here about what `calibrate_model`
+PUBLISHES (the leave-one-out margins, the false-CONFIRM block, the end-to-end power
+rows) reads it directly. Tests that need a LOADABLE calibration cannot use it, so they
+build one with the real `calibrate_model` over synthetic null arms
+(`installed_model()`), carrying the real arms' provenance. The tamper mechanics are
+unchanged; the artifact they tamper with moved because the committed one does not
+install, not because a fabricated fixture was easier.
 """
 
 from __future__ import annotations
@@ -59,9 +87,54 @@ SUBSET_ARMS = (
     "r2-null-cmp-g",
     "r2-null-cmp-h",
 )
+# The COMMITTED artifact's own arms — the Phase 2c campaign's ten, in pooling order.
+# Distinct from the two lists above, which name the synthetic fixture's arms: the
+# fixture borrows the round-2 LABELS so its shape matches, while every claim about the
+# committed record is keyed to the arms that record was actually pooled from.
+P2C_ARMS = (
+    "p2c-null-full-a",
+    "p2c-null-full-b",
+    "p2c-null-full-c",
+    "p2c-null-cmp-a",
+    "p2c-null-cmp-b",
+    "p2c-null-cmp-c",
+    "p2c-null-cmp-d",
+    "p2c-null-cmp-e",
+    "p2c-null-cmp-f",
+    "p2c-null-cmp-g",
+)
+# The GAIN set — what the split means average over — and the wider COVERED set the
+# model must rate. They coincided through Phase 2b; the Phase 2c scenario guards made
+# them different sets (contract amendment 2).
 SUPPORTED = frozenset({"A1", "G2", "G4", "G5"})
-SPLIT_OF = {"A1": "held_in", "G4": "held_in", "G5": "held_in", "G2": "held_out"}
-STANDARD_ATTEMPTS = {"A1": 3, "G4": 3, "G5": 3, "G2": 5}
+COVERED = SUPPORTED | frozenset({"CMP-5", "CMP-6", "CMP-7"})
+SPLIT_OF = {
+    "A1": "held_in",
+    "G4": "held_in",
+    "G5": "held_in",
+    "G2": "held_out",
+    "CMP-5": "held_in",
+    "CMP-6": "held_out",
+    "CMP-7": "held_in",
+}
+STANDARD_ATTEMPTS = {t: (5 if SPLIT_OF[t] == "held_out" else 3) for t in SPLIT_OF}
+
+
+# Null-arm counts for a seven-task artifact of the shape the loader now pins. The arm
+# LABELS are the real protocol's, so the artifact this builds is shape-identical to the
+# installed one — same eleven arms, same designated baseline — and only the three guard
+# rows (and the counts) are synthetic.
+def _null_counts(label: str, subset: bool) -> dict[str, int]:
+    """Deterministic per-arm counts: null variation, never a hopeful pattern."""
+    seed = sum(ord(c) for c in label)
+    base = {"A1": 0.55, "G4": 0.30, "G5": 0.62, "G2": 0.45, "CMP-5": 0.48, "CMP-6": 0.52,
+            "CMP-7": 0.58}  # fmt: skip
+    counts = {}
+    for i, (task, rate) in enumerate(sorted(base.items())):
+        attempts = 10 if subset else STANDARD_ATTEMPTS[task]
+        wobble = ((seed + 7 * i) % 3) - 1  # -1, 0 or +1 attempt of null movement
+        counts[task] = max(1, min(attempts - 1, round(rate * attempts) + wobble))
+    return counts
 
 
 def arm(label: str) -> dict:
@@ -72,16 +145,75 @@ def real_fingerprint() -> dict:
     return arm("r2-null-full-a")["fingerprint"]
 
 
-def installed_model() -> dict:
+def committed_model() -> dict:
+    """The artifact as COMMITTED — `iterations/calibration-compaction/model-r2.json`.
+
+    Now the Phase 2c pooling: ten arms, seven rated tasks, `fitness.fit = false`
+    because goodness and stability refused (see this module's docstring for the
+    numbers). It does not install, but it is still the published
+    record, and the tests that assert on what `calibrate_model` PUBLISHES — the
+    leave-one-out margins, the false-CONFIRM block, the end-to-end power rows — are
+    claims about that record. They read it here rather than through the loader fixture,
+    so they keep their original subject.
+
+    Re-keyed to those ten arms rather than skipped. These were the artifact's
+    independent verifiers; a verifier pointed at a file that no longer exists verifies
+    nothing, and one that is skipped verifies nothing more loudly.
+    """
     return json.loads(REAL_MODEL.read_text())
 
 
-def copy_model(tmp_path: Path, mutate=None, name="model-r2.json") -> Path:
-    """The REAL installed artifact, copied, optionally with one field edited.
+def installed_model(mutate_arms=None) -> dict:
+    """A null model of the shape the loader installs TODAY: seven covered tasks.
 
-    A tamper built by editing the committed artifact demonstrates something a
-    fabricated one cannot: that the loader refuses the file the pipeline actually
-    installs once a single number in it stops being true.
+    Through Phase 2b this returned the committed `model-r2.json` itself, and the tamper
+    tests below edited that file so their demonstration was about the artifact the
+    pipeline actually installs. That artifact pools four tasks and no longer installs at
+    all — the Phase 2c guards need rates it does not carry — so the fixture is MEASURED
+    here instead, by running the real `calibrate_model` over synthetic null arms, with
+    the real arms' provenance so freshness still resolves against real measurements.
+    The tamper mechanics below are unchanged; what moved is the artifact they tamper
+    with, and it moved because the committed one is superseded rather than because a
+    fabricated fixture was more convenient. `tests/test_loop_validate.py` pins the
+    committed artifact's own refusal separately.
+    """
+    import tempfile
+
+    from loop.calibrate import MODEL_TASKS, calibrate_model
+    from loop.calibrate import SUPPORTED as GAIN_SET
+
+    fp = dict(real_fingerprint())
+    results_dir = Path(tempfile.mkdtemp(prefix="p2b-closing-arms-"))
+    for labels_group, subset in ((FULL_ARMS, False), (SUBSET_ARMS, True)):
+        for label in labels_group:
+            passes = _null_counts(label, subset)
+            tasks = {}
+            for task, count in passes.items():
+                attempts = 10 if subset else STANDARD_ATTEMPTS[task]
+                tasks[task] = {
+                    "split": SPLIT_OF[task],
+                    "attempts": attempts,
+                    "passes": count,
+                    "pass_fraction": round(count / attempts, 4),
+                }
+            if mutate_arms is not None:
+                mutate_arms(label, tasks)
+            record = {"fingerprint": dict(fp), "tasks": tasks}
+            if subset:
+                record["filter"] = sorted(passes)
+            (results_dir / f"{label}.json").write_text(json.dumps(record))
+    labels = sorted(FULL_ARMS + SUBSET_ARMS)
+    model = calibrate_model(labels, results_dir, GAIN_SET, coverage=MODEL_TASKS)
+    assert model["fitness"]["fit"] is True, "fixture precondition: these arms must be fit"
+    return model
+
+
+def copy_model(tmp_path: Path, mutate=None, name="model-r2.json") -> Path:
+    """An installable artifact, optionally with one field edited.
+
+    A tamper test is about the loader's checks, so what matters is that the artifact is
+    one the loader would otherwise install — see `installed_model` for why that is no
+    longer the committed file.
     """
     model = installed_model()
     if mutate is not None:
@@ -95,6 +227,34 @@ def load_calibration(path: Path):
     from loop.validate import section_calibration
 
     return section_calibration("compaction", real_fingerprint(), model_path=path)
+
+
+_PINNED_MODEL_PATH: Path | None = None
+
+
+def pinned_model_path() -> Path:
+    """The installable artifact, written once per session and reused.
+
+    Built rather than committed: an artifact carrying rates for CMP-5/6/7 must come
+    from a campaign that measured them, and that campaign has not run. Writing one into
+    `iterations/` would install fabricated guard rates into the real pipeline, which is
+    the one thing this fixture must never do — so it lives in a temp dir and never
+    leaves the test session.
+    """
+    global _PINNED_MODEL_PATH
+    if _PINNED_MODEL_PATH is None:
+        import tempfile
+
+        d = Path(tempfile.mkdtemp(prefix="p2b-closing-model-"))
+        path = d / "model-r2.json"
+        path.write_text(json.dumps(installed_model(), indent=2) + "\n")
+        _PINNED_MODEL_PATH = path
+    return _PINNED_MODEL_PATH
+
+
+def installed_calibration():
+    """The calibration the loader builds from an artifact of the pinned shape."""
+    return load_calibration(pinned_model_path())
 
 
 def why_not(path: Path) -> str:
@@ -266,7 +426,7 @@ def test_an_uncalibrated_section_that_is_not_calibration_required_still_uses_cau
 def test_the_installed_artifact_still_loads_after_recomputation(tmp_path):
     """Precondition for every tamper below: the real, untampered artifact passes the
     loader's own recomputation. A checker that refuses everything proves nothing."""
-    cal = load_calibration(REAL_MODEL)
+    cal = installed_calibration()
     assert cal is not None
     assert set(cal.supported) == SUPPORTED
     assert cal.coverage_level == Fraction(39, 40)
@@ -359,7 +519,7 @@ def test_a_grain_row_edited_to_a_different_quantile_refuses(tmp_path):
 def test_power_publishes_stage1_only_rows_under_that_name(tmp_path):
     """The stage-1 numbers stay — they are the gain gate's own power — but they are
     no longer the only rows, so they must say which stage they describe."""
-    power = installed_model()["fitness"]["power"]
+    power = committed_model()["fitness"]["power"]
     assert set(power["stage1_only"]) == {"per_task", "gain_gate"}
     assert set(power["stage1_only"]["per_task"]) == SUPPORTED
     assert set(power["stage1_only"]["gain_gate"]) == {"held_in", "held_out"}
@@ -369,7 +529,7 @@ def test_power_publishes_joint_stage1_x_stage2_rows_for_every_declared_alternati
     """Contract amendment 3: +0.2 on a single carrier (each supported task, one row
     each) and +0.3/+0.5 uniform across the supported set, each reported per evidence
     split as well as in total. Exact fractions, floats beside them for reading."""
-    rows = installed_model()["fitness"]["power"]["end_to_end"]["rows"]
+    rows = committed_model()["fitness"]["power"]["end_to_end"]["rows"]
     single = {r["carrier"] for r in rows if r["kind"] == "single_carrier"}
     assert single == SUPPORTED
     uniform = {r["offset"] for r in rows if r["kind"] == "uniform"}
@@ -395,7 +555,7 @@ def test_the_joint_stage1_predicate_agrees_with_the_real_evaluate_on_sampled_vec
     from loop.acceptance import evaluate
     from loop.calibrate import _stage1_verdict, null_gain_quantile
 
-    cal = load_calibration(REAL_MODEL)
+    cal = installed_calibration()
     quantiles = {
         split: null_gain_quantile(
             {t: cal.null_rates[t] for t in sorted(SUPPORTED) if SPLIT_OF[t] == split},
@@ -407,10 +567,17 @@ def test_the_joint_stage1_predicate_agrees_with_the_real_evaluate_on_sampled_vec
     }
     rng = random.Random(20260820)
     for _ in range(200):
-        base = {t: rng.randint(0, STANDARD_ATTEMPTS[t]) for t in sorted(SUPPORTED)}
-        cand = {t: rng.randint(0, STANDARD_ATTEMPTS[t]) for t in sorted(SUPPORTED)}
+        # Only the GAIN set is sampled, and the guards are held equal on both sides.
+        # The predicate models the supported-set mean and nothing else, while
+        # `evaluate()` also applies whole-suite vetoes (a collapse on ANY task, guards
+        # included) — sampling the guards too would compare the predicate against
+        # behavior it never claimed to reproduce.
+        base = {t: rng.randint(0, STANDARD_ATTEMPTS[t]) for t in sorted(SUPPORTED)} | _HELD
+        cand = {t: rng.randint(0, STANDARD_ATTEMPTS[t]) for t in sorted(SUPPORTED)} | _HELD
         b = _results(base, STANDARD_ATTEMPTS)
         c = _results(cand, STANDARD_ATTEMPTS)
+        # The predicate reads the GAIN set alone — that is the mean the rule judges —
+        # even though the results above carry every covered task.
         diffs = {
             t: Fraction(cand[t], STANDARD_ATTEMPTS[t]) - Fraction(base[t], STANDARD_ATTEMPTS[t])
             for t in sorted(SUPPORTED)
@@ -443,8 +610,8 @@ def test_the_joint_stage2_predicate_agrees_with_the_real_confirmed_on_sampled_ve
         null_task_quantile,
     )
 
-    cal = load_calibration(REAL_MODEL)
-    attempts = {t: 10 for t in SUPPORTED}
+    cal = installed_calibration()
+    attempts = {t: 10 for t in COVERED}
     quantiles = {
         split: null_gain_quantile(
             {t: cal.null_rates[t] for t in sorted(SUPPORTED) if SPLIT_OF[t] == split},
@@ -461,8 +628,10 @@ def test_the_joint_stage2_predicate_agrees_with_the_real_confirmed_on_sampled_ve
     rng = random.Random(2026821)
     for i in range(200):
         improved = carrier_sets[i % len(carrier_sets)]
-        base = {t: rng.randint(0, 10) for t in sorted(SUPPORTED)}
-        cand = {t: rng.randint(0, 10) for t in sorted(SUPPORTED)}
+        # Gain set only; the guards are held equal on both sides (see the stage-1 sweep
+        # above for why).
+        base = {t: rng.randint(0, 10) for t in sorted(SUPPORTED)} | _UNMOVED
+        cand = {t: rng.randint(0, 10) for t in sorted(SUPPORTED)} | _UNMOVED
         b, c = _results(base, attempts), _results(cand, attempts)
         diffs = {t: Fraction(cand[t] - base[t], 10) for t in sorted(SUPPORTED)}
         first = Decision(
@@ -474,7 +643,7 @@ def test_the_joint_stage2_predicate_agrees_with_the_real_confirmed_on_sampled_ve
             threshold_ho=0.0,
             evidence_split=SPLIT_OF[improved[0]],
             improved_tasks=improved,
-            confirm_tasks=tuple(sorted(SUPPORTED)),
+            confirm_tasks=tuple(sorted(COVERED)),
             raw={"regime": "section_calibration", "calibration_digest": calibration_digest(cal)},
         )
         # `confirmed()` requires the decision digest too, whenever a calibration is in
@@ -499,13 +668,45 @@ def test_the_guard_set_the_power_model_uses_is_the_one_the_pipeline_confirms_wit
     assert _SECTION_CONFIRM_GUARDS["compaction"] is CONFIRMATION_GUARDS
 
 
+def test_this_modules_docstring_describes_the_artifact_that_is_actually_committed():
+    """The docstring above states a terminal state, and a stated state nobody checks
+    drifts — this one already described a superseded artifact twice.
+
+    Every claim in it is re-derived from `model-r2.json` here first and only then looked
+    for in the prose, the same discipline `tests/test_calibration_record.py` applies to
+    the README beside the artifact.
+    """
+    model = committed_model()
+    fitness = model["fitness"]
+    assert tuple(p["label"] for p in model["provenance"]) == P2C_ARMS
+    assert set(model["null_model"]) == {"A1", "G2", "G4", "G5", "CMP-5", "CMP-6", "CMP-7"}
+    assert fitness["fit"] is False
+    assert fitness["grain"]["pass"] is True
+    assert fitness["goodness"]["pass"] is False
+    assert fitness["stability"]["pass"] is False
+
+    doc = " ".join((__doc__ or "").split())
+    assert "ten arms" in doc and "seven rated tasks" in doc
+    assert "GOODNESS and STABILITY" in doc, "both refusing checks, named"
+    assert "GRAIN passes" in doc
+    assert "0.00996" in doc and "17/79" in doc, "the goodness refusal, in its own numbers"
+    for task in ("CMP-5", "CMP-6", "G4"):
+        assert task in doc
+
+
 def test_stability_publishes_a_leave_one_out_margin_for_every_arm():
     """Contract amendment 4: the leave-one-out margins are published, not merely
     consulted. Each removed arm gets the pooled quantile without it, the grain bucket
     that quantile lands in, and the coverage the FULL pool's threshold still holds
-    under that reduced pool — the slack that says how close the verdict came."""
-    stability = installed_model()["fitness"]["stability"]
-    arms = set(FULL_ARMS) | set(SUBSET_ARMS)
+    under that reduced pool — the slack that says how close the verdict came.
+
+    Re-keyed to the Phase 2c pooling, and the margins now carry the refusal itself, so
+    this test reads the reason `fitness.fit` is false rather than only the shape of the
+    rows: dropping ONE subset arm moves the held-in quantile a whole grain bucket, from
+    4/9 to 1/3. That is what "not stable" means here, said in numbers.
+    """
+    stability = committed_model()["fitness"]["stability"]
+    arms = set(P2C_ARMS)
     for split in ("held_in", "held_out"):
         margins = stability[split]["leave_one_out"]
         assert set(margins) == arms, split
@@ -516,61 +717,163 @@ def test_stability_publishes_a_leave_one_out_margin_for_every_arm():
             assert 0 <= cov <= 1, (split, label)
             assert Fraction(row["slack"]) == cov - Fraction(39, 40)
 
+    held_in = stability["held_in"]
+    moved = held_in["moved_excluding"]
+    assert set(moved) == {"p2c-null-cmp-d"}, (
+        "one arm carries the refusal; if that has become more or fewer arms, the "
+        "recorded reason for fit=false has changed and the docs saying so are stale"
+    )
+    assert Fraction(held_in["full_quantile"]) == Fraction(4, 9)
+    assert Fraction(moved["p2c-null-cmp-d"]) == Fraction(1, 3)
+    # And the margin published for that arm agrees with the summary line above — the
+    # two are written by different code paths and could disagree.
+    assert Fraction(margins["p2c-null-cmp-d"]["quantile"]) == Fraction(3, 5), "held_out is stable"
+    assert Fraction(held_in["leave_one_out"]["p2c-null-cmp-d"]["quantile"]) == Fraction(1, 3)
+    assert held_in["pass"] is False and stability["held_out"]["pass"] is True
+
 
 # ---------------------------------------------------------------------------
 # 6. CONDITIONAL FALSE-CONFIRM RATE (S6)
 # ---------------------------------------------------------------------------
 
 
-def test_the_artifact_publishes_the_false_confirm_rate_conditional_on_the_designated_baseline():
-    """Every real judgment compares a candidate against ONE recorded baseline arm,
-    not against a fresh draw from the null. The marginal false-CONFIRM probability
-    averages over baselines that will never be used again; the conditional one is the
-    number that describes the comparison the pipeline actually makes."""
+def test_the_false_confirm_block_publishes_a_marginal_rate_and_a_null_conditional():
+    """Every real judgment compares a candidate against ONE recorded baseline arm, not
+    against a fresh draw from the null. The marginal false-CONFIRM probability averages
+    over baselines that will never be used again; the conditional one is the number that
+    describes the comparison the pipeline actually makes.
+
+    The Phase 2c pooling has no designated baseline in it — `r2-null-full-a` belongs to
+    the superseded round-2 protocol — so that number does not exist here, and the
+    artifact says so with `null` and a `baseline_note` rather than inventing one. What
+    is asserted is exactly that: a real marginal, an absent conditional, and a stated
+    reason. `installed_model()` covers the other branch, where the arm IS present and
+    every conditional field is filled in.
+    """
     from loop.calibrate import DESIGNATED_BASELINE
 
-    fc = installed_model()["fitness"]["false_confirm"]
-    assert fc["baseline_arm"] == DESIGNATED_BASELINE == "r2-null-full-a"
+    fc = committed_model()["fitness"]["false_confirm"]
+    assert fc["baseline_arm"] is None
+    assert fc["conditional"] is None and fc["conditional_float"] is None
+    assert "baseline_counts" not in fc, "no baseline, so no counts to publish"
+    assert DESIGNATED_BASELINE in fc["baseline_note"]
+    assert "no designated baseline" in fc["baseline_note"]
+
     assert Fraction(fc["marginal"]) >= 0
-    assert Fraction(fc["conditional"]) >= 0
     assert fc["marginal_float"] == pytest.approx(float(Fraction(fc["marginal"])))
-    assert fc["conditional_float"] == pytest.approx(float(Fraction(fc["conditional"])))
     assert set(fc["by_evidence_split"]) == {"held_in", "held_out"}
-    assert fc["baseline_counts"]["A1"] == [2, 3]
+    total = sum(Fraction(v["marginal"]) for v in fc["by_evidence_split"].values())
+    assert total == Fraction(fc["marginal"]), "the split rows must sum to the total"
+    for row in fc["by_evidence_split"].values():
+        assert row["conditional"] is None
 
 
-def test_the_conditional_false_confirm_rate_matches_a_direct_enumeration(tmp_path):
-    """Independently re-derived: fix the designated baseline arm's OWN counts, draw
-    the candidate side at the pooled null rates, and count the mass that CONFIRMs."""
-    from itertools import product
+def _committed_pooling() -> tuple[dict[str, Fraction], dict[str, int], dict[str, Fraction]]:
+    """The committed artifact's own rates, standard attempt counts and stage-1 quantiles.
 
-    from loop.calibrate import _binom_pmf, _stage1_verdict, null_gain_quantile
+    Read from the artifact, never hardcoded: the attempt counts come from the GRAIN rows
+    (which record what they were computed over), so a re-derivation cannot silently use
+    a different denominator from the one the number was published at.
+    """
+    from loop.calibrate import null_gain_quantile
 
-    cal = load_calibration(REAL_MODEL)
+    model = committed_model()
     tasks = sorted(SUPPORTED)
-    baseline_counts = {
-        t: installed_model()["null_model"][t]["per_arm"]["r2-null-full-a"][0] for t in tasks
+    rates = {t: Fraction(model["null_model"][t]["null_rate"]) for t in tasks}
+    attempts = {
+        t: int(n)
+        for split in ("held_in", "held_out")
+        for t, n in model["fitness"]["grain"][split]["attempts"].items()
     }
+    assert set(attempts) == set(tasks), attempts
+    level = Fraction(model["coverage_level"])
     quantiles = {
         split: null_gain_quantile(
-            {t: cal.null_rates[t] for t in tasks if SPLIT_OF[t] == split},
-            {t: STANDARD_ATTEMPTS[t] for t in tasks if SPLIT_OF[t] == split},
-            {t: STANDARD_ATTEMPTS[t] for t in tasks if SPLIT_OF[t] == split},
-            cal.coverage_level,
+            {t: rates[t] for t in tasks if SPLIT_OF[t] == split},
+            {t: attempts[t] for t in tasks if SPLIT_OF[t] == split},
+            {t: attempts[t] for t in tasks if SPLIT_OF[t] == split},
+            level,
         )
         for split in ("held_in", "held_out")
     }
-    pmfs = {t: _binom_pmf(STANDARD_ATTEMPTS[t], cal.null_rates[t]) for t in tasks}
+    return rates, attempts, quantiles
+
+
+def _independent_diff_pmf(
+    n: int, p_base: Fraction, p_cand: Fraction | None = None
+) -> dict[Fraction, Fraction]:
+    """P((cand - base)/n) for independent Binomial(n, p_base) and Binomial(n, p_cand)
+    draws, convolved here. `p_cand` defaults to `p_base` — the null-versus-null case.
+
+    `loop.calibrate` has `_task_diff_pmf` for this and caches it. This convolution is
+    written out again on purpose: the difference distribution is the one step where a
+    quiet error (an off-by-one in the sign, a reused cache keyed on the wrong argument)
+    would move every published number at once and look like nothing.
+    """
+    from loop.calibrate import _binom_pmf
+
+    pmf_base = _binom_pmf(n, p_base)
+    pmf_cand = _binom_pmf(n, p_base if p_cand is None else p_cand)
+    out: dict[Fraction, Fraction] = {}
+    for a in range(n + 1):
+        for b in range(n + 1):
+            d = Fraction(b - a, n)
+            out[d] = out.get(d, Fraction(0)) + pmf_base[a] * pmf_cand[b]
+    return out
+
+
+def test_the_committed_artifact_is_exactly_what_the_writer_produces_from_its_own_arms():
+    """The artifact is reproducible from the record, byte for byte.
+
+    Two things this pins at once. A hand-edit to `model-r2.json` fails here even if it
+    survives the loader's own recomputation, because this compares the WHOLE file and
+    not just the blocks `recompute_model` re-runs. And a change to the writer that moves
+    a published number fails here too, which is the point: the committed artifact and
+    the code that writes it are one claim, so they get regenerated together or not at
+    all.
+
+    It is also the assertion that the null-conditional fix changed nothing else. That
+    edit rewrote six rows' conditional fields; every marginal number in this file is
+    unchanged, and "unchanged" is only worth saying if something checks it.
+    """
+    from loop.calibrate import MODEL_TASKS, SUPPORTED, calibrate_model
+
+    regenerated = calibrate_model(list(P2C_ARMS), RESULTS, SUPPORTED, coverage=MODEL_TASKS)
+    assert regenerated == committed_model()
+
+
+def test_the_marginal_false_confirm_rate_matches_a_direct_enumeration():
+    """Independently re-derived: draw BOTH arms from the pooled null rates and count
+    the mass that CONFIRMs, over the ten-arm pooling the artifact actually publishes.
+
+    This was the conditional rate's verifier while a designated baseline existed in the
+    pool. It is not retired now that one does not — the marginal is the number the
+    artifact still publishes, so the marginal is what gets a second implementation. The
+    conditional is asserted ABSENT in the same breath, because "nobody computed it" and
+    "it came out zero" are the two readings this artifact must never blur.
+    """
+    from itertools import product
+
+    from loop.calibrate import _stage1_verdict
+
+    rates, attempts, quantiles = _committed_pooling()
+    tasks = sorted(SUPPORTED)
+    per_task = [sorted(_independent_diff_pmf(attempts[t], rates[t]).items()) for t in tasks]
+
     total = Fraction(0)
-    for combo in product(*(range(STANDARD_ATTEMPTS[t] + 1) for t in tasks)):
+    for combo in product(*per_task):
         p = Fraction(1)
-        diffs = {}
-        for t, k in zip(tasks, combo, strict=True):
-            p *= pmfs[t][k]
-            diffs[t] = Fraction(k - baseline_counts[t], STANDARD_ATTEMPTS[t])
-        if p and _stage1_verdict(diffs, SPLIT_OF, quantiles)[0]:
+        for _, prob in combo:
+            p *= prob
+        if not p:
+            continue
+        diffs = {t: d for t, (d, _) in zip(tasks, combo, strict=True)}
+        if _stage1_verdict(diffs, SPLIT_OF, quantiles)[0]:
             total += p
-    assert Fraction(installed_model()["fitness"]["false_confirm"]["conditional"]) == total
+
+    fc = committed_model()["fitness"]["false_confirm"]
+    assert Fraction(fc["marginal"]) == total
+    assert fc["conditional"] is None, "absent, not zero"
 
 
 # ---------------------------------------------------------------------------
@@ -578,6 +881,14 @@ def test_the_conditional_false_confirm_rate_matches_a_direct_enumeration(tmp_pat
 # ---------------------------------------------------------------------------
 
 LEGACY_RULE_TEXT = "## Validation — acceptance rule `Δ_in ≥ 0, Δ_ho ≥ 0, max(Δ_in, Δ_ho) > 0`"
+
+
+# The covered guards, unmoved, at the confirmation-shaped attempt count every fixture
+# below uses. They are required in both arms (`_require_supported` reads the COVERED
+# set) and identical on both sides, so they enter no split mean and move no verdict.
+_UNMOVED = {"CMP-5": 5, "CMP-6": 5, "CMP-7": 6}
+# The same idea at the suite's standard attempt counts (3 held-in / 5 held-out).
+_HELD = {"CMP-5": 1, "CMP-6": 2, "CMP-7": 2}
 
 
 def _results(passes: dict[str, int], attempts: dict[str, int], fingerprint=None) -> dict:
@@ -599,10 +910,10 @@ def _calibrated_record(tmp_path) -> tuple[ValidationRecord, dict, dict]:
     """A ValidationRecord whose `rule` really was produced by the calibrated rule."""
     from loop.acceptance import evaluate
 
-    cal = load_calibration(REAL_MODEL)
-    attempts = {t: 10 for t in SUPPORTED}
-    base = _results({"A1": 4, "G4": 1, "G5": 4, "G2": 3}, attempts)
-    cand = _results({"A1": 10, "G4": 6, "G5": 10, "G2": 9}, attempts)
+    cal = installed_calibration()
+    attempts = {t: 10 for t in COVERED}
+    base = _results({"A1": 4, "G4": 1, "G5": 4, "G2": 3, **_UNMOVED}, attempts)
+    cand = _results({"A1": 10, "G4": 6, "G5": 10, "G2": 9, **_UNMOVED}, attempts)
     decision = evaluate(base, cand, calibration=cal)
     assert decision.outcome == "CONFIRM", decision.reasons
     record = ValidationRecord(
@@ -654,7 +965,10 @@ def test_a_calibrated_decisions_pr_body_states_the_rule_that_actually_ran(tmp_pa
     quantile = record.rule["raw"]["null_quantiles"]["held_in"]["quantile"]
     assert quantile in body, "the supported-set quantile actually gated on"
     assert record.rule["raw"]["null_quantiles"]["held_out"]["quantile"] in body
-    assert "iterations/calibration-compaction" in body, "the artifact's own path"
+    # The artifact's OWN source string, read off the record rather than spelled out:
+    # the fixture's artifact lives in a temp dir (see `installed_model`), and pinning a
+    # literal path here would test the fixture instead of the rendering.
+    assert record.rule["calibration"]["source"] in body, "the artifact's own source"
     sha = real_fingerprint()["runner_sha"]
     assert sha[:12] in body, "the artifact's computed_at_runner_sha"
     assert "A1 10v10" in body, "the counts the quantile was computed at"
@@ -675,9 +989,9 @@ def test_a_legacy_decisions_pr_body_is_unchanged(tmp_path):
         baseline_fingerprint=real_fingerprint(),
         candidate_fingerprint=real_fingerprint(),
     )
-    attempts = {t: 10 for t in SUPPORTED}
-    base = _results({"A1": 4, "G4": 1, "G5": 4, "G2": 3}, attempts)
-    cand = _results({"A1": 6, "G4": 1, "G5": 4, "G2": 3}, attempts)
+    attempts = {t: 10 for t in COVERED}
+    base = _results({"A1": 4, "G4": 1, "G5": 4, "G2": 3, **_UNMOVED}, attempts)
+    cand = _results({"A1": 6, "G4": 1, "G5": 4, "G2": 3, **_UNMOVED}, attempts)
     body = pr_body(CANDIDATE, record, CLUSTER, base, cand)
     assert LEGACY_RULE_TEXT in body
     assert "null model" not in body.lower()
@@ -693,14 +1007,14 @@ def test_the_pr_body_renders_the_confirmed_stage_when_a_confirmation_promoted_it
     from loop.prpipe import pr_body
 
     record, base, cand = _calibrated_record(tmp_path)
-    cal = load_calibration(REAL_MODEL)
+    cal = installed_calibration()
     first = _first_decision(record)
     # A DIFFERENT pair for the confirmation, deliberately: reusing the first pass's
     # numbers would let this test pass on a body that rendered stage 1 and called it
     # the confirmation. The two stages' deltas must be distinguishable.
-    attempts = {t: 10 for t in SUPPORTED}
-    conf_base = _results({"A1": 3, "G4": 1, "G5": 3, "G2": 3}, attempts)
-    conf_cand = _results({"A1": 10, "G4": 7, "G5": 10, "G2": 9}, attempts)
+    attempts = {t: 10 for t in COVERED}
+    conf_base = _results({"A1": 3, "G4": 1, "G5": 3, "G2": 3, **_UNMOVED}, attempts)
+    conf_cand = _results({"A1": 10, "G4": 7, "G5": 10, "G2": 9, **_UNMOVED}, attempts)
     decision = confirmed(first, conf_base, conf_cand, calibration=cal)
     assert decision.outcome == ACCEPT, decision.reasons
     assert f"{decision.delta_in:+.4f}" != f"{record.rule['delta_in']:+.4f}", (
@@ -756,7 +1070,7 @@ def test_a_calibrated_first_decision_records_both_digests(tmp_path):
 
     record, _, _ = _calibrated_record(tmp_path)
     raw = record.rule["raw"]
-    cal = load_calibration(REAL_MODEL)
+    cal = installed_calibration()
     assert raw["calibration_digest"] == calibration_digest(cal)
     assert len(raw["calibration_digest"]) == 64
     first = _first_decision(record)
@@ -769,29 +1083,26 @@ def test_swapping_the_artifact_between_the_two_stages_refuses(tmp_path):
     and pinned to the right supported set, so every other check passes — only a
     digest of the rates the first decision was actually judged against can see it."""
     from loop.acceptance import confirmed
-    from loop.calibrate import SUPPORTED as MODEL_SUPPORTED
-    from loop.calibrate import calibrate_model
 
     record, base, cand = _calibrated_record(tmp_path)
     first = _first_decision(record)
 
-    # A SECOND null model, measured the same way from the same protocol, differing by
-    # one attempt on one arm (r2-null-cmp-a's G4 goes 2/10 -> 1/10, pooling G4 at 7/89
-    # instead of 8/89). It is fit, fresh, and pinned to the right supported set, so
-    # every check the loader has ever had passes on it: it installs cleanly. Only the
-    # digest of the rates the FIRST decision was judged against can tell that this is
-    # not that model.
-    arms_dir = tmp_path / "swapped-arms"
-    arms_dir.mkdir()
-    for label in FULL_ARMS + SUBSET_ARMS:
-        data = arm(label)
-        if label == "r2-null-cmp-a":
-            data["tasks"]["G4"]["passes"] = 1
-            data["tasks"]["G4"]["pass_fraction"] = 0.1
-        (arms_dir / f"{label}.json").write_text(json.dumps(data))
-    swapped = calibrate_model(list(FULL_ARMS + SUBSET_ARMS), arms_dir, MODEL_SUPPORTED)
+    # A SECOND null model, MEASURED the same way from the same protocol and differing by
+    # one attempt on one arm (G4 loses a pass on the first subset arm, so the pool
+    # moves). It is fit, fresh, and pinned to the right covered set, so every check the
+    # loader has ever had passes on it: it installs cleanly. Only the digest of the
+    # rates the FIRST decision was judged against can tell that this is not that model.
+    def one_fewer_g4_pass(label, tasks):
+        if label == SUBSET_ARMS[0] and tasks["G4"]["passes"] > 1:
+            tasks["G4"]["passes"] -= 1
+            tasks["G4"]["pass_fraction"] = round(tasks["G4"]["passes"] / tasks["G4"]["attempts"], 4)
+
+    swapped = installed_model(one_fewer_g4_pass)
     assert swapped["fitness"]["fit"] is True, "a swap only proves something if it installs"
-    assert swapped["null_model"]["G4"]["null_rate"] == "7/89"
+    assert (
+        swapped["null_model"]["G4"]["null_rate"]
+        != installed_model()["null_model"]["G4"]["null_rate"]
+    ), "fixture precondition: the second model really did pool differently"
     path = tmp_path / "other-model.json"
     path.write_text(json.dumps(swapped))
     other = load_calibration(path)
@@ -837,9 +1148,9 @@ def test_an_uncalibrated_decision_carries_no_digests_and_is_confirmed_as_before(
     """Byte-identity: the uncalibrated regime gains nothing, not even a new key."""
     from loop.acceptance import evaluate
 
-    attempts = {t: 10 for t in SUPPORTED}
-    base = _results({"A1": 4, "G4": 1, "G5": 4, "G2": 3}, attempts)
-    cand = _results({"A1": 9, "G4": 5, "G5": 9, "G2": 8}, attempts)
+    attempts = {t: 10 for t in COVERED}
+    base = _results({"A1": 4, "G4": 1, "G5": 4, "G2": 3, **_UNMOVED}, attempts)
+    cand = _results({"A1": 9, "G4": 5, "G5": 9, "G2": 8, **_UNMOVED}, attempts)
     decision = evaluate(base, cand)
     assert "calibration_digest" not in decision.raw
     assert "decision_digest" not in decision.raw

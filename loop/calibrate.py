@@ -19,8 +19,13 @@ from this repo:
 - Round-2 arm shapes: three full-suite arms at the suite's standard attempt
   counts (3 held-in, 5 held-out) and five `--only A1 G2 G4 G5 --attempts 10`
   subset arms. Pooled per-task attempts therefore run to 59 (65 for G2).
-- The section this calibrates is `compaction`; its supported task set is pinned
-  to {A1, G2, G4, G5} (`SUPPORTED` below) and the loader refuses any other set.
+- The section this calibrates is `compaction`. Two pinned sets, not one, from
+  Phase 2c on: `SUPPORTED` ({A1, G2, G4, G5}) is what the rule's GAIN judgment
+  averages over and what every fitness check below is computed on, while
+  `MODEL_TASKS` (supported ∪ guards) is what the artifact must carry a pooled
+  RATE for -- a guard is adjudicated one task at a time and cannot be judged
+  without its own null distribution. They coincided through round 2, which is
+  why `calibrate_model`'s `coverage=` defaults to `supported`.
 
 Pure computation: no subprocess, no network, no writes except the one analysis
 artifact `main()` produces. Every rate comparison stays exact (`Fraction` of the
@@ -97,7 +102,28 @@ SUPPORTED = frozenset({"A1", "G2", "G4", "G5"})
 # computed against a different guard set than the one the confirmation actually
 # applies would describe a pipeline nobody runs. `loop.validate` imports this
 # constant instead of restating it, so the two cannot drift.
-CONFIRMATION_GUARDS = frozenset({"A1", "G2", "G5"})
+#
+# The Phase 2c scenario guards (phase2c-guards-contract.md §1-§3, §6): CMP-5
+# (supersession), CMP-6 (judged meaning-preservation), CMP-7 (buried facts).
+# They exist to catch a compaction fix mined from G4 that generalizes only to
+# G4's shape, so they are guards and never miners.
+SCENARIO_GUARDS = frozenset({"CMP-5", "CMP-6", "CMP-7"})
+CONFIRMATION_GUARDS = frozenset({"A1", "G2", "G5"}) | SCENARIO_GUARDS
+
+# The null model's task COVERAGE: supported ∪ guards (contract §6). Wider than
+# `SUPPORTED`, which stays the set the rule's GAIN judgment averages over -- the
+# guards are judged one task at a time, against their own null distribution, so
+# each needs a pooled rate of its own while none of them enters a split mean.
+# DERIVED from the sets it unions rather than typed out again: a hand-listed copy
+# is how a guard gets added in one place and missed by the campaign that has to
+# produce its rate.
+#
+# Consequence, stated where it will be met: no artifact on disk covers these seven
+# tasks yet, so `compaction` is LOUDLY uncalibrated until the campaign at the new
+# runner hash re-records (contract amendment 2). That is not a transition hazard —
+# this branch already moved the runner hash, so every artifact recorded before it
+# was stale for these measurements anyway.
+MODEL_TASKS = SUPPORTED | CONFIRMATION_GUARDS
 
 # Round-2's one-sided coverage, as the exact Fraction every quantile in this
 # module is computed at. 975/1000 reduces to 39/40 -- kept spelled out at the
@@ -112,6 +138,13 @@ COVERAGE_LEVEL = Fraction(975, 1000)
 # standard 3/5 a first pass uses.
 POWER_OFFSET = Fraction(1, 5)
 POWER_ATTEMPTS = 10
+
+# The attempt count a CONFIRMATION judges one task at (`--attempts 10`), and therefore
+# the count every per-task gate's null quantile and grain are computed at. Aliased from
+# `POWER_ATTEMPTS` rather than typed again: the power block already publishes what a
+# per-task gate can detect at this count, and a grain certified at a different count
+# than the power published beside it would describe two different pipelines.
+CONFIRMATION_ATTEMPTS = POWER_ATTEMPTS
 
 # The end-to-end alternatives the artifact publishes a joint detection rate for:
 # +0.2 on ONE carrier (every supported task gets its own row) and +0.3/+0.5
@@ -717,36 +750,41 @@ def _pooled_counts(arm_results: dict[str, dict], labels: list[str], task: str) -
 
 
 def _check_supported_set(
-    arm_results: dict[str, dict], labels: list[str], supported: frozenset[str]
+    arm_results: dict[str, dict], labels: list[str], coverage: frozenset[str]
 ) -> None:
-    """The pinned supported set {A1, G2, G4, G5}, held exactly.
+    """The pinned COVERAGE set, held exactly -- {A1, G2, G4, G5} through round 2,
+    and supported ∪ guards from Phase 2c on (`MODEL_TASKS`).
 
     A subset (`--only`, `filter` key present) arm carrying a task OUTSIDE
-    `supported` refuses -- a filtered run is a promise that only the
-    supported set was measured, and a task the pool was never meant to cover
+    `coverage` refuses -- a filtered run is a promise that only the
+    covered set was measured, and a task the pool was never meant to cover
     appearing there means the arm does not match the protocol this artifact
     assumes. Independently, ANY arm (filtered or full-suite) missing a
-    supported task refuses -- the pool needs every arm's count on every
-    supported task, never a partial denominator standing in for the whole; a
+    covered task refuses -- the pool needs every arm's count on every
+    covered task, never a partial denominator standing in for the whole; a
     real full-suite arm always carries the whole suite, so this branch only
     ever fires on a truncated or mislabeled result file.
+
+    The guards are the reason this is coverage rather than support: a guard is
+    adjudicated against its OWN pooled rate, so an arm that skipped it leaves the
+    guard gated on nothing while the artifact still reads as complete.
     """
     for label in labels:
         result = arm_results[label]
         tasks = set(result["tasks"])
         if "filter" in result:
-            extra = tasks - supported
+            extra = tasks - coverage
             if extra:
                 raise ValueError(
                     f"arm {label!r} is a subset run carrying task(s) outside the "
-                    f"pinned supported set {sorted(supported)}: {sorted(extra)}"
+                    f"pinned supported set {sorted(coverage)}: {sorted(extra)}"
                 )
-        missing = supported - tasks
+        missing = coverage - tasks
         if missing:
             raise ValueError(
                 f"arm {label!r} is missing supported task(s) {sorted(missing)} -- the "
                 f"null model needs every arm to cover the pinned supported set "
-                f"{sorted(supported)}"
+                f"{sorted(coverage)}"
             )
 
 
@@ -886,12 +924,37 @@ def _check_grain(
     standard_attempts: dict[str, int],
     supported: frozenset[str],
     level: Fraction,
+    guards: frozenset[str] = frozenset(),
+    *,
+    task_attempts: int = CONFIRMATION_ATTEMPTS,
 ) -> dict:
-    """Fitness check 1, GRAIN: at standard attempt counts, the
-    computed coverage-level gain quantile must EXCEED the split's grain -- a
-    threshold sitting at or below the finest movement a real run can even
-    produce gates nothing, the round-1 defect that sank the withdrawn artifact
-    (its held-in bound, 0.1, sat below the 3-attempt grain of 1/9).
+    """Fitness check 1, GRAIN: a threshold must EXCEED the finest movement the
+    judgment it gates can even produce. A bound at or below its own grain gates
+    nothing -- the round-1 defect that sank the withdrawn artifact (its held-in
+    bound, 0.1, sat below the 3-attempt grain of 1/9).
+
+    TWO gates, because the rule has two shapes of judgment and each has its own
+    grain:
+
+    - The split rows, over `supported` at STANDARD attempt counts: the gain
+      gate's bound against the split MEAN's grain. Unchanged.
+    - `per_task`, over `guards` at the CONFIRMATION's attempt count: a guard is
+      adjudicated one task at a time against its own null quantile, never through
+      a split mean, so its grain is one attempt of one task (1/`task_attempts`)
+      and its bound is `null_task_quantile`, not `null_gain_quantile`. Nothing
+      checked this before, which meant a guard could be RATED and never CHECKED --
+      a gate inside an artifact reading `fit: true` that no observation could
+      fail. That is the round-1 defect one level down.
+
+    `guards`, not the whole covered set, and the omission is deliberate: the gain
+    set's tasks already enter a split row, and the ONE covered task that is
+    neither a guard nor in a split row cannot exist for this section (G4 is in the
+    gain set). Keeping the gain set out of `per_task` also keeps the loader's
+    degenerate-rate refusal reachable: a pooled rate of 0 or 1 fails this check
+    outright, and for a task that fails it here the loader never gets past
+    `fitness.fit`, which reports "re-run the arms" where the truth is "this task
+    is broken". Guards trade that message away for the gate; the gain set keeps
+    it (see `loop.validate.calibration_status`).
     """
     result: dict = {}
     overall = True
@@ -911,6 +974,21 @@ def _check_grain(
             "grain": _fraction_str(grain),
             "pass": ok,
         }
+    per_task: dict[str, dict] = {}
+    task_grain = Fraction(1, task_attempts)
+    for task in sorted(guards):
+        rate = Fraction(*null_counts[task])
+        quantile = null_task_quantile(rate, task_attempts, task_attempts, level)
+        ok = quantile > task_grain
+        overall = overall and ok
+        per_task[task] = {
+            "rate": _fraction_str(rate),
+            "attempts": task_attempts,
+            "quantile": _fraction_str(quantile),
+            "grain": _fraction_str(task_grain),
+            "pass": ok,
+        }
+    result["per_task"] = per_task
     result["pass"] = overall
     return result
 
@@ -934,7 +1012,7 @@ _GOODNESS_ALPHA = Fraction(1, 100)
 def _check_goodness(
     arm_results: dict[str, dict],
     labels: list[str],
-    supported: frozenset[str],
+    covered: frozenset[str],
     null_counts: dict[str, tuple[int, int]],
 ) -> dict:
     """Fitness check 2, GOODNESS: for each task, an exact binomial
@@ -944,10 +1022,15 @@ def _check_goodness(
     is not a defensible null measurement (an outlier arm masquerading as
     noise), recorded per task+arm so the artifact shows exactly which
     arm/task combination failed, not only the aggregate verdict.
+
+    Over the COVERED set, guards included. A guard's pooled rate is the whole
+    denominator of its own gate, so an outlier arm inside it corrupts a real
+    adjudication -- and while goodness looked only at the gain set, that arm was
+    invisible: the guards were rated and the rates were never questioned.
     """
     per_task: dict[str, dict] = {}
     overall = True
-    for task in sorted(supported):
+    for task in sorted(covered):
         p = Fraction(*null_counts[task])
         per_arm: dict[str, dict] = {}
         for label in labels:
@@ -973,6 +1056,9 @@ def _check_stability(
     task_split: dict[str, str],
     standard_attempts: dict[str, int],
     level: Fraction,
+    covered: frozenset[str] | None = None,
+    *,
+    task_attempts: int = CONFIRMATION_ATTEMPTS,
 ) -> dict:
     """Fitness check 3, STABILITY: leave-one-arm-out pooled rates must
     not shift a standard-count threshold across a REPRESENTABLE-MOVEMENT
@@ -991,9 +1077,19 @@ def _check_stability(
     zero-attempt row reaches here unchecked. Every arm, filtered or not, must
     record positive attempts for every supported task; the refusal names the arm
     and the task, the way every other refusal in this module does.
+
+    TWO shapes again, matching `_check_grain`: the split rows over `supported` at
+    standard counts, and `per_task` leave-one-out over `covered` at the
+    confirmation's count. The per-task half is where a GUARD's stability can be
+    seen at all -- a guard never enters a split mean, so a bound of its own that
+    moves across a grain bucket when one arm is dropped was a bound the artifact
+    published as stable while nothing had looked at it. It covers the whole rated
+    set rather than the guards alone: the gain set's tasks are also adjudicated one
+    at a time, as a confirmation's CARRIERS, and that bound has the same exposure.
     """
+    covered = supported if covered is None else covered
     for label in labels:
-        for task in sorted(supported):
+        for task in sorted(covered):
             row = arm_results[label]["tasks"].get(task)
             if row is None:
                 continue  # `_check_supported_set` already refuses a missing task
@@ -1051,6 +1147,46 @@ def _check_stability(
             "leave_one_out": margins,
             "pass": ok,
         }
+    per_task: dict[str, dict] = {}
+    task_grain = Fraction(1, task_attempts)
+    attempts_one = {"_task": task_attempts}
+    for task in sorted(covered):
+        rate = Fraction(*_pooled_counts(arm_results, labels, task))
+        full_q = null_task_quantile(rate, task_attempts, task_attempts, level)
+        full_bucket = full_q // task_grain
+        moved = {}
+        margins = {}
+        if len(labels) > 1:
+            for held_out in labels:
+                remaining = [label for label in labels if label != held_out]
+                loo_rate = Fraction(*_pooled_counts(arm_results, remaining, task))
+                loo_q = null_task_quantile(loo_rate, task_attempts, task_attempts, level)
+                if loo_q // task_grain != full_bucket:
+                    moved[held_out] = _fraction_str(loo_q)
+                # Same margin as the split rows, on the single-task construction --
+                # `null_task_quantile` is `null_gain_quantile` over one synthetic key,
+                # so the cdf beside it has to be taken the same way or the two would be
+                # answering questions about different distributions.
+                coverage = null_gain_cdf({"_task": loo_rate}, attempts_one, attempts_one, full_q)
+                margins[held_out] = {
+                    "quantile": _fraction_str(loo_q),
+                    "bucket": int(loo_q // task_grain),
+                    "coverage_at_full_quantile": _fraction_str(coverage),
+                    "slack": _fraction_str(coverage - level),
+                    "slack_float": float(coverage - level),
+                }
+        ok = not moved
+        overall = overall and ok
+        per_task[task] = {
+            "rate": _fraction_str(rate),
+            "attempts": task_attempts,
+            "full_quantile": _fraction_str(full_q),
+            "grain": _fraction_str(task_grain),
+            "moved_excluding": moved,
+            "leave_one_out": margins,
+            "pass": ok,
+        }
+    result["per_task"] = per_task
     result["pass"] = overall
     return result
 
@@ -1335,6 +1471,7 @@ def _end_to_end_row(
     guards: frozenset[str],
     attempts: int,
     baseline_counts: dict[str, int] | None,
+    baseline_note: str = "",
 ) -> dict:
     """One published joint detection rate: P(stage 1 CONFIRMs AND stage 2 ACCEPTs).
 
@@ -1351,6 +1488,14 @@ def _end_to_end_row(
     a detection rate beside a false-alarm rate without silently comparing a
     conditional number against a marginal one -- which is what the first version of
     this artifact invited.
+
+    When this pooling has NO designated baseline arm, there is nothing to be
+    conditional on and every conditional field is `None`, with `baseline_note`
+    carrying the resolver's own reason -- the same shape the false-CONFIRM block
+    publishes. It is written that way because the alternative is worse than useless:
+    folding an empty mass into a fraction wrote `0/1` and `0.0`, i.e. "this pipeline
+    detects a real improvement with probability exactly zero", a strong false claim
+    sitting beside a real marginal number a reader would compare it against.
     """
     alt = {
         t: min(Fraction(1), rates[t] + (offset if carrier in (None, t) else Fraction(0)))
@@ -1409,8 +1554,9 @@ def _end_to_end_row(
         )
 
     stage1_total, joint_total = totals(marginal_split, "")
+    have_baseline = baseline_counts is not None
     cond_stage1_total, cond_joint_total = totals(conditional_split, "conditional_")
-    return {
+    row = {
         "kind": kind,
         "offset": _fraction_str(offset),
         "carrier": carrier,
@@ -1421,25 +1567,39 @@ def _end_to_end_row(
         "stage1_confirm_float": float(stage1_total),
         "joint": _fraction_str(joint_total),
         "joint_float": float(joint_total),
-        "conditional_stage1_confirm": _fraction_str(cond_stage1_total),
-        "conditional_stage1_confirm_float": float(cond_stage1_total),
-        "conditional_joint": _fraction_str(cond_joint_total),
-        "conditional_joint_float": float(cond_joint_total),
+        "conditional_stage1_confirm": (_fraction_str(cond_stage1_total) if have_baseline else None),
+        "conditional_stage1_confirm_float": (float(cond_stage1_total) if have_baseline else None),
+        "conditional_joint": _fraction_str(cond_joint_total) if have_baseline else None,
+        "conditional_joint_float": float(cond_joint_total) if have_baseline else None,
         "by_evidence_split": {
             split: {
                 "stage1_confirm": _fraction_str(marginal_split[split]["stage1_confirm"]),
                 "stage1_confirm_float": float(marginal_split[split]["stage1_confirm"]),
                 "joint": _fraction_str(marginal_split[split]["joint"]),
                 "joint_float": float(marginal_split[split]["joint"]),
-                "conditional_stage1_confirm": _fraction_str(
-                    conditional_split[split]["conditional_stage1_confirm"]
+                "conditional_stage1_confirm": (
+                    _fraction_str(conditional_split[split]["conditional_stage1_confirm"])
+                    if have_baseline
+                    else None
                 ),
-                "conditional_joint": _fraction_str(conditional_split[split]["conditional_joint"]),
-                "conditional_joint_float": float(conditional_split[split]["conditional_joint"]),
+                "conditional_joint": (
+                    _fraction_str(conditional_split[split]["conditional_joint"])
+                    if have_baseline
+                    else None
+                ),
+                "conditional_joint_float": (
+                    float(conditional_split[split]["conditional_joint"]) if have_baseline else None
+                ),
             }
             for split in sorted(marginal_split)
         },
     }
+    if not have_baseline:
+        # On the ROW as well as on the block: rows are read one at a time (keyed by
+        # carrier or offset), and a null with no reason beside it invites the reader
+        # to supply one.
+        row["baseline_note"] = baseline_note
+    return row
 
 
 def _check_end_to_end(
@@ -1451,6 +1611,7 @@ def _check_end_to_end(
     guards: frozenset[str],
     baseline: tuple[str, dict[str, int]] | None,
     *,
+    baseline_note: str = "",
     offset: Fraction = POWER_OFFSET,
     attempts: int = POWER_ATTEMPTS,
     uniform_offsets: tuple[Fraction, ...] = END_TO_END_UNIFORM_OFFSETS,
@@ -1472,7 +1633,9 @@ def _check_end_to_end(
     or None when this pooling has no such arm. Every row carries a conditional rate
     against it beside the marginal one, so the detection rates and the false-CONFIRM
     rate published in the same artifact are conditional on the same recorded run and
-    can honestly be read against each other.
+    can honestly be read against each other. With no such arm, the conditional fields
+    are `None` and `baseline_note` (the resolver's own reason, shared verbatim with
+    the false-CONFIRM block) says so on the block and on every row.
     """
     rates = {t: Fraction(*null_counts[t]) for t in sorted(supported)}
     split_tasks = {
@@ -1522,6 +1685,7 @@ def _check_end_to_end(
             guards,
             attempts,
             baseline[1] if baseline else None,
+            baseline_note,
         )
         for carrier in sorted(supported)
     ]
@@ -1540,10 +1704,11 @@ def _check_end_to_end(
             guards,
             attempts,
             baseline[1] if baseline else None,
+            baseline_note,
         )
         for uniform in uniform_offsets
     ]
-    return {
+    block = {
         "confirmation_attempts": attempts,
         "guards": sorted(guards),
         "baseline_arm": baseline[0] if baseline else None,
@@ -1564,6 +1729,9 @@ def _check_end_to_end(
         ),
         "rows": rows,
     }
+    if baseline is None:
+        block["baseline_note"] = baseline_note
+    return block
 
 
 def designated_baseline_counts(
@@ -1705,6 +1873,7 @@ def _check_power(
     *,
     guards: frozenset[str] = CONFIRMATION_GUARDS,
     baseline: tuple[str, dict[str, int]] | None = None,
+    baseline_note: str = "",
     offset: Fraction = POWER_OFFSET,
     attempts: int = POWER_ATTEMPTS,
 ) -> dict:
@@ -1795,15 +1964,45 @@ def _check_power(
             level,
             guards,
             baseline,
+            baseline_note=baseline_note,
             offset=offset,
             attempts=attempts,
         ),
     }
 
 
-def calibrate_model(labels: list[str], results_dir: Path, supported: frozenset[str]) -> dict:
+def calibrate_model(
+    labels: list[str],
+    results_dir: Path,
+    supported: frozenset[str],
+    *,
+    coverage: frozenset[str] | None = None,
+    guards: frozenset[str] | None = None,
+) -> dict:
     """The round-2 null-MODEL artifact, from the named arms' results JSONs
     under `results_dir`.
+
+    `supported` is the set the rule's GAIN judgment averages over, and it is what
+    the split rows of every fitness check are computed on. `coverage` is the set
+    the model carries a pooled RATE for -- supported ∪ guards from Phase 2c on
+    (`MODEL_TASKS`), because a guard is adjudicated against its own null
+    distribution and cannot be judged without one. It defaults to `supported`,
+    which reproduces the round-2 artifact byte for byte.
+
+    The asymmetry is deliberate and is the contract's (§6): widening the gain set
+    would change the denominator of every split mean the rule judges, which is a
+    change to the rule, not to its coverage.
+
+    Fitness CERTIFIES what the model rates, not only what the gain judgment
+    averages over: goodness and the leave-one-out half of stability run over
+    `coverage`, and grain gains a per-task row for every task in `guards`. Rating a
+    guard without checking it published a gate nothing had measured -- see
+    `_check_grain` and `_check_stability` for what each half asks. `guards`
+    defaults to this program's declared confirmation guards restricted to what
+    THIS model rates; the restriction cannot hide a missing guard, because a guard
+    outside the covered set is refused three other places (`_check_supported_set`
+    on the way in, `loop.validate`'s covered-set pin, and `SectionCalibration`
+    itself). An explicitly-passed `guards` outside `coverage` is refused here.
 
     Refuses (`ValueError`, naming what's wrong) on: no labels; a duplicate
     label; a provenance mismatch across arms (the round-1 4 fields plus
@@ -1820,26 +2019,49 @@ def calibrate_model(labels: list[str], results_dir: Path, supported: frozenset[s
     Round-1's `calibrate()` and its output shape are untouched; this is a
     separate entry point, not a replacement in place.
     """
+    coverage = supported if coverage is None else coverage
+    if not supported <= coverage:
+        raise ValueError(
+            f"calibrate_model: the supported set {sorted(supported - coverage)} is not "
+            f"covered by the model's task coverage {sorted(coverage)} -- the gain judgment "
+            "cannot average over a task the model has no rate for"
+        )
+    guards = CONFIRMATION_GUARDS & coverage if guards is None else frozenset(guards)
+    if not guards <= coverage:
+        raise ValueError(
+            f"calibrate_model: guard(s) {sorted(guards - coverage)} are outside the model's "
+            f"task coverage {sorted(coverage)} -- a guard with no pooled rate has no null "
+            "distribution to be adjudicated against, and none to be certified against here"
+        )
     _check_labels(labels, "calibrate_model")
     arm_results = {label: _load_arm(results_dir, label) for label in labels}
     _check_provenance(arm_results, labels)
-    _check_supported_set(arm_results, labels, supported)
+    _check_supported_set(arm_results, labels, coverage)
 
     provenance = _build_provenance(arm_results, labels)
-    null_counts = {task: _pooled_counts(arm_results, labels, task) for task in sorted(supported)}
-    null_model = _build_null_model(arm_results, labels, supported, null_counts)
-    task_split = _task_splits(arm_results, labels, supported)
-    standard_attempts = _standard_attempts(arm_results, labels, supported)
+    # Rates, splits and attempt counts are collected over the whole COVERAGE set. So are
+    # the per-task halves of grain, goodness and stability; only the SPLIT rows (the
+    # gain judgment's own gates) stay on `supported`.
+    null_counts = {task: _pooled_counts(arm_results, labels, task) for task in sorted(coverage)}
+    null_model = _build_null_model(arm_results, labels, coverage, null_counts)
+    task_split = _task_splits(arm_results, labels, coverage)
+    standard_attempts = _standard_attempts(arm_results, labels, coverage)
 
-    grain = _check_grain(null_counts, task_split, standard_attempts, supported, COVERAGE_LEVEL)
-    goodness = _check_goodness(arm_results, labels, supported, null_counts)
+    grain = _check_grain(
+        null_counts, task_split, standard_attempts, supported, COVERAGE_LEVEL, guards
+    )
+    goodness = _check_goodness(arm_results, labels, coverage, null_counts)
     stability = _check_stability(
-        arm_results, labels, supported, task_split, standard_attempts, COVERAGE_LEVEL
+        arm_results, labels, supported, task_split, standard_attempts, COVERAGE_LEVEL, coverage
     )
     # Resolved once, so the conditional detection rates and the conditional
     # false-CONFIRM rate are conditional on the SAME recorded arm -- the whole point
-    # of publishing them together.
-    baseline_counts, _ = designated_baseline_counts(arm_results, supported, standard_attempts)
+    # of publishing them together. The REASON travels with the resolution for the same
+    # reason: when there is no such arm, both blocks publish nulls, and both explain
+    # the nulls with the one sentence this call produced.
+    baseline_counts, baseline_note = designated_baseline_counts(
+        arm_results, supported, standard_attempts
+    )
     baseline = (DESIGNATED_BASELINE, baseline_counts) if baseline_counts is not None else None
     power = _check_power(
         null_counts,
@@ -1848,6 +2070,7 @@ def calibrate_model(labels: list[str], results_dir: Path, supported: frozenset[s
         standard_attempts,
         COVERAGE_LEVEL,
         baseline=baseline,
+        baseline_note=baseline_note,
     )
     false_confirm = _check_false_confirm(
         arm_results, null_counts, supported, task_split, standard_attempts, COVERAGE_LEVEL
@@ -1871,7 +2094,12 @@ def calibrate_model(labels: list[str], results_dir: Path, supported: frozenset[s
 
 
 def recompute_model(
-    model: dict, level: Fraction = COVERAGE_LEVEL
+    model: dict,
+    level: Fraction = COVERAGE_LEVEL,
+    *,
+    supported: frozenset[str] | None = None,
+    covered: frozenset[str] | None = None,
+    guards: frozenset[str] | None = None,
 ) -> tuple[dict[str, Fraction], list[str]]:
     """Re-derive an artifact's rates and re-run its fitness checks from its OWN
     per-arm counts, and report every disagreement with what it recorded.
@@ -1886,12 +2114,27 @@ def recompute_model(
     What is re-derived, and from what:
 
     - Each task's pooled `null_rate`, summed from `per_arm` -- the raw counts the
-      artifact carries for audit, which a rate-only tamper leaves untouched.
+      artifact carries for audit, which a rate-only tamper leaves untouched. Every
+      task the model COVERS, guards included.
     - Each task's split and the suite's standard attempt counts, read from the
       recorded `fitness.grain` rows (they carry both), so no extra field has to be
       trusted or added.
     - GRAIN, GOODNESS and STABILITY, re-run by the very functions that wrote them,
       against the re-derived rates, and compared to the recorded blocks whole.
+
+    The fitness checks are re-run over two sets, and WHICH sets is the caller's to
+    pin. From Phase 2c the two differ: the model rates supported ∪ guards, while the
+    gain judgment still averages over the supported tasks alone, so the split rows and
+    the per-task rows are computed over different sets and both have to be right.
+
+    `supported`, `covered` and `guards` are those pins, and passing them is what stops
+    an artifact from CHOOSING its own coverage. Unpinned, the gain set is read off the
+    artifact's own grain rows and the guard set off its own `grain.per_task` keys --
+    the only places either is written down -- which is exactly the hole: an artifact
+    whose fitness was computed over three of the four supported tasks re-derived
+    cleanly, agreed with itself perfectly, and installed a certificate for a judgment
+    the rule does not make. `loop.validate` passes the section's own pinned sets, so
+    the artifact is checked against the rule rather than against itself.
 
     Returns `(rates, problems)`. A non-empty `problems` means REFUSE: the rates
     are still returned so a caller can report them, never so it can install them.
@@ -1899,14 +2142,28 @@ def recompute_model(
     problems: list[str] = []
     null_model = model.get("null_model") or {}
     fitness = model.get("fitness") or {}
-    supported = frozenset(null_model)
-    if not supported:
+    rated = frozenset(null_model)
+    if not rated:
         return {}, ["the artifact carries no null_model, so there is nothing to recompute"]
+    if covered is not None and rated != frozenset(covered):
+        return {}, [
+            f"the artifact rates {sorted(rated)}, and this section's covered set is pinned to "
+            f"{sorted(covered)} -- missing {sorted(frozenset(covered) - rated)}, unexpected "
+            f"{sorted(rated - frozenset(covered))}. A model over a different set of tasks is a "
+            "model of different evidence"
+        ]
+    covered = rated
 
+    recorded_grain = fitness.get("grain") or {}
     task_split: dict[str, str] = {}
     standard_attempts: dict[str, int] = {}
-    for split, row in (fitness.get("grain") or {}).items():
-        if split == "pass" or not isinstance(row, dict):
+    for split, row in recorded_grain.items():
+        # `per_task` is the per-task half of the same block, keyed by TASK rather than
+        # by split, and it carries no `tasks` list to read a gain set out of. Skipped by
+        # name, not left to fall through the shape checks below: a block silently
+        # ignored because its keys happened not to match is a block nobody notices
+        # when its shape changes.
+        if split in ("pass", "per_task") or not isinstance(row, dict):
             continue
         for task in row.get("tasks") or []:
             task_split[task] = split
@@ -1918,7 +2175,17 @@ def recompute_model(
                     f"recomputation cannot proceed: the recorded grain row for {split} "
                     f"gives task {task} a non-integer attempt count ({value!r})"
                 )
-    missing = sorted(supported - set(task_split)) + sorted(supported - set(standard_attempts))
+    # The GAIN set: exactly the tasks the recorded grain rows were computed over.
+    # `covered` (the rated tasks) may be wider from Phase 2c on.
+    gain = frozenset(task_split) | frozenset(standard_attempts)
+    if not gain:
+        problems.append(
+            "recomputation cannot proceed: the recorded grain rows name no task, so there "
+            "is no gain set to re-run the fitness checks over"
+        )
+        return {}, problems
+    ungated = sorted(gain - covered)
+    missing = sorted(gain - set(task_split)) + sorted(gain - set(standard_attempts)) + ungated
     if missing or problems:
         problems.append(
             "recomputation cannot proceed: the recorded grain rows do not state a split "
@@ -1926,11 +2193,34 @@ def recompute_model(
             f"{sorted(set(missing))})"
         )
         return {}, problems
+    # THE PIN. Everything above read the artifact's own account of what it certified;
+    # this is where that account is held against the sets the RULE uses. Without it an
+    # artifact silently narrows its own fitness and the recomputation agrees with it,
+    # because the recomputation was reading the narrowed set out of the artifact.
+    if supported is not None and gain != frozenset(supported):
+        return {}, [
+            f"the artifact's grain rows certify the gain set {sorted(gain)}, and this "
+            f"section's gain set is pinned to {sorted(supported)} -- missing "
+            f"{sorted(frozenset(supported) - gain)}, unexpected "
+            f"{sorted(gain - frozenset(supported))}. An artifact does not choose which "
+            "tasks the rule's split means average over"
+        ]
+    # The guard set the per-task grain rows must cover, pinned the same way. Unpinned it
+    # comes from the recorded rows themselves, which is the artifact speaking for itself
+    # again -- fine for a caller inspecting an artifact, never for the loader.
+    guard_set = (
+        frozenset(guards) if guards is not None else frozenset(recorded_grain.get("per_task") or {})
+    )
+    if not guard_set <= covered:
+        return {}, [
+            f"the guard(s) {sorted(guard_set - covered)} have no pooled rate in this "
+            "artifact, so there is nothing to certify their own bound against"
+        ]
 
     rates: dict[str, Fraction] = {}
     labels: list[str] | None = None
     counts: dict[str, dict[str, tuple[int, int]]] = {}
-    for task in sorted(supported):
+    for task in sorted(covered):
         per_arm = (null_model[task] or {}).get("per_arm") or {}
         if not per_arm:
             problems.append(
@@ -1979,15 +2269,20 @@ def recompute_model(
     if problems:
         return rates, problems
 
+    # Rebuilt over the COVERED set: the per-task halves of these checks are computed on
+    # every rated task, and only the split rows are on the gain set. A guard has no
+    # entry in `task_split` -- it never enters a split mean, which is why it needs a
+    # per-task row at all -- so its synthetic split is empty, and `_split_grain` only
+    # ever asks about the gain tasks.
     arm_results = {
         label: {
             "tasks": {
                 task: {
-                    "split": task_split[task],
+                    "split": task_split.get(task, ""),
                     "attempts": counts[task][label][1],
                     "passes": counts[task][label][0],
                 }
-                for task in sorted(supported)
+                for task in sorted(covered)
             }
         }
         for label in (labels or [])
@@ -1997,14 +2292,16 @@ def recompute_model(
             sum(p for p, _ in counts[task].values()),
             sum(n for _, n in counts[task].values()),
         )
-        for task in sorted(supported)
+        for task in sorted(covered)
     }
     try:
         recomputed = {
-            "grain": _check_grain(null_counts, task_split, standard_attempts, supported, level),
-            "goodness": _check_goodness(arm_results, labels or [], supported, null_counts),
+            "grain": _check_grain(
+                null_counts, task_split, standard_attempts, gain, level, guard_set
+            ),
+            "goodness": _check_goodness(arm_results, labels or [], covered, null_counts),
             "stability": _check_stability(
-                arm_results, labels or [], supported, task_split, standard_attempts, level
+                arm_results, labels or [], gain, task_split, standard_attempts, level, covered
             ),
         }
     except (ValueError, ZeroDivisionError, KeyError) as exc:
@@ -2058,7 +2355,10 @@ def main(argv: list[str] | None = None) -> None:
         labels = args[1:]
         if not labels:
             raise SystemExit("usage: python -m loop.calibrate --model <label> [<label> ...]")
-        model = calibrate_model(labels, RESULTS_DIR, SUPPORTED)
+        # `MODEL_TASKS`, not `SUPPORTED`: the artifact must rate every guard, or the
+        # guards it names are gated on nothing (contract §6). The gain judgment stays
+        # on `SUPPORTED`, which is what `calibrate_model` computes fitness over.
+        model = calibrate_model(labels, RESULTS_DIR, SUPPORTED, coverage=MODEL_TASKS)
         MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
         MODEL_PATH.write_text(json.dumps(model, indent=2) + "\n")
         print(f"wrote {MODEL_PATH}")

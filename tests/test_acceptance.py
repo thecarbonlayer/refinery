@@ -818,23 +818,35 @@ _CMP_FP = {
     "gemma_sha": "carbon-under-test",
 }
 
-# The round-2 null-arm protocol's own shape (contract §3): three full-suite arms at
-# standard attempts (3 held-in / 5 held-out) and four `--only A1 G2 G4 G5 --attempts
-# 10` subset arms, with NOTHING changed between any of them. Every count here is null
-# variation, which is what makes the pooled rates below a null model rather than a
-# hopeful guess.
+# The null-arm protocol's own shape (contract §3, extended by the Phase 2c amendment):
+# three full-suite arms at standard attempts (3 held-in / 5 held-out) and four
+# `--only A1 G2 G4 G5 CMP-5 CMP-6 CMP-7 --attempts 10` subset arms, with NOTHING
+# changed between any of them. Every count here is null variation, which is what makes
+# the pooled rates below a null model rather than a hopeful guess.
+#
+# CMP-5/6/7 carry counts here because the model must RATE every covered task — the
+# guards are adjudicated one task at a time and cannot be judged without a rate. These
+# arms were always synthetic; they now have the shape the loader pins.
 _NULL_FULL_ARMS = {
-    "r2-null-full-a": {"A1": 2, "G4": 1, "G5": 2, "G2": 3},
-    "r2-null-full-b": {"A1": 2, "G4": 1, "G5": 2, "G2": 2},
-    "r2-null-full-c": {"A1": 1, "G4": 0, "G5": 3, "G2": 3},
+    "r2-null-full-a": {"A1": 2, "G4": 1, "G5": 2, "G2": 3, "CMP-5": 1, "CMP-7": 2, "CMP-6": 3},
+    "r2-null-full-b": {"A1": 2, "G4": 1, "G5": 2, "G2": 2, "CMP-5": 2, "CMP-7": 1, "CMP-6": 2},
+    "r2-null-full-c": {"A1": 1, "G4": 0, "G5": 3, "G2": 3, "CMP-5": 1, "CMP-7": 2, "CMP-6": 3},
 }
 _NULL_SUBSET_ARMS = {
-    "r2-null-cmp-a": {"A1": 5, "G4": 2, "G5": 6, "G2": 5},
-    "r2-null-cmp-b": {"A1": 6, "G4": 1, "G5": 7, "G2": 6},
-    "r2-null-cmp-c": {"A1": 5, "G4": 2, "G5": 6, "G2": 4},
-    "r2-null-cmp-d": {"A1": 6, "G4": 1, "G5": 5, "G2": 7},
+    "r2-null-cmp-a": {"A1": 5, "G4": 2, "G5": 6, "G2": 5, "CMP-5": 4, "CMP-7": 6, "CMP-6": 5},
+    "r2-null-cmp-b": {"A1": 6, "G4": 1, "G5": 7, "G2": 6, "CMP-5": 5, "CMP-7": 5, "CMP-6": 4},
+    "r2-null-cmp-c": {"A1": 5, "G4": 2, "G5": 6, "G2": 4, "CMP-5": 4, "CMP-7": 6, "CMP-6": 6},
+    "r2-null-cmp-d": {"A1": 6, "G4": 1, "G5": 5, "G2": 7, "CMP-5": 5, "CMP-7": 4, "CMP-6": 5},
 }
-_SPLIT_OF = {"A1": "held_in", "G4": "held_in", "G5": "held_in", "G2": "held_out"}
+_SPLIT_OF = {
+    "A1": "held_in",
+    "G4": "held_in",
+    "G5": "held_in",
+    "G2": "held_out",
+    "CMP-5": "held_in",
+    "CMP-6": "held_out",
+    "CMP-7": "held_in",
+}
 _STANDARD_ATTEMPTS = {t: (5 if s == "held_out" else 3) for t, s in _SPLIT_OF.items()}
 
 
@@ -892,7 +904,7 @@ def _null_model_calibration(
     """
     import json
 
-    from loop.calibrate import SUPPORTED, calibrate_model
+    from loop.calibrate import MODEL_TASKS, SUPPORTED, calibrate_model
     from loop.validate import section_calibration
 
     fp = arm_fingerprint or _CMP_FP
@@ -903,7 +915,8 @@ def _null_model_calibration(
     for label, passes in _NULL_SUBSET_ARMS.items():
         (results_dir / f"{label}.json").write_text(json.dumps(_null_arm(passes, fp, subset=True)))
     labels = sorted({**_NULL_FULL_ARMS, **_NULL_SUBSET_ARMS})
-    model = calibrate_model(labels, results_dir, SUPPORTED)
+    # SUPPORTED is the gain set; MODEL_TASKS is what the artifact must rate.
+    model = calibrate_model(labels, results_dir, SUPPORTED, coverage=MODEL_TASKS)
     assert model["fitness"]["fit"] is True, "fixture precondition: these arms must be fit"
     if mutate is not None:
         mutate(model)
@@ -938,8 +951,16 @@ def _q_task(cal, task, base, cand):
     )
 
 
+# A count for every COVERED task the caller does not name. The scenario guards are
+# covered but not in the gain set, so an unmoved constant is exactly the right stand-in:
+# it keeps `_require_supported` satisfied and the guard gate readable without touching
+# any supported-set mean.
+_UNMOVED = {"CMP-5": 1, "CMP-6": 2, "CMP-7": 1}
+
+
 def _standard_run(passes):
-    return _run({t: (p, _STANDARD_ATTEMPTS[t], _SPLIT_OF[t]) for t, p in passes.items()})
+    filled = {**{t: p for t, p in _UNMOVED.items() if t not in passes}, **passes}
+    return _run({t: (p, _STANDARD_ATTEMPTS[t], _SPLIT_OF[t]) for t, p in filled.items()})
 
 
 # The supported set (A1, G4, G5 held-in; G2 held-out) plus BALLAST the section's model
@@ -953,6 +974,13 @@ _CMP_COUNTS = {
     "G4": (8, 50, "held_in"),
     "G5": (31, 50, "held_in"),
     "G2": (27, 50, "held_out"),
+    # The scenario guards. COVERED but not in the gain set, so they never move a split
+    # mean's denominator — they are here because the model rates them and the guard
+    # gate reads each one per task; an arm that omitted them would be refused by
+    # `_require_supported` before any judgment happened.
+    "CMP-5": (24, 50, "held_in"),
+    "CMP-6": (26, 50, "held_out"),
+    "CMP-7": (28, 50, "held_in"),
     "X1": (2, 3, "held_in"),
     "X2": (2, 4, "held_out"),
     "X3": (2, 4, "held_out"),
@@ -986,14 +1014,20 @@ def test_section_calibration_carries_the_null_model_not_a_threshold(tmp_path):
     model = json.loads((tmp_path / "model-r2.json").read_text())
     assert isinstance(cal, SectionCalibration)
     assert cal.section == "compaction"
-    assert cal.supported == frozenset(model["null_model"])
+    # COVERED is the artifact's key set; SUPPORTED is the narrower gain set the
+    # split means average over. Two fields since the Phase 2c split, and conflating
+    # them would silently change the denominator of every mean the rule judges.
+    assert cal.covered == frozenset(model["null_model"])
+    assert cal.supported == frozenset({"A1", "G2", "G4", "G5"})
     assert cal.null_rates == {
         task: Fraction(*(int(x) for x in row["null_rate"].split("/")))
         for task, row in model["null_model"].items()
     }
     assert cal.null_rates["A1"] == Fraction(27, 49), "pooled over ALL seven arms, exactly"
     assert cal.coverage_level == Fraction(975, 1000)
-    assert cal.guards == frozenset({"A1", "G2", "G5"})
+    # The guard set flipped to six with the Phase 2c scenario guards (contract
+    # amendment 2). G4 stays out: the miner cannot vouch for a candidate mined from it.
+    assert cal.guards == frozenset({"A1", "G2", "G5", "CMP-5", "CMP-6", "CMP-7"})
     assert not hasattr(cal, "noise_in"), "the stored-threshold shape is retired"
     assert not hasattr(cal, "noise_ho_exact"), "the stored-threshold shape is retired"
     assert cal.source.endswith("model-r2.json")
@@ -1174,7 +1208,10 @@ def test_a_supported_set_gain_beyond_the_computed_quantile_confirms_naming_the_t
     assert d.improved_tasks == ("G2",), "the evidence basis is the SUPPORTED set"
     assert d.delta_ho == pytest.approx(float(gain)), "the supported-set mean decides"
     assert d.threshold_ho == pytest.approx(float(q)), "the threshold IS the computed quantile"
-    assert d.raw["full_split_delta_ho"] == pytest.approx(float(gain) / 4), (
+    # Five tasks on the held-out split now: G2, the X ballast, and the covered-but-
+    # ungained CMP-6. The supported-set mean is unchanged; only the whole-split view
+    # the rule records beside it divides by one more.
+    assert d.raw["full_split_delta_ho"] == pytest.approx(float(gain) / 5), (
         "the whole-split number is still recorded — the rule may not hide what it stopped reading"
     )
     assert d.raw["null_quantiles"]["held_out"] == {
@@ -1294,6 +1331,11 @@ _CONFIRM_COUNTS = {
     "G4": (8, 50, "held_in"),
     "G5": (31, 50, "held_in"),
     "G2": (27, 50, "held_out"),
+    # Covered, and therefore required in a confirmation pair: the guard gate reads
+    # each of these per task.
+    "CMP-5": (24, 50, "held_in"),
+    "CMP-6": (26, 50, "held_out"),
+    "CMP-7": (28, 50, "held_in"),
 }
 
 
@@ -1306,13 +1348,18 @@ def _confirm_counts(moved=None, extra=None):
 
 
 def test_calibrated_evidence_on_held_in_uses_the_supported_denominator(tmp_path):
-    """Three supported tasks in a four-task split: the two means divide by 3 and by 4.
+    """Three supported tasks in a six-task split: the two means divide by 3 and by 6.
 
     A1 gains 16 of its 50 attempts. Over the supported set that is 0.32/3, past the
-    quantile computed at 50v50; over the whole split it is 0.32/4, under the one-attempt
+    quantile computed at 50v50; over the whole split it is 0.32/6, under the one-attempt
     allowance the ballast task X1's coarse 3-attempt grain sets. The calibrated rule
     sees evidence, the uncalibrated one does not, and the difference is visible in the
     denominators rather than in a single task's number.
+
+    The whole-split denominator grew from four to six when CMP-5 and CMP-7 joined the
+    held-in split as covered guards. Both sides of the contrast scale together — the
+    allowance divides by the same task count the mean does — so the fixture's point is
+    unchanged; only the arithmetic moved.
     """
     from fractions import Fraction
 
@@ -1321,16 +1368,16 @@ def test_calibrated_evidence_on_held_in_uses_the_supported_denominator(tmp_path)
     gain = Fraction(16, 50)
     assert _q_split(cal, "held_in", base, cand) == Fraction(1, 10)
     assert gain / 3 > Fraction(1, 10)
-    assert gain / 4 <= one_attempt(base, "held_in"), "fixture precondition: the contrast holds"
+    assert gain / 6 <= one_attempt(base, "held_in"), "fixture precondition: the contrast holds"
 
-    assert evaluate(base, cand).outcome == REJECT, "0.32/4 is under the one-attempt allowance"
+    assert evaluate(base, cand).outcome == REJECT, "0.32/6 is under the one-attempt allowance"
 
     d = evaluate(base, cand, calibration=cal)
     assert d.outcome == CONFIRM
     assert d.evidence_split == "held_in"
     assert d.improved_tasks == ("A1",)
     assert d.delta_in == pytest.approx(float(gain / 3)), "supported-set denominator: 3 tasks"
-    assert d.raw["full_split_delta_in"] == pytest.approx(float(gain / 4)), "whole split: 4 tasks"
+    assert d.raw["full_split_delta_in"] == pytest.approx(float(gain / 6)), "whole split: 6 tasks"
     assert d.raw["null_quantiles"]["held_in"]["tasks"] == ["A1", "G4", "G5"]
     assert d.raw["null_quantiles"]["held_in"]["quantile"] == "1/10"
 
@@ -1355,7 +1402,7 @@ def test_confirm_tasks_gain_the_whole_supported_set_including_the_miner(tmp_path
     cal = _null_model_calibration(tmp_path)
     d = evaluate(_cmp_run(), _cmp_run({"A1": 43}), calibration=cal)
     assert d.outcome == CONFIRM
-    assert set(d.confirm_tasks) == {"A1", "G2", "G4", "G5"}
+    assert set(d.confirm_tasks) == {"A1", "G2", "G4", "G5", "CMP-5", "CMP-6", "CMP-7"}
     assert "G4" not in cal.guards and "G4" not in d.improved_tasks
 
 
@@ -1406,8 +1453,9 @@ def test_confirmed_honors_the_computed_quantile_where_one_attempt_would_have_acc
     cal = _null_model_calibration(tmp_path)
     first = evaluate(_cmp_run(), _cmp_run({"G2": 38}), calibration=cal)
     assert first.outcome == CONFIRM and first.improved_tasks == ("G2",)
-    # G4 rides in because it is one of the four tasks the null model covers.
-    assert set(first.confirm_tasks) == {"A1", "G2", "G4", "G5"}
+    # G4 rides in because the null model covers it; the guards ride in for the same
+    # reason, and because the guard gate has to read each of them per task.
+    assert set(first.confirm_tasks) == {"A1", "G2", "G4", "G5", "CMP-5", "CMP-6", "CMP-7"}
 
     base_counts = _confirm_counts()
     weak = _confirm_counts({"G2": 30})  # +0.06, inside G2's own null band
@@ -1599,7 +1647,9 @@ def test_a_carrier_outside_the_null_model_refuses_rather_than_guessing(tmp_path)
         threshold_ho=0.0,
         evidence_split="held_out",
         improved_tasks=("X2",),  # never a supported task
-        confirm_tasks=("A1", "G2", "G4", "G5", "X2"),
+        # Every COVERED task, plus the out-of-model carrier: a confirmation reruns
+        # the guards too, and `_require_supported` refuses a pair missing one.
+        confirm_tasks=("A1", "CMP-5", "CMP-6", "CMP-7", "G2", "G4", "G5", "X2"),
         # Bound by `_bound` below: `confirmed()` requires BOTH stage-binding digests
         # whenever a calibration is in hand, and a hand-built record is still a record.
         raw={},

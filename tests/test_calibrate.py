@@ -849,6 +849,11 @@ def test_main_model_flag_writes_model_json(tmp_path, monkeypatch):
     out_path = tmp_path / "out" / "model-r2.json"
     monkeypatch.setattr(calibrate_mod, "RESULTS_DIR", tmp_path)
     monkeypatch.setattr(calibrate_mod, "SUPPORTED", supported)
+    # `main()` now reads TWO sets: the gain set (`SUPPORTED`) and the model's task
+    # coverage (`MODEL_TASKS` = supported ∪ guards). This one-task fixture has to
+    # stand in for both, or the coverage pin refuses arms that never measured the
+    # real guards.
+    monkeypatch.setattr(calibrate_mod, "MODEL_TASKS", supported)
     monkeypatch.setattr(calibrate_mod, "MODEL_PATH", out_path)
 
     calibrate_mod.main(["--model", "full-a", "cmp-a"])
@@ -1140,3 +1145,383 @@ def test_a_subset_arm_with_zero_attempts_is_refused_before_it_divides_by_zero(tm
         calibrate_model(labels, tmp_path, frozenset({"A1"}))
     assert "A1" in str(exc.value)
     assert "0 attempts" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2c: the null model's task coverage becomes supported ∪ guards
+# (phase2c-guards-contract.md §6). The rule's gain judgment stays on the four
+# supported tasks; the guards need a rate each so they can be judged per-task.
+# ---------------------------------------------------------------------------
+
+
+def test_the_null_models_coverage_pin_is_supported_union_guards():
+    """`MODEL_TASKS` is the set the next campaign must measure, and it is DERIVED
+    from the two sets it unions rather than typed out again — a hand-listed copy
+    would let a guard be added in one place and silently missed by the campaign
+    that has to produce its rate."""
+    from loop.calibrate import CONFIRMATION_GUARDS, MODEL_TASKS, SCENARIO_GUARDS, SUPPORTED
+
+    assert SCENARIO_GUARDS == frozenset({"CMP-5", "CMP-6", "CMP-7"})
+    assert MODEL_TASKS == frozenset({"A1", "G2", "G4", "G5", "CMP-5", "CMP-6", "CMP-7"})
+    assert MODEL_TASKS == SUPPORTED | CONFIRMATION_GUARDS | SCENARIO_GUARDS
+    # The gain judgment is unchanged: still the four supported tasks.
+    assert SUPPORTED == frozenset({"A1", "G2", "G4", "G5"})
+    # G4 is the miner, so it is covered but is never a guard.
+    assert "G4" not in CONFIRMATION_GUARDS | SCENARIO_GUARDS
+
+
+def _seven_task_arm(label: str, *, filtered: bool, attempts: int) -> dict:
+    """An arm covering the whole Phase 2c coverage set at one attempt count."""
+    held_out = {"G2", "CMP-6"}
+    return _arm(
+        label,
+        {
+            task: (
+                attempts // 2,
+                attempts,
+                "held_out" if task in held_out else "held_in",
+            )
+            for task in ("A1", "G2", "G4", "G5", "CMP-5", "CMP-6", "CMP-7")
+        },
+        filtered=filtered,
+    )
+
+
+def test_an_arm_missing_a_scenario_guard_is_refused_by_the_extended_pin(tmp_path):
+    """The pin that makes the coverage real: an arm that measured only the four
+    supported tasks cannot pool into a model whose guards need rates. Without this
+    the campaign silently produces a model that gates nothing on CMP-5/6/7."""
+    from loop.calibrate import MODEL_TASKS, SUPPORTED
+
+    short = _seven_task_arm("full-a", filtered=False, attempts=4)
+    del short["tasks"]["CMP-5"]
+    _write(tmp_path, "full-a", short)
+    with pytest.raises(ValueError, match="CMP-5"):
+        calibrate_model(["full-a"], tmp_path, SUPPORTED, coverage=MODEL_TASKS)
+
+
+def test_coverage_defaults_to_the_supported_set_so_the_round2_shape_is_unchanged(tmp_path):
+    """Byte-identity for every caller that predates the coverage split: omitting
+    `coverage=` must produce exactly the artifact `calibrate_model` produced
+    before it existed."""
+    from loop.calibrate import SUPPORTED
+
+    for label, filtered in (("full-a", False), ("cmp-a", True), ("cmp-b", True)):
+        arm = _arm(
+            label,
+            {
+                "A1": (2, 3, "held_in") if not filtered else (5, 10, "held_in"),
+                "G2": (3, 5, "held_out") if not filtered else (4, 10, "held_out"),
+                "G4": (1, 3, "held_in") if not filtered else (3, 10, "held_in"),
+                "G5": (2, 3, "held_in") if not filtered else (6, 10, "held_in"),
+            },
+            filtered=filtered,
+        )
+        _write(tmp_path, label, arm)
+    labels = ["full-a", "cmp-a", "cmp-b"]
+    assert calibrate_model(labels, tmp_path, SUPPORTED) == calibrate_model(
+        labels, tmp_path, SUPPORTED, coverage=SUPPORTED
+    )
+
+
+def test_the_model_rates_every_guard_while_the_gain_judgment_stays_on_the_four(tmp_path):
+    """Contract §6, both halves at once — and the halves have moved apart since.
+
+    The null model must carry a pooled rate for every covered task (a guard with no
+    rate cannot be adjudicated), and the SPLIT rows of the fitness checks must still be
+    computed over the FOUR supported tasks, because those are the tasks the gain
+    judgment averages over. A grain split row that quietly grew to seven would change
+    the denominator of every mean the rule judges without anything saying so.
+
+    What changed at the phase's close: the PER-TASK halves of grain, goodness and
+    stability now cover what the model rates, because a guard is adjudicated on its own
+    and a rate nothing certifies is a gate nothing measured. The two sets are different
+    on purpose, and this pins both rather than the one it used to.
+    """
+    from loop.calibrate import CONFIRMATION_GUARDS, MODEL_TASKS, SUPPORTED
+
+    _write(tmp_path, "full-a", _seven_task_arm("full-a", filtered=False, attempts=4))
+    _write(tmp_path, "cmp-a", _seven_task_arm("cmp-a", filtered=True, attempts=10))
+    _write(tmp_path, "cmp-b", _seven_task_arm("cmp-b", filtered=True, attempts=6))
+    labels = ["full-a", "cmp-a", "cmp-b"]
+
+    model = calibrate_model(labels, tmp_path, SUPPORTED, coverage=MODEL_TASKS)
+
+    assert set(model["null_model"]) == MODEL_TASKS
+    for task in sorted(MODEL_TASKS):
+        assert model["null_model"][task]["null_rate"] == "10/20"
+    assert model["fitness"]["power"]["stage1_only"]["per_task"].keys() == SUPPORTED
+    graded = {
+        t
+        for split, row in model["fitness"]["grain"].items()
+        if split not in ("pass", "per_task")
+        for t in row["tasks"]
+    }
+    assert graded == SUPPORTED, "the gain judgment's denominator is still the four"
+    # ...and the per-task halves cover what the model rates.
+    assert set(model["fitness"]["goodness"]["per_task"]) == MODEL_TASKS
+    assert set(model["fitness"]["stability"]["per_task"]) == MODEL_TASKS
+    assert set(model["fitness"]["grain"]["per_task"]) == CONFIRMATION_GUARDS & MODEL_TASKS
+
+
+# ---------------------------------------------------------------------------
+# Phase 2c close: fitness CERTIFIES the guards it rates
+# ---------------------------------------------------------------------------
+
+
+def _p2c_model(tmp_path, *, mutate_arm=None) -> dict:
+    """A seven-task pooling over three arms, optionally with one arm's counts edited.
+
+    Pooled to 40 attempts per task deliberately: the per-task gates below are judged at
+    the confirmation's own attempt count (10), and at a pooled denominator of 20 the
+    only rate whose quantile falls to the single-attempt grain is a degenerate one. At
+    40 a real, non-degenerate rate (1/40) does — which is the case worth gating, and
+    the case a test built on a 0/20 pool could not tell apart from degeneracy.
+    """
+    from loop.calibrate import MODEL_TASKS, SUPPORTED
+
+    for label, filtered, attempts in (
+        ("full-a", False, 4),
+        ("cmp-a", True, 20),
+        ("cmp-b", True, 16),
+    ):
+        arm = _seven_task_arm(label, filtered=filtered, attempts=attempts)
+        if mutate_arm is not None:
+            mutate_arm(label, arm)
+        _write(tmp_path, label, arm)
+    return calibrate_model(["full-a", "cmp-a", "cmp-b"], tmp_path, SUPPORTED, coverage=MODEL_TASKS)
+
+
+def test_grain_certifies_every_guards_own_confirmation_bound(tmp_path):
+    """The hole this closes: a guard was RATED and never CHECKED.
+
+    A guard is adjudicated one task at a time, against its own null quantile at the
+    confirmation's attempt count — never through a split mean. Nothing asked whether
+    that per-task bound could be cleared at all, so a guard whose quantile sat at or
+    below the finest movement a confirmation can produce was a gate that could not go
+    red, sitting inside an artifact that said `fit: true`. That is the round-1 defect
+    (a bound below its own grain), one level down.
+
+    The gain rows are untouched: they still cover the four supported tasks, because
+    those are what the split means average over.
+    """
+    from fractions import Fraction
+
+    from loop.calibrate import (
+        CONFIRMATION_GUARDS,
+        COVERAGE_LEVEL,
+        MODEL_TASKS,
+        SUPPORTED,
+        null_task_quantile,
+    )
+
+    model = _p2c_model(tmp_path)
+    grain = model["fitness"]["grain"]
+
+    gain_rows = {split for split in grain if split not in ("pass", "per_task")}
+    graded = {t for split in gain_rows for t in grain[split]["tasks"]}
+    assert graded == SUPPORTED, "the gain judgment's denominator is unchanged"
+
+    # Every guard the model rates gets a per-task row; G4 (the miner, never a guard)
+    # does not, because nothing ever adjudicates it on its own.
+    assert set(grain["per_task"]) == CONFIRMATION_GUARDS & MODEL_TASKS
+    assert "G4" not in grain["per_task"]
+
+    for task, row in grain["per_task"].items():
+        rate = Fraction(model["null_model"][task]["null_rate"])
+        expected = null_task_quantile(rate, row["attempts"], row["attempts"], COVERAGE_LEVEL)
+        assert Fraction(row["quantile"]) == expected
+        assert Fraction(row["grain"]) == Fraction(1, row["attempts"])
+        assert row["pass"] is (expected > Fraction(1, row["attempts"]))
+
+
+def test_a_guard_whose_own_bound_is_unclearable_fails_grain(tmp_path):
+    """The gate, gone red — on a rate that is NOT degenerate.
+
+    CMP-5 passes once across forty attempts. The rate is real (0 < 1/40 < 1), so the
+    loader's degenerate-rate refusal never applies, and yet the guard's own quantile at
+    the confirmation's ten attempts lands exactly ON the single-attempt grain: a drop
+    test that no observation could fail. Before this check the artifact published
+    `fit: true` over it.
+    """
+    from fractions import Fraction
+
+    def flatten(label, arm):
+        arm["tasks"]["CMP-5"]["passes"] = 1 if label == "full-a" else 0
+
+    model = _p2c_model(tmp_path, mutate_arm=flatten)
+    assert model["null_model"]["CMP-5"]["null_rate"] == "1/40", "not a degenerate rate"
+    row = model["fitness"]["grain"]["per_task"]["CMP-5"]
+    assert Fraction(row["quantile"]) <= Fraction(row["grain"])
+    assert row["pass"] is False
+    assert model["fitness"]["grain"]["pass"] is False
+    assert model["fitness"]["fit"] is False
+    # The gain rows are unaffected: CMP-5 is not in a split mean.
+    assert model["fitness"]["grain"]["held_in"]["pass"] is True
+
+
+def test_goodness_covers_every_rated_task_including_the_guards(tmp_path):
+    """A guard's pooled rate is the denominator of its own gate. Pooling an arm that
+    disagrees with a single-rate model on a GUARD was invisible, because goodness only
+    ever looked at the four supported tasks."""
+    from loop.calibrate import MODEL_TASKS
+
+    model = _p2c_model(tmp_path)
+    assert set(model["fitness"]["goodness"]["per_task"]) == MODEL_TASKS
+    assert model["fitness"]["goodness"]["pass"] is True
+
+
+def test_an_outlier_arm_on_a_guard_now_fails_goodness(tmp_path):
+    """Same gate, gone red: one arm passes CMP-7 on every one of its twenty attempts
+    while the others pass half, which no single pooled rate explains. Pooling that arm
+    in was invisible before, because goodness never looked at a guard."""
+
+    def outlier(label, arm):
+        if label == "cmp-a":
+            arm["tasks"]["CMP-7"]["passes"] = arm["tasks"]["CMP-7"]["attempts"]
+
+    model = _p2c_model(tmp_path, mutate_arm=outlier)
+    per_arm = model["fitness"]["goodness"]["per_task"]["CMP-7"]["per_arm"]
+    assert per_arm["cmp-a"]["pass"] is False
+    assert per_arm["full-a"]["pass"] is True and per_arm["cmp-b"]["pass"] is True, (
+        "the outlier is named, not the whole pool"
+    )
+    assert model["fitness"]["goodness"]["pass"] is False
+    assert model["fitness"]["fit"] is False
+
+
+def test_stability_leaves_one_arm_out_on_every_rated_task(tmp_path):
+    """Leave-one-out over all seven, not the four. A guard's bound that moves across a
+    grain bucket when one arm is dropped is a bound that is not measured yet — and the
+    split rows could never see it, because a guard is not in any split mean."""
+    from loop.calibrate import MODEL_TASKS
+
+    model = _p2c_model(tmp_path)
+    stability = model["fitness"]["stability"]
+    assert set(stability["per_task"]) == MODEL_TASKS
+    for task, row in stability["per_task"].items():
+        assert set(row["leave_one_out"]) == {"full-a", "cmp-a", "cmp-b"}, task
+        assert row["moved_excluding"] == {}
+        assert row["pass"] is True
+    assert stability["pass"] is True
+
+
+def test_a_guards_bound_that_moves_when_an_arm_is_dropped_fails_stability(tmp_path):
+    """The per-task stability gate, gone red — on a task no split mean covers."""
+
+    def swing(label, arm):
+        if label == "cmp-a":
+            arm["tasks"]["CMP-6"]["passes"] = 2
+
+    model = _p2c_model(tmp_path, mutate_arm=swing)
+    row = model["fitness"]["stability"]["per_task"]["CMP-6"]
+    assert row["moved_excluding"], "dropping an arm moves CMP-6's bound across a bucket"
+    assert row["pass"] is False
+    assert model["fitness"]["stability"]["pass"] is False
+    assert model["fitness"]["fit"] is False
+
+
+def test_recompute_reads_the_gain_set_from_the_grain_rows_not_from_the_rates(tmp_path):
+    """The loader re-derives an artifact's fitness from its own counts and refuses on
+    any disagreement. With coverage wider than the supported set, re-deriving the gain
+    set from the RATES would re-run grain over seven tasks, disagree with the recorded
+    four-task rows, and refuse a perfectly good model. The grain rows themselves name
+    the tasks the gain judgment was computed over, so that is where the set comes
+    from."""
+    from loop.calibrate import MODEL_TASKS, SUPPORTED, recompute_model
+
+    _write(tmp_path, "full-a", _seven_task_arm("full-a", filtered=False, attempts=4))
+    _write(tmp_path, "cmp-a", _seven_task_arm("cmp-a", filtered=True, attempts=10))
+    model = calibrate_model(["full-a", "cmp-a"], tmp_path, SUPPORTED, coverage=MODEL_TASKS)
+
+    rates, problems = recompute_model(model)
+    assert problems == []
+    assert set(rates) == MODEL_TASKS, "every covered task's rate must survive recomputation"
+
+
+# ---------------------------------------------------------------------------
+# An uncomputed conditional is NULL, never zero (Phase 2c close-out)
+# ---------------------------------------------------------------------------
+
+
+def _pooling_without_the_designated_baseline(tmp_path) -> dict:
+    """A model over arms none of which is the designated baseline — the Phase 2c
+    pooling's own shape, where every label is `p2c-*` and `r2-null-full-a` is gone."""
+    from loop.calibrate import MODEL_TASKS, SUPPORTED
+
+    _write(tmp_path, "p2c-full-a", _seven_task_arm("p2c-full-a", filtered=False, attempts=4))
+    _write(tmp_path, "p2c-cmp-a", _seven_task_arm("p2c-cmp-a", filtered=True, attempts=10))
+    _write(tmp_path, "p2c-cmp-b", _seven_task_arm("p2c-cmp-b", filtered=True, attempts=6))
+    return calibrate_model(
+        ["p2c-full-a", "p2c-cmp-a", "p2c-cmp-b"], tmp_path, SUPPORTED, coverage=MODEL_TASKS
+    )
+
+
+def test_end_to_end_conditionals_are_null_when_the_designated_baseline_is_absent(tmp_path):
+    """A conditional rate nobody could compute is NULL, and says why.
+
+    With no designated baseline arm in the pooling there is no run to be conditional
+    ON, and the conditional stage-1 mass is an empty sum. Folding an empty sum into a
+    published field wrote `0/1` and `0.0` — a detection probability of exactly zero,
+    which is a strong and false claim rather than an absent one, and it sat beside a
+    real marginal number where a reader would compare the two. The false-CONFIRM block
+    already publishes `None` plus a `baseline_note` in exactly this case; the
+    end-to-end rows now do the same, from the same resolver and the same sentence.
+    """
+    model = _pooling_without_the_designated_baseline(tmp_path)
+    e2e = model["fitness"]["power"]["end_to_end"]
+    fc = model["fitness"]["false_confirm"]
+
+    assert e2e["baseline_arm"] is None
+    assert e2e["baseline_counts"] is None
+    assert e2e["baseline_note"] == fc["baseline_note"], (
+        "one resolver, one reason — two sentences would be two chances to disagree "
+        "about why the same number is missing"
+    )
+    assert "r2-null-full-a" in e2e["baseline_note"]
+
+    assert e2e["rows"], "the marginal rows are still published; only the conditional is absent"
+    for row in e2e["rows"]:
+        assert row["conditional_stage1_confirm"] is None, row
+        assert row["conditional_stage1_confirm_float"] is None, row
+        assert row["conditional_joint"] is None, row
+        assert row["conditional_joint_float"] is None, row
+        assert row["baseline_note"] == e2e["baseline_note"], (
+            "a row read on its own must carry the reason its conditional is null"
+        )
+        for split_row in row["by_evidence_split"].values():
+            assert split_row["conditional_stage1_confirm"] is None, row
+            assert split_row["conditional_joint"] is None, row
+            assert split_row["conditional_joint_float"] is None, row
+        # The marginal half is untouched: this is an absent number, not a missing block.
+        assert Fraction(row["joint"]) <= Fraction(row["stage1_confirm"])
+        assert 0 <= row["joint_float"] <= 1
+
+
+def test_end_to_end_conditionals_are_computed_when_the_designated_baseline_is_present(tmp_path):
+    """The other half of the same claim, so "null" cannot pass by never computing
+    anything. Rename one arm to the designated label and every conditional field fills
+    in, with no `baseline_note` anywhere — the number exists, so nothing needs excusing.
+    """
+    from loop.calibrate import DESIGNATED_BASELINE, MODEL_TASKS, SUPPORTED
+
+    _write(
+        tmp_path,
+        DESIGNATED_BASELINE,
+        _seven_task_arm(DESIGNATED_BASELINE, filtered=False, attempts=4),
+    )
+    _write(tmp_path, "p2c-cmp-a", _seven_task_arm("p2c-cmp-a", filtered=True, attempts=10))
+    _write(tmp_path, "p2c-cmp-b", _seven_task_arm("p2c-cmp-b", filtered=True, attempts=6))
+    model = calibrate_model(
+        [DESIGNATED_BASELINE, "p2c-cmp-a", "p2c-cmp-b"], tmp_path, SUPPORTED, coverage=MODEL_TASKS
+    )
+
+    e2e = model["fitness"]["power"]["end_to_end"]
+    assert e2e["baseline_arm"] == DESIGNATED_BASELINE
+    assert e2e["baseline_counts"] is not None
+    assert "baseline_note" not in e2e
+    for row in e2e["rows"]:
+        assert "baseline_note" not in row
+        assert Fraction(row["conditional_joint"]) <= Fraction(row["conditional_stage1_confirm"])
+        total = sum(Fraction(v["conditional_joint"]) for v in row["by_evidence_split"].values())
+        assert total == Fraction(row["conditional_joint"])

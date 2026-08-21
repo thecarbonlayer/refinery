@@ -237,3 +237,55 @@ def test_exemption_tables_are_current_minimal_and_argued():
             f"{knob} is declared unguardable, so its one observer must be the miner"
         )
         assert not coverage["guards"], f"{knob} is declared unguardable but names guards"
+
+
+def test_the_scenario_guards_watch_compaction_without_becoming_miners():
+    """Phase 2c contract §6. CMP-5/6/7 join `compaction`'s observers and guards; the
+    miner stays G4 alone.
+
+    The mining rule is the reason the second half matters: a candidate is mined
+    against ONE task and then has to survive the guards. Filing the new guards as
+    miners as well would let a compaction fix be tuned against the very tasks that
+    exist to catch it overfitting — which is the whole failure this phase is built
+    to make mechanical.
+    """
+    compaction = KNOB_COVERAGE["compaction"]
+    scenario = {"CMP-5", "CMP-6", "CMP-7"}
+    assert scenario <= set(compaction["observers"])
+    assert scenario <= set(compaction["guards"])
+    assert set(compaction["miners"]) == {"G4"}
+    # G2 stays a guard and G4 stays out of the guard set (a task cannot vouch for a
+    # candidate mined from it).
+    assert "G2" in compaction["guards"] and "G4" not in compaction["guards"]
+
+
+def test_cmp7_is_listed_wherever_its_own_mechanism_reaches():
+    """Contract amendment 4 — the hygiene the review found missing.
+
+    CMP-7 registers `bash` and reads ~3,000-character results back, so it belongs in
+    the tool-result readers and the tool users; and it is the one compaction task that
+    runs at the SHIPPED window, which is exactly what makes it an observer of
+    `default_context_limit` (its own docstring already claimed that). A row that omits
+    a task the knob genuinely reaches understates coverage, which is the same defect as
+    a row that pads one in — just in the direction nobody notices.
+    """
+    from loop.knob_coverage import (
+        _TOOL_RESULT_READERS,
+        _TOOL_USERS,
+        MEASURED_BREAK_BUDGETS,
+    )
+
+    assert "CMP-7" in _TOOL_RESULT_READERS
+    assert "CMP-7" in _TOOL_USERS
+    assert "CMP-7" in KNOB_COVERAGE["tool_output"]["observers"]
+    assert "CMP-7" in KNOB_COVERAGE["tool_output"]["guards"]
+    assert "CMP-7" in KNOB_COVERAGE["max_tool_steps"]["observers"]
+    # The evidence for the tool_output row, measured rather than argued: the noise
+    # fixture's own size is the budget below which it stops arriving intact.
+    assert MEASURED_BREAK_BUDGETS["CMP-7"] == 2964
+
+    ctx = KNOB_COVERAGE["default_context_limit"]
+    assert "CMP-7" in ctx["observers"] and "CMP-7" in ctx["guards"]
+    # G2/G4/G5 stay OUT of that row: each pins its own `context_limit`, so no value of
+    # the shipped default can move them.
+    assert {"G2", "G4", "G5"}.isdisjoint(ctx["observers"])

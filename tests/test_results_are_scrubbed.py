@@ -1,4 +1,4 @@
-"""No machine-identifying path may sit under results/ — enforced, not remembered.
+"""No machine-identifying path may sit in a committed file — enforced, not remembered.
 
 This repo is public and results are the committed record. The prescribed pre-commit
 grep covered `/Users/` and `/home/` and was blind to `/var/folders`, so two committed
@@ -7,12 +7,34 @@ holding an entire `$PATH` dump, home directory included, quoted inside a task de
 
 This test is the recurrence-killer. Rows are born scrubbed now: `runner.run.
 write_record` scrubs every string at serialization, after verifiers have already read
-the raw text. This module remains the enforcement regardless — nothing under
-`results/` may carry a machine path, whether the cause is a bug in that scrub, a
-record resumed from before it existed, or a file dropped in by hand — so a red suite
-the moment an unscrubbed artifact lands still makes the scrub impossible to forget.
+the raw text. This module remains the enforcement regardless — nothing covered here
+may carry a machine path, whether the cause is a bug in that scrub, a record resumed
+from before it existed, or a file dropped in by hand — so a red suite the moment an
+unscrubbed artifact lands still makes the scrub impossible to forget.
 `loop/scrub_results.py` remains the repair tool for anything older: it fixes what this
 test finds, and proves it changed nothing but the offending strings.
+
+WHAT IT COVERS, and why that grew. The gate began at `results/*.json*` — the files the
+scrubber writes — and a plan document under `docs/` sat in the public history for days
+with a home directory in three shell commands. The leak was never in the record; it was
+in the prose beside it, which nothing checked. `results/*.log` joins for the same
+reason: a run log is machine-generated evidence the scrubber never touches.
+
+`iterations/` joins last, and it is the largest of the three by what it holds: every
+candidate, decision, validation record, confirmation and calibration artifact this
+program has published, plus the prose beside them. AGENTS.md told a human to grep it
+before committing and nothing enforced it — the same shape of gap that let the `docs/`
+leak through, one directory over. Its JSON is machine-written evidence and is held to
+the bare patterns; its Markdown is prose and is held to the prose patterns, exactly
+like `docs/`.
+
+TWO GATES, because the material differs. Machine-generated files (`results/`) are held
+to the bare patterns: nothing there has any business naming a home directory or a temp
+dir, in any form. Prose (`docs/`) is held to the same patterns anchored on a following
+path segment, and exempts a line that appears verbatim in this repo's own test sources
+— a document that NAMES `/Users/` while stating the rule, or quotes a committed test
+fixture, is not leaking a machine path, and a gate that cannot tell the difference is
+one people learn to route around.
 """
 
 from __future__ import annotations
@@ -20,25 +42,166 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-RESULTS = Path(__file__).resolve().parents[1] / "results"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+RESULTS = REPO_ROOT / "results"
+DOCS = REPO_ROOT / "docs"
+ITERATIONS = REPO_ROOT / "iterations"
+TESTS = REPO_ROOT / "tests"
+
+# The machine-written record: (root, glob) pairs held to the BARE patterns. Nothing
+# under any of these has any business naming a home directory or a temp dir, in any
+# form, so there is no prose exemption here.
+RECORD_GLOBS = (
+    (RESULTS, "*.json*"),
+    (RESULTS, "*.log"),
+    (ITERATIONS, "**/*.json*"),
+)
+
+# The prose beside it, held to the anchored patterns with the test-source exemption.
+PROSE_GLOBS = ((DOCS, "**/*.md"), (ITERATIONS, "**/*.md"))
 
 FORBIDDEN = (
     re.compile(r"/var/folders/"),
     re.compile(r"/Users/"),
     re.compile(r"/home/\w"),
 )
+# The same three, each requiring a path segment to follow: what separates a real
+# machine path from prose about the shape of one.
+FORBIDDEN_IN_PROSE = (
+    re.compile(r"/var/folders/\w"),
+    re.compile(r"/Users/\w"),
+    re.compile(r"/home/\w"),
+)
 
 
-def test_no_results_file_carries_a_machine_path():
+def _test_source_lines() -> set[str]:
+    """Every line of this repo's test sources, stripped.
+
+    A documented plan that quotes a committed test fixture reproduces its paths
+    verbatim, and those paths are literals in a test rather than anything a machine
+    produced. Matching on the WHOLE line, not on the path alone, keeps the exemption
+    narrow: a new path smuggled into a doc has to already exist, character for
+    character, in a test file to be waved through.
+    """
+    return {
+        line.strip()
+        for path in sorted(TESTS.rglob("*.py"))
+        for line in path.read_text().splitlines()
+        if line.strip()
+    }
+
+
+def _record_offenders(globs=RECORD_GLOBS) -> dict[str, list[str]]:
+    """Every machine-written file under `globs` that names a machine path.
+
+    Takes its roots as an argument so the gate can be pointed at a planted leak in a
+    temp tree and shown to catch it. A gate only ever run over a clean repo is
+    indistinguishable from one whose patterns match nothing.
+    """
     offenders: dict[str, list[str]] = {}
-    for path in sorted(RESULTS.glob("*.json*")):
-        text = path.read_text()
-        hits = [p.pattern for p in FORBIDDEN if p.search(text)]
-        if hits:
-            offenders[path.name] = hits
+    for root, pattern in globs:
+        for path in sorted(root.glob(pattern)):
+            hits = [p.pattern for p in FORBIDDEN if p.search(path.read_text())]
+            if hits:
+                offenders[str(path.relative_to(root.parent))] = hits
+    return offenders
+
+
+def _prose_offenders(globs=PROSE_GLOBS) -> dict[str, list[str]]:
+    """The same, for prose: anchored patterns, minus lines that are verbatim test
+    sources."""
+    exempt = _test_source_lines()
+    offenders: dict[str, list[str]] = {}
+    for root, pattern in globs:
+        for path in sorted(root.glob(pattern)):
+            for number, line in enumerate(path.read_text().splitlines(), start=1):
+                if line.strip() in exempt:
+                    continue
+                hits = [p.pattern for p in FORBIDDEN_IN_PROSE if p.search(line)]
+                if hits:
+                    rel = path.relative_to(root.parent)
+                    offenders.setdefault(str(rel), []).append(f"line {number}: {hits}")
+    return offenders
+
+
+def test_no_machine_written_record_carries_a_machine_path():
+    """`results/` and `iterations/` — every file this program writes as evidence."""
+    offenders = _record_offenders()
     assert not offenders, (
-        f"machine paths in results/ — run `uv run python -m loop.scrub_results`: {offenders}"
+        f"machine paths in the committed record — run `uv run python -m loop.scrub_results` "
+        f"for anything under results/, and fix iterations/ by hand: {offenders}"
     )
+
+
+def test_the_gate_covers_the_whole_committed_record():
+    """The coverage itself, pinned. `iterations/` holds every candidate, decision,
+    validation record and calibration artifact this program has published, and it was
+    outside the gate while AGENTS.md told a human to grep it — which is the same shape
+    of gap that let a home directory sit in `docs/` for days."""
+    assert ITERATIONS in {root for root, _ in RECORD_GLOBS}
+    assert ITERATIONS in {root for root, _ in PROSE_GLOBS}
+    # And the roots are real directories with files in them, so the globs are not
+    # quietly scanning nothing.
+    assert list(ITERATIONS.glob("**/*.json")) and list(ITERATIONS.glob("**/*.md"))
+
+
+def test_no_committed_document_carries_a_machine_path():
+    """The gap that let a home directory sit in public history: docs were not covered.
+
+    Every `.md` under `docs/` and `iterations/`, at any depth — plans and iteration
+    READMEs included, because a plan is where someone pastes the command they actually
+    ran and an iteration README is where someone pastes what it printed.
+    """
+    offenders = _prose_offenders()
+    assert not offenders, (
+        "machine paths in committed documents — replace them with <HOME>/<TMPDIR> "
+        f"placeholders, preserving what the line was saying: {offenders}"
+    )
+
+
+def test_both_gates_catch_a_planted_leak(tmp_path):
+    """Both scanners, run over a tree that really does leak — the proof that the two
+    clean verdicts above are about the repo and not about a scanner that matches
+    nothing.
+
+    The record gate takes the bare patterns, so prose ABOUT a path trips it too; the
+    prose gate is anchored, so it does not. That difference is the design, and it is
+    asserted here rather than described.
+    """
+    root = tmp_path / "iterations"
+    (root / "iter-99").mkdir(parents=True)
+    (root / "iter-99" / "decision.json").write_text('{"note": "ran in /Users/someone/w"}')
+    (root / "iter-99" / "README.md").write_text(
+        "# notes\nran `cd /var/folders/qq/zz/T/w-1 && ls`\nthe rule names /Users/ and /home/\n"
+    )
+
+    record = _record_offenders(((root, "**/*.json*"),))
+    assert list(record) == ["iterations/iter-99/decision.json"]
+
+    prose = _prose_offenders(((root, "**/*.md"),))
+    assert list(prose) == ["iterations/iter-99/README.md"]
+    assert len(prose["iterations/iter-99/README.md"]) == 1, (
+        "line 3 names the patterns without being a path — prose about the rule is not a leak"
+    )
+
+
+def test_the_document_gate_would_catch_a_real_leak(tmp_path):
+    """The gate above passes; this proves it passes because the documents are clean.
+
+    A gate over a clean tree is indistinguishable from a gate that matches nothing, so
+    the patterns are run against a line that IS a leak — the exact shape the scrub above
+    removed from the r9 plan — and against the two shapes that must stay allowed.
+    """
+    leak = 'cd /Users/someone/Projects/refinery && node "/Users/someone/.claude/x.mjs"'
+    assert any(p.search(leak) for p in FORBIDDEN_IN_PROSE)
+    assert any(p.search("ran under /var/folders/qq/zz/T/w-1") for p in FORBIDDEN_IN_PROSE)
+    # Prose naming the patterns is not a leak.
+    prose = "No absolute filesystem paths (`/Users/`, `/home/`, `/var/folders/`)."
+    assert not any(p.search(prose) for p in FORBIDDEN_IN_PROSE)
+    # And the exemption is keyed to lines that really are in the test sources.
+    exempt = _test_source_lines()
+    assert leak.strip() not in exempt
+    assert '"detail": "saw /private/var/folders/qq/zz/T/w-1/x.txt",' in exempt
 
 
 def test_the_scrubber_changes_strings_by_substitution_and_nothing_else(tmp_path):
