@@ -11,6 +11,13 @@ from __future__ import annotations
 
 from fractions import Fraction
 
+# The recorded Provider fields the serving-parity gate compares. ``model`` is absent
+# only because it has its own dedicated gate (with a message naming both models);
+# together they cover exactly ``runner.carbon_env.PROVIDER_FIELDS_FINGERPRINTED`` —
+# a cross-module test pins that, so a field recorded in the fingerprint cannot go
+# ungated here.
+_SERVING_FIELDS = ("base_url", "reasoning_effort", "provider_order", "quantization", "responder")
+
 
 def _exact(task: dict) -> Fraction:
     """A task's pass rate as an EXACT fraction of its integer counts.
@@ -108,6 +115,20 @@ def delta(baseline: dict, candidate: dict) -> dict:
             "verifier version mismatch — results were produced by different "
             "runner versions; re-measure"
         )
+    # serving parity: the same model string served from a different endpoint, by a
+    # different provider, at a different quantization, or at a different reasoning
+    # effort is a different serving base in everything but name — a Δ across serving
+    # bases measures the serving swap, not the edit. None == None is a genuine match
+    # (the field was unset on both sides). A record predating these fields cannot
+    # slip past against one carrying them: the runner that stamps them hashes to a
+    # different runner_sha, so the verifier gate above refuses that pair first.
+    for field in _SERVING_FIELDS:
+        if base_fp.get(field) != cand_fp.get(field):
+            raise ValueError(
+                f"serving mismatch on {field}: baseline {base_fp.get(field)!r} vs "
+                f"candidate {cand_fp.get(field)!r} — Δ across serving bases measures "
+                f"the serving swap, not the edit"
+            )
     # Exact throughout, floated once at the end. Subtracting two rounded means is what
     # produced a -5.56e-06 "regression" between runs with identical integer counts.
     d_in = float(exact_split_rate(candidate, "held_in") - exact_split_rate(baseline, "held_in"))
