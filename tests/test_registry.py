@@ -18,9 +18,10 @@ from runner.tasks import TASKS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# A set, not the string "ABCDEFGH": `"EF" in "ABCDEFGH"` is True, so a substring
-# test would accept a malformed multi-letter cluster id.
-CLUSTERS = frozenset("ABCDEFGH")
+# A set, not the string "ABCDEFGHI": `"EF" in "ABCDEFGHI"` is True, so a substring
+# test would accept a malformed multi-letter cluster id. "I" is the onboarding /
+# instructions section (ONB-1..ONB-5, 2026-08-21).
+CLUSTERS = frozenset("ABCDEFGHI")
 
 # Phase 1 measurement contract §6's vetted primitive vocabulary, copied verbatim
 # from the plan's Global Constraints list (exactly 12) — never re-derived from
@@ -91,6 +92,13 @@ CONTRACT_PRIMITIVE_ALIAS = {
     "CMP-5": ("compaction", None),
     "CMP-6": ("compaction", None),
     "CMP-7": ("compaction", None),
+    # The onboarding / instructions candidate suite (2026-08-21, Phase 4 gate input).
+    # `alias=None` for the CMP-5/6/7 reason: the name is already the mnemonic.
+    "ONB-1": ("instructions", None),
+    "ONB-2": ("instructions", None),
+    "ONB-3": ("instructions", None),
+    "ONB-4": ("instructions", None),
+    "ONB-5": ("instructions", None),
 }
 
 
@@ -120,11 +128,12 @@ def test_contract_primitive_alias_assignments_hold():
 def test_registry_shape():
     names = [t.name for t in TASKS]
     assert len(names) == len(set(names)), "duplicate task names"
-    # 28 through Phase 2b, 31 once the Phase 2c scenario guards landed. A literal
-    # count is the one assertion that catches a task added to a cluster's SPECS and
-    # nowhere else — the membership set below would have to be edited to hide it,
-    # which is a deliberate act rather than an omission.
-    assert len(names) == 31
+    # 28 through Phase 2b, 31 once the Phase 2c scenario guards landed, 36 with the
+    # onboarding candidate suite (ONB-1..ONB-5, 2026-08-21). A literal count is the
+    # one assertion that catches a task added to a cluster's SPECS and nowhere else —
+    # the membership set below would have to be edited to hide it, which is a
+    # deliberate act rather than an omission.
+    assert len(names) == 36
     for t in TASKS:
         assert t.split in ATTEMPTS
         assert t.cluster in CLUSTERS
@@ -165,9 +174,16 @@ def test_registry_membership():
         "CMP-5",
         "CMP-6",
         "CMP-7",
+        "ONB-1",
+        "ONB-2",
+        "ONB-3",
+        "ONB-4",
+        "ONB-5",
     }
     held_in = {t.name for t in TASKS if t.split == "held_in"}
     held_out = {t.name for t in TASKS if t.split == "held_out"}
+    # ONB splits alternate held-in/held-out at authoring (the Phase 4 brief's rule);
+    # final split assignment is a gate input, so a re-split is a deliberate edit here.
     assert held_in == {
         "A1",
         "A2",
@@ -189,8 +205,25 @@ def test_registry_membership():
         "H3",
         "CMP-5",
         "CMP-7",
+        "ONB-1",
+        "ONB-3",
+        "ONB-5",
     }
-    assert held_out == {"A3", "A4", "B3", "C3", "D3", "E2", "E4", "F2", "G2", "H2", "CMP-6"}
+    assert held_out == {
+        "A3",
+        "A4",
+        "B3",
+        "C3",
+        "D3",
+        "E2",
+        "E4",
+        "F2",
+        "G2",
+        "H2",
+        "CMP-6",
+        "ONB-2",
+        "ONB-4",
+    }
 
 
 def test_e_fixtures_are_hidden_by_carbons_own_truncation():
@@ -830,6 +863,7 @@ _TASK_CLUSTER_MODULES = (
     "cluster_f",
     "cluster_g",
     "cluster_h",
+    "cluster_i",
 )
 
 
@@ -2839,3 +2873,363 @@ def test_cmp6_records_the_judges_own_token_cost():
     judged = judged_equivalent("e", "an answer containing x", provider)
     assert judged.verdict is True
     assert judged.tokens == 312
+
+
+# --- ONB-1..ONB-5: the onboarding / instructions candidate section --------------------
+#
+# Authored 2026-08-21 as PREPARATION for the Phase 4 human gate, not an activation.
+# B1 already proves the loaded layer is obeyed when it is the only voice in the room
+# and it passes 1.0 in every committed arm — saturated, so it cannot discriminate.
+# Every ONB task therefore seeds a way the loaded layer can LOSE: to a missing
+# pointer-follow, to a competing rule, to look-alike distractor content, to a stale
+# copy on disk, or to the model's own transcript memory. The offline probes below pin
+# each task's premise on the exact fixture bytes, through carbon's own machinery
+# (`load_agents_md`, `test_command`, `truncate`), never a reimplementation.
+
+
+def _onb_fixture_texts() -> dict[str, str]:
+    """Every instruction-layer fixture the section ships, by a stable label."""
+    from runner.tasks import cluster_i
+
+    return {
+        "ONB-1": cluster_i.ONB1_AGENTS_MD,
+        "ONB-2": cluster_i.ONB2_AGENTS_MD,
+        "ONB-3": cluster_i.onb3_agents_md(),
+        "ONB-4": cluster_i.ONB4_AGENTS_MD,
+        "ONB-5/v1": cluster_i.ONB5_V1_AGENTS_MD,
+        "ONB-5/v2": cluster_i.ONB5_V2_AGENTS_MD,
+    }
+
+
+def test_onb_sentinels_are_distinct_and_never_leak_into_a_prompt():
+    """No sentinel may be derivable from another or from any user prompt: every
+    oracle is a case-insensitive containment check, so a substring collision or a
+    prompt leak would let a wrong behavior read as the right one."""
+    from runner.tasks import cluster_i
+
+    sentinels = [
+        cluster_i.ONB1_SENTINEL,
+        cluster_i.ONB2_GENERAL_SIG,
+        cluster_i.ONB2_INCIDENT_SIG,
+        cluster_i.ONB3_CURRENT,
+        cluster_i.ONB3_EXAMPLE,
+        cluster_i.ONB4_CURRENT,
+        cluster_i.ONB4_STALE,
+        cluster_i.ONB5_V1,
+        cluster_i.ONB5_V2,
+    ]
+    assert len(sentinels) == len(set(sentinels))
+    for a in sentinels:
+        for b in sentinels:
+            if a != b:
+                assert a.lower() not in b.lower(), f"{a} is a substring of {b}"
+    prompts = (
+        cluster_i.ONB1_PROMPT,
+        cluster_i.ONB2_PROMPT,
+        cluster_i.ONB3_PROMPT,
+        cluster_i.ONB4_PROMPT,
+        cluster_i.ONB5_ASK1,
+        cluster_i.ONB5_ASK2,
+    )
+    for prompt in prompts:
+        for s in sentinels:
+            assert s.lower() not in prompt.lower(), f"{s} leaks into a prompt"
+
+
+def test_onb_layer_fixtures_load_verbatim_through_carbons_own_loader(tmp_path):
+    """The premise every ONB task shares: the authored bytes are what carbon's
+    loader delivers. Checked through `load_agents_md` itself, so a carbon change to
+    the filename contract or the read path fails here rather than only live."""
+    from harness.instructions import load_agents_md
+
+    for label, text in _onb_fixture_texts().items():
+        d = tmp_path / label.replace("/", "-")
+        d.mkdir()
+        (d / "AGENTS.md").write_text(text)
+        assert load_agents_md(d) == text, f"{label}: loader did not return the authored bytes"
+
+
+def test_onb_layer_fixtures_declare_no_test_command(tmp_path):
+    """None of the ONB instruction files may carry a `## Testing` block. The
+    verification gate arming mid-task would make an onboarding measurement partly a
+    verification one — and cluster B must remain the only cluster that ships a test
+    command, which is the `verify_attempts` coverage row's stated premise."""
+    from harness.instructions import test_command
+
+    for label, text in _onb_fixture_texts().items():
+        d = tmp_path / label.replace("/", "-")
+        d.mkdir()
+        (d / "AGENTS.md").write_text(text)
+        assert test_command(d) is None, f"{label} declares a test command"
+
+
+def test_onb1_token_lives_only_behind_the_pointer():
+    """ONB-1's premise: the loaded layer points at docs/release.md and the token is
+    THERE, nowhere else. If the token ever leaks into the layer or the chaff, the
+    task stops measuring pointer-following and becomes B1-shaped obedience."""
+    from runner.tasks import cluster_i
+
+    assert cluster_i.ONB1_DOC.count(cluster_i.ONB1_SENTINEL) == 1
+    assert cluster_i.ONB1_SENTINEL not in cluster_i.ONB1_AGENTS_MD
+    assert "docs/release.md" in cluster_i.ONB1_AGENTS_MD, "the layer must name the pointer target"
+    for name, text in cluster_i.ONB1_CHAFF.items():
+        assert cluster_i.ONB1_SENTINEL not in text, f"token leaked into chaff file {name}"
+
+
+def test_onb2_general_rule_and_specific_override_are_both_in_the_layer():
+    """ONB-2's premise: one layer, two rules, and the file itself says which wins.
+    The general signature comes FIRST (the position a first-match reader obeys), and
+    the override section states both halves of the required behavior."""
+    from runner.tasks import cluster_i
+
+    text = cluster_i.ONB2_AGENTS_MD
+    assert text.count(cluster_i.ONB2_GENERAL_SIG) == 1
+    assert text.count(cluster_i.ONB2_INCIDENT_SIG) == 1
+    assert text.index(cluster_i.ONB2_GENERAL_SIG) < text.index(cluster_i.ONB2_INCIDENT_SIG)
+    assert "instead" in text, "the override must say it replaces the general rule"
+    assert "must not appear" in text, "the override must forbid the general signature"
+
+
+def test_onb3_rule_is_buried_mid_layer_and_would_die_at_the_clamped_door():
+    """ONB-3's red-capability premise, in two halves.
+
+    First, placement: the operative code sits mid-file in a layer bigger than the
+    authored clamp, with a fenced look-alike marked as a placeholder sitting later.
+
+    Second, the mechanism claim: the instruction layer is the one delivery door with
+    no budget. Probed with carbon's own `truncate` under the AUTHORED file_injection
+    policy (every field pinned, so a live config edit cannot move this test): had the
+    same bytes gone through the clamped `@path` door, the operative code would have
+    been cut — `load_agents_md` keeping it whole is the only reason the model ever
+    sees it. That is the shipped behavior this task leans on, and the knob proposal
+    (an instruction-layer budget) the module docstring records rides on this fact.
+    """
+    from dataclasses import replace
+
+    from harness.harness_config import CONFIG
+    from harness.limits import truncate
+
+    from runner.tasks import cluster_i
+
+    body = cluster_i.onb3_agents_md()
+    assert len(body) > cluster_i.AUTHORED_CLAMP, "layer must exceed the authored clamp"
+    assert body.count(cluster_i.ONB3_CURRENT) == 1
+    assert body.count(cluster_i.ONB3_EXAMPLE) == 1
+    current_at = body.index(cluster_i.ONB3_CURRENT)
+    assert current_at > 1500, "operative rule drifted into the head window"
+    assert current_at < body.index(cluster_i.ONB3_EXAMPLE), "example must follow the rule"
+    example_section = body[body.index("## Example") :]
+    assert "placeholder" in example_section, "the example must be marked as a placeholder"
+    assert "never a real" in example_section, "the example must disclaim itself"
+    # The authored clamp policy (config v1 values, the same pin cluster_a uses) —
+    # NEVER the live one, which is the editable knob.
+    authored = replace(CONFIG.file_injection, strategy="head_tail", budget=4000, tail_fraction=0.5)
+    assert cluster_i.ONB3_CURRENT not in truncate(body, authored), (
+        "the operative code no longer sits in the region a clamped door would cut — "
+        "the no-budget claim about the instructions door has stopped being load-bearing"
+    )
+
+
+def test_onb4_current_and_stale_copies_disagree_and_are_seeded_apart():
+    """ONB-4's premise: exactly one current token in the loaded layer, exactly one
+    stale token in the README, and each absent from the other — the conjunction
+    oracle (current present AND stale absent) needs both directions seeded."""
+    from runner.tasks import cluster_i
+
+    assert cluster_i.ONB4_AGENTS_MD.count(cluster_i.ONB4_CURRENT) == 1
+    assert cluster_i.ONB4_STALE not in cluster_i.ONB4_AGENTS_MD
+    assert cluster_i.ONB4_README.count(cluster_i.ONB4_STALE) == 1
+    assert cluster_i.ONB4_CURRENT not in cluster_i.ONB4_README
+    # The staleness cue is visible in the bytes the model reads, so the task is a
+    # fair conflict rather than a trap: the README carries the older review date.
+    assert "2025-01" in cluster_i.ONB4_README
+    assert "2026-08" in cluster_i.ONB4_AGENTS_MD
+
+
+def test_onb5_versions_differ_on_exactly_the_code_line():
+    """The F1 discipline: the rewrite must change the code line and nothing else, so
+    the mid-session diff the model faces is exactly one fact — not a reworded file
+    whose other edits could explain a changed answer."""
+    from runner.tasks import cluster_i
+
+    before = cluster_i.ONB5_V1_AGENTS_MD.splitlines()
+    after = cluster_i.ONB5_V2_AGENTS_MD.splitlines()
+    changed = [i for i, (a, b) in enumerate(zip(before, after, strict=True)) if a != b]
+    assert len(changed) == 1, f"expected exactly one changed line, got {changed}"
+    assert cluster_i.ONB5_V1 in before[changed[0]]
+    assert cluster_i.ONB5_V2 in after[changed[0]]
+    assert cluster_i.ONB5_V1 not in cluster_i.ONB5_V2_AGENTS_MD
+    assert cluster_i.ONB5_V2 not in cluster_i.ONB5_V1_AGENTS_MD
+
+
+def test_onb_verdict_taxonomy_matches_g2s():
+    """The reply-shaped non-answer taxonomy, shared with G2 by IMPORT, not by copy:
+    a truncated generation and a tool-syntax leak are `not_attempted`, never a
+    statement about what the instruction layer carried. The marker object must BE
+    cluster_g's, so there is exactly one pinned copy for carbon's source to check."""
+    from runner.tasks import cluster_g, cluster_i
+
+    assert cluster_i.G2_TRUNCATION_MARKER is cluster_g.G2_TRUNCATION_MARKER
+
+    assert cluster_i.onb_verdict("anything", True) == (True, "pass", None)
+    truncated = cluster_i.onb_verdict(cluster_g.G2_TRUNCATION_MARKER, False)
+    assert truncated == (False, "not_attempted", "generation truncated before answer")
+    leaked = cluster_i.onb_verdict("<|tool_call|> {}", False)
+    assert leaked == (False, "not_attempted", "tool-syntax leak instead of answer")
+    assert cluster_i.onb_verdict("the wrong code", False) == (False, "fail", None)
+    # Real prose followed by the marker DID attempt an answer — strict startswith.
+    partial = cluster_i.onb_verdict("the code is X " + cluster_g.G2_TRUNCATION_MARKER, False)
+    assert partial == (False, "fail", None)
+
+
+def test_onb_every_exit_publishes_attempted():
+    """G2/CMP-5's seam, uniformly: every `return Attempt(` in every ONB runner
+    publishes the `attempted` metric, error exits included, or the metric's mean
+    covers only the attempts that got far enough to report it."""
+    import inspect
+
+    from runner.tasks import cluster_i
+
+    for fn in (
+        cluster_i.run_onb1,
+        cluster_i.run_onb2,
+        cluster_i.run_onb3,
+        cluster_i.run_onb4,
+        cluster_i.run_onb5,
+    ):
+        source = inspect.getsource(fn)
+        returns = source.count("return Attempt(")
+        published = source.count('"attempted"')
+        assert returns >= 2, f"{fn.__name__}: a premise-checked task needs an error exit"
+        assert published == returns, (
+            f"{fn.__name__} has {returns} exits and {published} `attempted` metrics"
+        )
+
+
+def test_onb_tool_tasks_anchor_agents_dir_at_the_seeded_workspace(monkeypatch):
+    """The one wiring where `agents_dir` is deliberately NOT the neutral dir.
+
+    Onboarding is the primitive whose fixture IS the AGENTS.md that `agents_dir`
+    loads, so ONB-1/ONB-4 must anchor it at the seeded workspace — the inverse of
+    the D3/E4/F1 pin. And their registries must be READ-ONLY (no bash, no write, no
+    edit): with no mutating tool, neither the layer nor the seeded files can be
+    rewritten mid-run, so oracle integrity holds by construction instead of by
+    post-run hash checks.
+    """
+    import tempfile
+    from types import SimpleNamespace
+
+    from runner.tasks import cluster_i
+
+    seen: list[dict] = []
+
+    class _CapturingAgent:
+        def __init__(self, *, agents_dir=".", workspace_root=None, **kwargs):
+            self._wiring = {"agents_dir": agents_dir, "workspace_root": workspace_root}
+            seen.append(self._wiring)
+            self.messages: list[dict] = []
+            self.tracer = None
+            scratch = Path(tempfile.mkdtemp(prefix="capturing-agent-scratch-"))
+            self.session_env = SimpleNamespace(scratch_root=scratch)
+            self.tools = None
+
+        def send(self, prompt: str) -> str:
+            return ""
+
+        def run(self, prompt: str, **kwargs) -> SimpleNamespace:
+            self._wiring["tools"] = self.tools
+            return SimpleNamespace(
+                text="", turns=0, stop_reason="stop", usage={}, verified=None, compactions=0
+            )
+
+        def close(self) -> None:
+            shutil.rmtree(self.session_env.scratch_root, ignore_errors=True)
+
+    monkeypatch.setattr("harness.agent.Agent", _CapturingAgent)
+
+    for run in (cluster_i.run_onb1, cluster_i.run_onb4):
+        seen.clear()
+        run()
+        assert len(seen) == 1, f"{run.__name__} built {len(seen)} agents, expected 1"
+        wiring = seen[0]
+        agents_dir = Path(wiring["agents_dir"])
+        assert (agents_dir / "AGENTS.md").is_file(), (
+            f"{run.__name__} anchored agents_dir at {wiring['agents_dir']!r}, which holds no "
+            f"AGENTS.md — the primitive under test never loads its own fixture there"
+        )
+        assert str(wiring["workspace_root"]) == str(wiring["agents_dir"]), (
+            f"{run.__name__} split workspace_root from agents_dir"
+        )
+        registered = wiring["tools"]
+        assert registered is not None, f"{run.__name__} never registered tools"
+        assert set(registered.names()) == {"read_file", "list_files", "search_text"}, (
+            f"{run.__name__} registry {registered.names()} is not the read-only trio"
+        )
+
+
+def test_onboarding_section_stays_outside_every_calibrated_gate():
+    """The isolation proof the Phase 4 brief requires: the ONB tasks are their own
+    section and PROVABLY no part of the compaction campaign suite or any calibrated
+    rule. Frozen literal sets on the loop side cannot gain members by accident, so
+    each disjointness below can only break by a deliberate edit over there — which
+    is exactly what this test exists to make loud.
+    """
+    from loop.calibrate import (
+        CONFIRMATION_GUARDS,
+        MODEL_TASKS,
+        SCENARIO_GUARDS,
+        SUPPORTED,
+    )
+    from loop.knob_coverage import KNOB_COVERAGE
+    from loop.validate import (
+        _SECTION_CONFIRM_GUARDS,
+        _SECTION_COVERED,
+        _SECTION_SUPPORTED,
+        RULE_SECTIONS,
+    )
+
+    onb = {t.name for t in TASKS if t.cluster == "I"}
+    assert onb == {"ONB-1", "ONB-2", "ONB-3", "ONB-4", "ONB-5"}
+    for t in TASKS:
+        if t.name in onb:
+            assert t.primitive == "instructions"
+            assert t.alias is None
+            # A prior is a claim about the suite as authored, never a baseline
+            # reading — and nothing has measured these yet.
+            assert t.expected_baseline == "uncertain"
+
+    # Not in the compaction campaign suite, its guards, or its null model coverage.
+    assert not onb & (SUPPORTED | CONFIRMATION_GUARDS | SCENARIO_GUARDS | MODEL_TASKS)
+    # Not in any calibrated section's supported set, covered set, or confirm guards.
+    assert RULE_SECTIONS == frozenset({"tool_output", "compaction"}), (
+        "RULE_SECTIONS changed — re-argue this isolation test against the new section"
+    )
+    for table in (_SECTION_SUPPORTED, _SECTION_COVERED, _SECTION_CONFIRM_GUARDS):
+        for section, tasks in table.items():
+            assert not onb & set(tasks), f"ONB tasks leaked into {section}'s gate sets"
+    # No knob row may name an ONB task as a MINER (literal names; the suite-wide
+    # sentinels expand over every live task by construction and carry no mining
+    # authority of their own — the loop mines a section's own named miners only).
+    for knob, coverage in KNOB_COVERAGE.items():
+        assert not onb & set(coverage["miners"]), f"{knob} names an ONB task as a miner"
+
+
+def test_onb_break_budgets_are_measured_from_the_fixtures():
+    """The `tool_output` coverage additions for ONB-1/ONB-4 follow the row's own
+    evidence rule: the number IS the largest seeded source a read can return whole,
+    so a fixture edit that changes the size must change the row in the same commit.
+    (`read_file` with no range returns the raw body — the measurement is the byte
+    length of the largest seeded file.)"""
+    from loop.knob_coverage import _TOOL_RESULT_READERS, _TOOL_USERS, MEASURED_BREAK_BUDGETS
+    from runner.tasks import cluster_i
+
+    onb1_sources = {"AGENTS.md": cluster_i.ONB1_AGENTS_MD, "docs/release.md": cluster_i.ONB1_DOC}
+    onb1_sources.update(cluster_i.ONB1_CHAFF)
+    assert MEASURED_BREAK_BUDGETS["ONB-1"] == max(len(t) for t in onb1_sources.values())
+
+    onb4_sources = {"AGENTS.md": cluster_i.ONB4_AGENTS_MD, "README.md": cluster_i.ONB4_README}
+    assert MEASURED_BREAK_BUDGETS["ONB-4"] == max(len(t) for t in onb4_sources.values())
+
+    for name in ("ONB-1", "ONB-4"):
+        assert name in _TOOL_RESULT_READERS
+        assert name in _TOOL_USERS

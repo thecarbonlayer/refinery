@@ -12,6 +12,7 @@ from runner.tasks import (
     cluster_f,
     cluster_g,
     cluster_h,
+    cluster_i,
 )
 
 TASKS: list[TaskSpec] = [
@@ -23,4 +24,5 @@ TASKS: list[TaskSpec] = [
     *cluster_f.SPECS,
     *cluster_g.SPECS,
     *cluster_h.SPECS,
+    *cluster_i.SPECS,
 ]
