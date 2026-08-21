@@ -2224,6 +2224,50 @@ def test_cmp5_extraction_fails_closed_when_the_judge_never_delivers():
     assert v.classification == NON_ANSWER_TOOL_SYNTAX
 
 
+def test_cmp5_a_delivered_no_decides_even_beside_an_undelivered_call():
+    """Review residual: the mixed pair — one role's judgment delivered, the other's
+    not — used to route on all-delivered and error out before a delivered NO could
+    decide. A delivered NO on EITHER role conclusively decides fail: a pass needs
+    both claims carried, so one refused claim settles the attempt regardless of
+    what happened to the other call. Error remains only where NO delivered verdict
+    decides — a lone YES (the undelivered half could still swing it) or no delivery
+    at all. All five mixed rows, pinned."""
+    from runner.judge import Judgment
+    from runner.tasks.cluster_g import (
+        CMP5_APPROVED_FACT,
+        CMP5_CURRENT,
+        CMP5_ROLES_NOT_PRESERVED,
+        JUDGE_UNAVAILABLE,
+        cmp5_outcome,
+    )
+
+    no = Judgment(False, "q", "VERDICT: NO\nQUOTE: q")
+    yes = Judgment(True, "s", "VERDICT: YES\nQUOTE: s")
+    undelivered = Judgment(False, "", "<provider error: down>", ran=False)
+    prose = f"The approved approach is {CMP5_CURRENT}."  # code-bearing, no fragment
+
+    def judge_with(approved_j, retired_j):
+        def judge(expected, answer):
+            return approved_j if expected == CMP5_APPROVED_FACT else retired_j
+
+        return judge
+
+    rows = [
+        (no, undelivered, "fail", CMP5_ROLES_NOT_PRESERVED),
+        (undelivered, no, "fail", CMP5_ROLES_NOT_PRESERVED),
+        (undelivered, undelivered, "error", JUDGE_UNAVAILABLE),
+        (yes, undelivered, "error", JUDGE_UNAVAILABLE),
+        (undelivered, yes, "error", JUDGE_UNAVAILABLE),
+    ]
+    for approved_j, retired_j, outcome, classification in rows:
+        v = cmp5_outcome(prose, judge_with(approved_j, retired_j))
+        assert (v.passed, v.outcome, v.classification) == (False, outcome, classification), (
+            (approved_j.ran, approved_j.verdict),
+            (retired_j.ran, retired_j.verdict),
+            (v.outcome, v.classification),
+        )
+
+
 def test_cmp5_publishes_its_classification_and_keeps_the_reply_last():
     """The detail string, pinned where it lands: `run_cmp5` records the parsed roles
     on every attempt, the taxonomy classification on every non-pass, and keeps

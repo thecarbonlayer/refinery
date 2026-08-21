@@ -658,13 +658,16 @@ def cmp5_outcome(reply: str, judge: Callable[[str, str], Judgment]) -> GuardVerd
     from "never answered". CMP-5's complete form is positive evidence the model
     answered, so a complete-but-wrong form stays a ``fail`` even beside a leak.
 
-    Fail closed, without blaming the strategy: if a needed judge verdict never
-    arrives (``Judgment.ran`` False — provider outage, unparseable output) and the
-    taxonomy cannot already explain the reply deterministically, the attempt is
-    ``error`` with ``JUDGE_UNAVAILABLE`` — never a silent pass, and never a
-    ``fail`` that would put a judge outage into a guard's rate. When the taxonomy
-    DOES explain it, the non-answer classification stands: it never depended on
-    the judge, so judge health must not turn it into an ``error``.
+    Fail closed, without blaming the strategy — but a DELIVERED verdict always
+    outranks an outage. A delivered NO on either role decides ``fail`` by itself
+    (a pass needs both claims carried, so one refused claim settles the attempt
+    regardless of the other call's delivery). ``error`` with ``JUDGE_UNAVAILABLE``
+    is reserved for the attempts where no delivered verdict decides: a lone YES
+    beside an undelivered call, or nothing delivered at all — never a silent
+    pass, and never a ``fail`` that would put a judge outage into a guard's rate.
+    And when the taxonomy already explains the reply deterministically, that
+    non-answer classification stands: it never depended on the judge, so judge
+    health must not turn it into an ``error``.
     """
     ok, approved, retired = cmp5_verdict(reply)
     if ok:
@@ -674,15 +677,19 @@ def cmp5_outcome(reply: str, judge: Callable[[str, str], Judgment]) -> GuardVerd
     low = reply.lower()
     if CMP5_CURRENT.lower() in low or CMP5_RETIRED.lower() in low:
         judgments = (judge(CMP5_APPROVED_FACT, reply), judge(CMP5_RETIRED_FACT, reply))
-        delivered = all(j.ran for j in judgments)
-        if delivered and all(j.verdict for j in judgments):
+        if all(j.ran and j.verdict for j in judgments):
             return GuardVerdict(True, "pass", None, "judged", judgments)
         non_answer = classify_non_answer(reply)
         if non_answer:
             return GuardVerdict(False, "not_attempted", non_answer, "mechanical", judgments)
-        if not delivered:
-            return GuardVerdict(False, "error", JUDGE_UNAVAILABLE, "judged", judgments)
-        return GuardVerdict(False, "fail", CMP5_ROLES_NOT_PRESERVED, "judged", judgments)
+        # A delivered NO decides by itself: a pass needs BOTH claims carried, so one
+        # refused claim settles the attempt regardless of the other call's delivery.
+        # Only when no delivered verdict decides — a lone YES beside an undelivered
+        # call (the missing half could still swing it), or nothing delivered at all
+        # — is the attempt an outage rather than a verdict.
+        if any(j.ran and not j.verdict for j in judgments):
+            return GuardVerdict(False, "fail", CMP5_ROLES_NOT_PRESERVED, "judged", judgments)
+        return GuardVerdict(False, "error", JUDGE_UNAVAILABLE, "judged", judgments)
     non_answer = classify_non_answer(reply)
     if non_answer:
         return GuardVerdict(False, "not_attempted", non_answer, "mechanical")
