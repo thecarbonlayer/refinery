@@ -46,6 +46,7 @@ from loop.calibrate import CONFIRMATION_GUARDS as _COMPACTION_GUARDS
 from loop.calibrate import COVERAGE_LEVEL as _PINNED_COVERAGE_LEVEL
 from loop.calibrate import MODEL_PATH as COMPACTION_MODEL_PATH
 from loop.calibrate import MODEL_TASKS as _COMPACTION_MODEL_TASKS
+from loop.calibrate import SERVING_PROVENANCE_FIELDS as _SERVING_PROVENANCE
 from loop.calibrate import SUPPORTED as _COMPACTION_SUPPORTED
 from loop.calibrate import _fingerprint_field as _provenance_value
 from loop.calibrate import recompute_model
@@ -356,7 +357,13 @@ _SECTION_SUPPORTED = {"compaction": _COMPACTION_SUPPORTED}
 # The provenance fields whose value must be PRESENT and EQUAL on both sides. `dirty_sha`
 # is deliberately absent from this tuple and checked separately below: None is a real,
 # meaningful value there (a clean tree), where None anywhere here means "this artifact
-# does not say", which is never evidence of a match.
+# does not say", which is never evidence of a match. The SERVING fields
+# (`_SERVING_PROVENANCE`, derived in `loop.calibrate` from the runner's own
+# fingerprinted-Provider enumeration) are absent for the same reason and checked in
+# their own loop below: None is real data on every one of them (unpinned local serving,
+# no effort requested, no scripted responder — `responder` is None on every network
+# provider), so routing them through this tuple's None-is-a-mismatch rule would refuse
+# every legitimate artifact ever measured.
 #
 # `runner_sha` is here as well as in the `computed_at_runner_sha` check, not instead of
 # it: that summary field is ONE arm's value (the first), so checking only it leaves every
@@ -487,6 +494,24 @@ def _provenance_mismatch(model: dict, fingerprint: dict, where: str) -> str:
                 f"{arm['dirty_sha']!r}, the measurements were recorded at "
                 f"{fingerprint['dirty_sha']!r}"
             )
+        # The serving identity: a null model measured on one serving base is not a
+        # model for measurements made on another — the same model name served from a
+        # different endpoint, provider, quantization, effort level, or scripted
+        # responder is different measured behavior. None is REAL data on every one of
+        # these fields, so `.get` on both sides is the honest read: None==None is a
+        # genuine match (both sides recorded the unpinned/unset state), and only a
+        # value difference refuses. An ABSENT key never reaches this loop with a
+        # present one across from it: the fields are stamped by `runner/`, so a record
+        # without them carries a pre-serving `runner_sha`, and the runner_sha gates
+        # above (the computed_at check and this arm's own row) refuse that pair first
+        # — asserted in tests rather than handled as a case that cannot fire.
+        for field in _SERVING_PROVENANCE:
+            if arm.get(field) != fingerprint.get(field):
+                return (
+                    f"{where} is STALE on {field} — arm {label!r} measured at "
+                    f"{arm.get(field)!r}, the measurements were recorded at "
+                    f"{fingerprint.get(field)!r}"
+                )
     return ""
 
 

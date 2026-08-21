@@ -1525,3 +1525,159 @@ def test_end_to_end_conditionals_are_computed_when_the_designated_baseline_is_pr
         assert Fraction(row["conditional_joint"]) <= Fraction(row["conditional_stage1_confirm"])
         total = sum(Fraction(v["conditional_joint"]) for v in row["by_evidence_split"].values())
         assert total == Fraction(row["conditional_joint"])
+
+
+# ---------------------------------------------------------------------------
+# Serving identity in the arm-homogeneity and provenance record (Phase 3
+# recalibration): two arms recorded under different serving pins are not a null
+# pair, exactly as two arms under different models are not. The fields are
+# DERIVED from `runner.carbon_env.PROVIDER_FIELDS_FINGERPRINTED` — the one
+# enumeration the fingerprint writes and the behavior key folds — so a future
+# Provider field cannot be fingerprinted yet skip arm homogeneity.
+# ---------------------------------------------------------------------------
+
+# A fingerprint of the shape the serving-stamping runner writes: the round-2
+# provenance fields plus every serving field, values as the pinned OpenRouter
+# base records them (reasoning_effort/responder None are REAL recorded states).
+_SERVING_FP = {
+    "runner_sha": "rsha-serving",
+    "config_version": 7,
+    "model": "carbon-model",
+    "gemma_sha": "aaaa",
+    "dirty_sha": None,
+    "base_url": "https://openrouter.example/api/v1",
+    "reasoning_effort": None,
+    "provider_order": "Novita",
+    "quantization": "bf16",
+    "responder": None,
+}
+
+# One genuinely different value per serving field, so each parametrized case is a
+# real serving swap and never an absent-key artifact.
+_OTHER_SERVING = {
+    "base_url": "http://localhost:1234/v1",
+    "reasoning_effort": "high",
+    "provider_order": "DeepInfra",
+    "quantization": "fp8",
+    "responder": "runner.fake_responder",
+}
+
+
+def test_serving_provenance_fields_derive_from_the_fingerprinted_provider_fields():
+    """Structural: the serving fields these checks gate are DERIVED from
+    `PROVIDER_FIELDS_FINGERPRINTED`, never a third hand-written list — `model` is
+    the one exclusion, because the provenance tuples already carry it as a field
+    of their own. `runner_sha` stays FIRST in both tuples: a record that predates
+    the serving fields was stamped by a different verifier version, so a
+    mixed-era pool must refuse on `runner_sha` before any serving comparison —
+    that ordering is what makes absent-vs-None serving handling unnecessary."""
+    from loop.calibrate import (
+        _FINGERPRINT_FIELDS,
+        _PROVENANCE_FIELDS,
+        SERVING_PROVENANCE_FIELDS,
+    )
+    from runner.carbon_env import PROVIDER_FIELDS_FINGERPRINTED
+
+    assert set(SERVING_PROVENANCE_FIELDS) | {"model"} == set(PROVIDER_FIELDS_FINGERPRINTED)
+    assert "model" not in SERVING_PROVENANCE_FIELDS
+    assert set(SERVING_PROVENANCE_FIELDS) <= set(_FINGERPRINT_FIELDS)
+    assert set(SERVING_PROVENANCE_FIELDS) <= set(_PROVENANCE_FIELDS)
+    assert "model" in _FINGERPRINT_FIELDS and "model" in _PROVENANCE_FIELDS
+    assert _FINGERPRINT_FIELDS[0] == "runner_sha"
+    assert _PROVENANCE_FIELDS[0] == "runner_sha"
+
+
+@pytest.mark.parametrize("field", sorted(_OTHER_SERVING))
+def test_two_arms_under_different_serving_pins_refuse_to_pool_naming_the_field(tmp_path, field):
+    """A Δ across serving bases measures the serving swap, not noise: the same
+    model name answering from a different endpoint, provider, quantization,
+    effort level, or scripted responder is a different serving base in
+    everything but name, and pooling two such arms as a null pair would launder
+    that swap into the noise floor."""
+    fp2 = {**_SERVING_FP, field: _OTHER_SERVING[field]}
+    _write(tmp_path, "full-a", _arm("full-a", {"A1": (2, 3, "held_in")}, fingerprint=_SERVING_FP))
+    _write(tmp_path, "full-b", _arm("full-b", {"A1": (1, 3, "held_in")}, fingerprint=fp2))
+    with pytest.raises(ValueError, match=field):
+        calibrate_model(["full-a", "full-b"], tmp_path, frozenset({"A1"}))
+
+
+def test_round1_calibrate_refuses_a_serving_mismatch_through_the_shared_check(tmp_path):
+    """`calibrate()` (round 1, kept for history) shares `_check_fingerprint_fields`
+    with round 2, so the serving extension gates both entry points at once."""
+    fp2 = {**_SERVING_FP, "provider_order": "DeepInfra"}
+    _write(tmp_path, "arm0", _arm("arm0", {"A1": (2, 3, "held_in")}, fingerprint=_SERVING_FP))
+    _write(tmp_path, "arm1", _arm("arm1", {"A1": (2, 3, "held_in")}, fingerprint=fp2))
+    with pytest.raises(ValueError, match="provider_order"):
+        calibrate(["arm0", "arm1"], tmp_path, frozenset({"A1"}))
+
+
+def test_a_shared_serving_identity_pools_and_is_recorded_per_arm(tmp_path):
+    """Agreement on every serving field — None included: unpinned local serving,
+    no effort requested, and no scripted responder are real recorded states, and
+    None==None on a STATED field is a genuine match — pools, and the provenance
+    rows carry the serving identity for audit exactly like the other fields."""
+    _write(tmp_path, "full-a", _arm("full-a", {"A1": (2, 3, "held_in")}, fingerprint=_SERVING_FP))
+    _write(tmp_path, "full-b", _arm("full-b", {"A1": (1, 3, "held_in")}, fingerprint=_SERVING_FP))
+
+    result = calibrate_model(["full-a", "full-b"], tmp_path, frozenset({"A1"}))
+
+    for row in result["provenance"]:
+        assert row["provider_order"] == "Novita"
+        assert row["quantization"] == "bf16"
+        assert row["base_url"] == "https://openrouter.example/api/v1"
+        assert row["reasoning_effort"] is None and "reasoning_effort" in row
+        assert row["responder"] is None and "responder" in row
+
+
+def test_pre_serving_arms_pool_under_their_own_runner_sha_with_no_back_fill(tmp_path):
+    """The committed p2c arms predate the serving fields. They still pool with
+    EACH OTHER — their shared `runner_sha` is the old verifier's, and that hash
+    is what keys every gate on their record — and the provenance rows carry NO
+    serving keys: the writer records what an arm stated, never a manufactured
+    None that would read as 'recorded unpinned' where the truth is 'unstated'.
+    This is the no-back-fill default: old arms stay refused by `runner_sha`
+    against anything current, not reinterpreted."""
+    old_fp = {
+        "runner_sha": "rsha-pre-serving",
+        "config_version": 7,
+        "model": "carbon-model",
+        "gemma_sha": "aaaa",
+        "dirty_sha": None,
+    }
+    _write(tmp_path, "full-a", _arm("full-a", {"A1": (2, 3, "held_in")}, fingerprint=old_fp))
+    _write(tmp_path, "full-b", _arm("full-b", {"A1": (1, 3, "held_in")}, fingerprint=old_fp))
+
+    result = calibrate_model(["full-a", "full-b"], tmp_path, frozenset({"A1"}))
+
+    for row in result["provenance"]:
+        for field in (
+            "base_url",
+            "reasoning_effort",
+            "provider_order",
+            "quantization",
+            "responder",
+        ):
+            assert field not in row, "no back-fill: an unstated field stays unstated"
+        assert row["runner_sha"] == "rsha-pre-serving"
+
+
+def test_a_mixed_era_pool_refuses_on_runner_sha_before_any_serving_field(tmp_path):
+    """The unreachability the no-back-fill decision rests on, asserted rather
+    than handled: an arm that lacks the serving fields was stamped by a
+    pre-serving runner, whose `runner_sha` differs from the serving-stamping
+    one by construction (the fields were added to `runner/`, which is what the
+    hash covers). `runner_sha` is checked first, so absent-vs-present serving
+    values are never compared — there is no absent-key branch to write."""
+    old_fp = {
+        "runner_sha": "rsha-pre-serving",
+        "config_version": 7,
+        "model": "carbon-model",
+        "gemma_sha": "aaaa",
+        "dirty_sha": None,
+    }
+    _write(tmp_path, "full-a", _arm("full-a", {"A1": (2, 3, "held_in")}, fingerprint=old_fp))
+    _write(tmp_path, "full-b", _arm("full-b", {"A1": (1, 3, "held_in")}, fingerprint=_SERVING_FP))
+    with pytest.raises(ValueError) as exc:
+        calibrate_model(["full-a", "full-b"], tmp_path, frozenset({"A1"}))
+    assert "runner_sha" in str(exc.value)
+    assert "provider_order" not in str(exc.value)
