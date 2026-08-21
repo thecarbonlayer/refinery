@@ -62,6 +62,7 @@ on, rather than orphaned forever under a prefix nothing will ever look for again
 from __future__ import annotations
 
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -106,11 +107,26 @@ def pytest_configure(config):
     genuine bug elsewhere in the import, or a same-named class from a
     different module) re-raises with its real traceback instead of being
     swallowed.
+
+    ``CARBON_BASE_EXIT_CODE`` is read from ``sys.modules`` AFTER the failure,
+    never imported inside the ``try``: the guard raises while
+    ``loop/__init__.py`` executes, so ``import loop.compat`` never returns and
+    a ``from loop.compat import CARBON_BASE_EXIT_CODE`` placed after it never
+    binds. A previous version did exactly that, and the handler then hit
+    UnboundLocalError on the constant — pytest INTERNALERROR, exit 3 — on the
+    one path this guard exists for. ``loop.compat`` itself IS fully
+    initialized and present in ``sys.modules`` at that point:
+    ``loop/__init__.py`` imports it before calling the guard, and a failed
+    package init rolls back ``loop``, not the already-imported submodule. If
+    the constant is ever NOT recoverable, the error re-raises with its real
+    traceback rather than exiting with a guessed code.
     """
     try:
         import loop.compat  # noqa: F401
-        from loop.compat import CARBON_BASE_EXIT_CODE
     except RuntimeError as exc:
         if type(exc).__name__ == "CarbonBaseError" and type(exc).__module__ == "loop.compat":
-            pytest.exit(f"\n{exc}", returncode=CARBON_BASE_EXIT_CODE)
+            exit_code = getattr(sys.modules.get("loop.compat"), "CARBON_BASE_EXIT_CODE", None)
+            if exit_code is None:
+                raise
+            pytest.exit(f"\n{exc}", returncode=exit_code)
         raise

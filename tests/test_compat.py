@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import builtins
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -168,6 +172,136 @@ def test_malformed_carbon_commit_rejected(tmp_path):
     with pytest.raises(CarbonBaseError) as excinfo:
         load_pin(pin_file)
     assert "carbon_commit" in str(excinfo.value)
+
+
+def _import_of_loop_compat_raises(exc: BaseException):
+    """A drop-in for builtins.__import__ that fails only for ``loop.compat``.
+
+    This is exactly the failure shape of an incompatible pair: the guard in
+    ``loop/__init__.py`` raises while ``import loop.compat`` executes, so the
+    statement never returns. Everything else imports normally.
+    """
+    real_import = builtins.__import__
+
+    def failing_import(name, *args, **kwargs):
+        if name == "loop.compat":
+            raise exc
+        return real_import(name, *args, **kwargs)
+
+    return failing_import
+
+
+def test_wrong_base_run_exits_with_designed_code_not_internalerror(tmp_path):
+    """The process-level exit contract, end to end through a real pytest run.
+
+    A stub ``loop`` package mirrors the real failure shape (``__init__.py``
+    imports ``loop.compat`` successfully, then the guard call raises), and a
+    stub conftest registers refinery's REAL ``pytest_configure`` hook. The
+    stub shadows the real ``loop`` because pytest inserts the rootdir (the
+    temp dir) at the front of sys.path when loading the stub conftest.
+
+    The run must terminate with CARBON_BASE_EXIT_CODE and the remediation
+    text on the output — not pytest's INTERNALERROR (exit 3), which is what
+    an UnboundLocalError inside the handler used to produce. Cheap despite
+    the subprocess: the guard aborts at configure time, before collection.
+    """
+    from loop.compat import CARBON_BASE_EXIT_CODE
+
+    marker = "stub remediation: carbon checkout is not the pinned base"
+    stub = tmp_path / "loop"
+    stub.mkdir()
+    (stub / "compat.py").write_text(
+        f"CARBON_BASE_EXIT_CODE = {CARBON_BASE_EXIT_CODE}\n"
+        "\n"
+        "\n"
+        "class CarbonBaseError(RuntimeError):\n"
+        "    pass\n"
+        "\n"
+        "\n"
+        "def require_carbon_base():\n"
+        f"    raise CarbonBaseError({marker!r})\n"
+    )
+    (stub / "__init__.py").write_text(
+        "from loop.compat import require_carbon_base as _require_carbon_base\n"
+        "\n"
+        "for _warning in _require_carbon_base():\n"
+        "    pass\n"
+    )
+    (tmp_path / "conftest.py").write_text(
+        "from tests.conftest import pytest_configure  # noqa: F401\n"
+    )
+    (tmp_path / "test_never_collected.py").write_text(
+        "def test_never_runs():\n"
+        "    raise AssertionError('the guard should have aborted before collection')\n"
+    )
+    env = {**os.environ, "PYTHONPATH": str(PIN_FILE.parent)}
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", str(tmp_path), "-p", "no:cacheprovider"],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(tmp_path),
+    )
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == CARBON_BASE_EXIT_CODE, output
+    assert marker in output
+    assert "INTERNALERROR" not in output
+    assert "UnboundLocalError" not in output
+
+
+def test_carbon_base_error_at_import_aborts_with_designed_exit_code(monkeypatch):
+    """The handler itself: a genuine CarbonBaseError raised by the import must
+    become pytest.exit with CARBON_BASE_EXIT_CODE and the remediation text —
+    not an UnboundLocalError because the constant's own import never ran."""
+    from loop.compat import CARBON_BASE_EXIT_CODE
+    from tests.conftest import pytest_configure
+
+    probe = CarbonBaseError("not the base (in-process probe)")
+    monkeypatch.setattr(builtins, "__import__", _import_of_loop_compat_raises(probe))
+    with pytest.raises(pytest.exit.Exception) as excinfo:
+        pytest_configure(config=None)
+    assert excinfo.value.returncode == CARBON_BASE_EXIT_CODE
+    assert "not the base (in-process probe)" in str(excinfo.value)
+
+
+def test_same_named_error_from_elsewhere_is_not_swallowed(monkeypatch):
+    """A RuntimeError subclass merely NAMED CarbonBaseError, defined anywhere
+    but loop.compat, must re-raise with its real traceback — never be folded
+    into the guard's clean exit."""
+    from tests.conftest import pytest_configure
+
+    class FakeCarbonBaseError(RuntimeError):
+        pass
+
+    FakeCarbonBaseError.__name__ = "CarbonBaseError"  # same name, foreign module
+    probe = FakeCarbonBaseError("imposter")
+    monkeypatch.setattr(builtins, "__import__", _import_of_loop_compat_raises(probe))
+    with pytest.raises(FakeCarbonBaseError, match="imposter"):
+        pytest_configure(config=None)
+
+
+def test_unrelated_runtime_error_is_not_swallowed(monkeypatch):
+    """A plain RuntimeError from the import is a genuine bug, not a wrong
+    checkout; it must re-raise, not exit clean."""
+    from tests.conftest import pytest_configure
+
+    probe = RuntimeError("a genuine bug elsewhere in the import")
+    monkeypatch.setattr(builtins, "__import__", _import_of_loop_compat_raises(probe))
+    with pytest.raises(RuntimeError, match="a genuine bug"):
+        pytest_configure(config=None)
+
+
+def test_unrecoverable_exit_code_reraises_rather_than_guessing(monkeypatch):
+    """If loop.compat is somehow NOT in sys.modules after the failure, the
+    designed exit code cannot be recovered — the error must re-raise with its
+    real traceback rather than exit with a guessed or wrong code."""
+    from tests.conftest import pytest_configure
+
+    probe = CarbonBaseError("no module left to read the code from")
+    monkeypatch.setattr(builtins, "__import__", _import_of_loop_compat_raises(probe))
+    monkeypatch.delitem(sys.modules, "loop.compat")
+    with pytest.raises(CarbonBaseError, match="no module left"):
+        pytest_configure(config=None)
 
 
 def test_carbon_base_exit_code_is_distinct():
