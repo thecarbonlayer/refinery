@@ -4,7 +4,11 @@ from runner.delta import acceptance, delta
 
 
 def _results(
-    tasks: dict[str, tuple[str, float]], model: str = "carbon", runner_sha: str = "rsha1"
+    tasks: dict[str, tuple[str, float]],
+    model: str = "carbon",
+    runner_sha: str = "rsha1",
+    provider_order: str | None = None,
+    quantization: str | None = None,
 ) -> dict:
     """Minimal results-JSON shape: name -> (split, pass_fraction). Attempts
     mirror the real suite (3 held_in, 5 held_out) so parity checks pass."""
@@ -15,6 +19,8 @@ def _results(
             "config_version": 1,
             "model": model,
             "runner_sha": runner_sha,
+            "provider_order": provider_order,
+            "quantization": quantization,
         },
         "tasks": {
             name: {"split": split, "pass_fraction": frac, "attempts": attempts[split]}
@@ -260,6 +266,33 @@ def test_delta_refuses_mismatched_runner_sha():
 def test_delta_accepts_matching_runner_sha():
     cand = _results({"A1": ("held_in", 1.0), "B1": ("held_in", 1.0), "A3": ("held_out", 0.4)})
     d = delta(BASE, cand)
+    assert "delta_in" in d and "delta_ho" in d
+
+
+def test_delta_refuses_mismatched_serving_base():
+    """Same model string, different provider or quantization is a different
+    serving base in everything but name — a Δ across them measures the serving
+    swap, not the edit."""
+    import pytest
+
+    tasks = {"A1": ("held_in", 1.0), "B1": ("held_in", 1.0), "A3": ("held_out", 0.4)}
+    pinned = _results(tasks, provider_order="deepinfra", quantization="fp8")
+    other_provider = _results(tasks, provider_order="together", quantization="fp8")
+    other_quant = _results(tasks, provider_order="deepinfra", quantization="bf16")
+    unpinned = _results(tasks)
+    with pytest.raises(ValueError, match="provider_order"):
+        delta(pinned, other_provider)
+    with pytest.raises(ValueError, match="quantization"):
+        delta(pinned, other_quant)
+    with pytest.raises(ValueError, match="provider_order"):
+        delta(pinned, unpinned)
+
+
+def test_delta_accepts_a_matching_serving_pin():
+    tasks = {"A1": ("held_in", 1.0), "B1": ("held_in", 1.0), "A3": ("held_out", 0.4)}
+    base = _results(tasks, provider_order="deepinfra", quantization="fp8")
+    cand = _results(tasks, provider_order="deepinfra", quantization="fp8")
+    d = delta(base, cand)
     assert "delta_in" in d and "delta_ho" in d
 
 

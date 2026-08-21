@@ -11,9 +11,24 @@ import runner.carbon_env as ge
 ROOT = Path("/fake/carbon")
 
 
-def _patch(monkeypatch, outputs: dict[tuple[str, ...], str]):
+def _patch(
+    monkeypatch, outputs: dict[tuple[str, ...], str], provider: SimpleNamespace | None = None
+):
     monkeypatch.setattr(ge, "_git", lambda root, *args: outputs[args])
-    monkeypatch.setattr(ge, "make_provider", lambda: SimpleNamespace(model="test-model"))
+    provider = provider or SimpleNamespace(
+        model="test-model",
+        base_url="http://localhost:1234/v1",
+        provider_order=None,
+        quantization=None,
+    )
+    monkeypatch.setattr(ge, "make_provider", lambda: provider)
+
+
+_CLEAN = {
+    ("rev-parse", "HEAD"): "abc123\n",
+    ("status", "--porcelain"): "",
+    ("diff", "HEAD"): "",
+}
 
 
 def test_fingerprint_clean_tree_has_no_dirty_sha(monkeypatch):
@@ -119,6 +134,73 @@ def test_runner_sha_changes_when_file_renamed(tmp_path):
     sha1 = ge.runner_sha(tmp_path)
     f.rename(tmp_path / "b.py")
     assert ge.runner_sha(tmp_path) != sha1
+
+
+def test_fingerprint_records_the_serving_pin_keys_even_unpinned(monkeypatch):
+    """Local unpinned is a real, recordable serving state — the keys are present
+    and None, the same convention as dirty_sha on a clean tree (None is data,
+    absent is unknown)."""
+    _patch(monkeypatch, _CLEAN)
+    fp = ge.carbon_fingerprint(ROOT)
+    assert fp["provider_order"] is None
+    assert fp["quantization"] is None
+
+
+def test_fingerprint_records_the_serving_pin_values(monkeypatch):
+    _patch(
+        monkeypatch,
+        _CLEAN,
+        provider=SimpleNamespace(
+            model="test-model",
+            base_url="https://openrouter.ai/api/v1",
+            provider_order="deepinfra",
+            quantization="fp8",
+        ),
+    )
+    fp = ge.carbon_fingerprint(ROOT)
+    assert fp["provider_order"] == "deepinfra"
+    assert fp["quantization"] == "fp8"
+    from runner import guard
+
+    assert fp["behavior_key"] == guard.fingerprint_behavior_key(fp)
+
+
+def test_fingerprint_refuses_a_remote_base_with_no_pin(monkeypatch):
+    """Fail closed at the fingerprint itself: an unpinned remote serving state is
+    unattributable, so nothing downstream (recording, resume, drift check) can
+    even name it. The refusal carries the remediation."""
+    from runner import guard
+
+    _patch(
+        monkeypatch,
+        _CLEAN,
+        provider=SimpleNamespace(
+            model="test-model",
+            base_url="https://openrouter.ai/api/v1",
+            provider_order=None,
+            quantization=None,
+        ),
+    )
+    with pytest.raises(guard.UnpinnedServing, match="LLM_PROVIDER_ORDER"):
+        ge.carbon_fingerprint(ROOT)
+
+
+def test_fingerprint_reads_a_pre_pin_carbon_as_unpinned(monkeypatch):
+    """A carbon Provider that predates the pin fields sends no pin whatever the
+    env says, so the truthful fingerprint is unpinned — fine locally, refused
+    remotely by the same gate as an unpinned modern carbon."""
+    from runner import guard
+
+    local = SimpleNamespace(model="test-model", base_url="http://localhost:1234/v1")
+    _patch(monkeypatch, _CLEAN, provider=local)
+    fp = ge.carbon_fingerprint(ROOT)
+    assert fp["provider_order"] is None
+    assert fp["quantization"] is None
+
+    remote = SimpleNamespace(model="test-model", base_url="https://openrouter.ai/api/v1")
+    _patch(monkeypatch, _CLEAN, provider=remote)
+    with pytest.raises(guard.UnpinnedServing):
+        ge.carbon_fingerprint(ROOT)
 
 
 def test_git_raises_on_failure(monkeypatch):

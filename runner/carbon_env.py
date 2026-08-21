@@ -86,10 +86,21 @@ def carbon_fingerprint(root: Path = CARBON_ROOT) -> dict:
     status text, so they perturb the hash even though the diff misses them). Clean
     tree -> ``dirty_sha`` is None.
 
+    ``provider_order``/``quantization`` are the serving pin, read from the same
+    ``Provider`` carbon's own calls use: the model string alone cannot distinguish
+    serving bases (the same model name answers from different providers at different
+    quantizations behind a router), so the pin is part of the fingerprint and of the
+    behavior key. None means unpinned — the complete, honest identity of a LOCAL
+    endpoint, and read via ``getattr`` because a carbon Provider predating the pin
+    fields sends no pin whatever the env says. A REMOTE base without the full pin is
+    refused right here (``guard.assert_serving_pinned``): an unpinned remote serving
+    state is unattributable, so nothing downstream — recording, resume, the mid-suite
+    drift check — can even name it.
+
     ``behavior_key`` (see runner/guard.py) folds config_version + model + runner_sha +
-    dirty_sha — everything that determines behavior *except* the committed
-    ``gemma_sha`` — so an additive carbon release resumes instead of forcing a
-    re-baseline."""
+    dirty_sha + the serving pin — everything that determines behavior *except* the
+    committed ``gemma_sha`` — so an additive carbon release resumes instead of forcing
+    a re-baseline."""
     from carbon import provenance
 
     from runner import guard
@@ -104,7 +115,11 @@ def carbon_fingerprint(root: Path = CARBON_ROOT) -> dict:
         if dirty
         else None
     )
-    model = make_provider().model
+    provider = make_provider()
+    model = provider.model
+    provider_order = getattr(provider, "provider_order", None)
+    quantization = getattr(provider, "quantization", None)
+    guard.assert_serving_pinned(provider.base_url, provider_order, quantization)
     prov = provenance(model=model, root=root)  # config_version + model (short sha unused)
     fp = {
         "gemma_sha": sha,
@@ -113,6 +128,8 @@ def carbon_fingerprint(root: Path = CARBON_ROOT) -> dict:
         "config_version": prov["config_version"],
         "model": model,
         "runner_sha": runner_sha(),
+        "provider_order": provider_order,
+        "quantization": quantization,
     }
     fp["behavior_key"] = guard.fingerprint_behavior_key(fp)
     return fp
