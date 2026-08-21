@@ -13,7 +13,13 @@ from pathlib import Path
 from tempfile import mkdtemp
 
 from runner.carbon_env import make_provider
-from runner.helpers import agent_metrics, compacted, neutral_dir
+from runner.helpers import (
+    TRUNCATION_MARK,
+    agent_metrics,
+    compacted,
+    injected_blocks,
+    neutral_dir,
+)
 from runner.spec import Attempt, TaskSpec
 
 A1_SENTINEL = "TUESDAY-KEY-9X"
@@ -192,6 +198,17 @@ def run_a3() -> Attempt:
 
 
 def run_a4() -> Attempt:
+    """CTX-2 (the alias below). Oracle unchanged: the tail needle in the reply.
+
+    LIVE PREMISE CHECK (Phase 4 authoring): before this task's numbers are trusted
+    on a new serving base, the recorded arm must show injection fired on every
+    attempt (`error` otherwise — knob-independent, `deliver()` always injects a
+    readable `@path`) and `injection_truncated` = 1.0 at the baseline config. The
+    truncation observation is RECORDED, never enforced: a candidate that legally
+    raises the budget past this fixture delivers it whole and passes honestly, and
+    an in-task assert on the live policy would veto exactly that candidate
+    (the AUTHORED_CLAMP lesson above).
+    """
     d = Path(mkdtemp(prefix="a4-"))
     filler = "\n".join(
         f"note {i:03d}: rollout checklist item {i} reviewed and signed off" for i in range(120)
@@ -207,15 +224,31 @@ def run_a4() -> Attempt:
             "Reply with just the password."
         )
         reply = result.text
+        blocks = injected_blocks(a.messages)
+        if not blocks:
+            return Attempt(
+                False,
+                "error",
+                "premise failed: no @path context block was injected",
+                turns=len(a.messages),
+                metrics=agent_metrics(a),
+            )
+        truncated = any(TRUNCATION_MARK in b for b in blocks)
+        delivered = any(A4_SENTINEL in b for b in blocks)
         ok = A4_SENTINEL.lower() in reply.lower()
     finally:
         a.close()  # the storage contract says close ends the scratch lifecycle
     return Attempt(
         passed=ok,
         outcome="pass" if ok else "fail",
-        detail=f"needle_in_reply={ok} reply={reply!r}",
+        detail=f"needle_in_reply={ok} needle_delivered={delivered} "
+        f"injection_truncated={truncated} reply={reply!r}",
         turns=len(a.messages),
-        metrics=agent_metrics(a, result=result),
+        metrics={
+            **agent_metrics(a, result=result),
+            "needle_delivered": float(delivered),
+            "injection_truncated": float(truncated),
+        },
     )
 
 
@@ -254,6 +287,12 @@ def run_a5() -> Attempt:
     The filler is deliberately uninformative and the question is answerable ONLY from
     the first section, so a model that receives a truncated head has nothing to fall
     back on and cannot pass by guessing.
+
+    LIVE PREMISE CHECK (Phase 4 authoring; this is CTX-1): injection fired on every
+    attempt (`error` otherwise), and at the baseline config `injection_truncated` =
+    1.0 with `needle_delivered` = 1.0 — the head needle inside a block that WAS
+    cut. Both observations are recorded, never enforced, for run_a4's reason: the
+    live policy is the knob under test.
     """
     d = Path(mkdtemp(prefix="a5-"))
     body = a5_body()
@@ -266,15 +305,31 @@ def run_a5() -> Attempt:
             "Reply with just the token."
         )
         reply = result.text
+        blocks = injected_blocks(a.messages)
+        if not blocks:
+            return Attempt(
+                False,
+                "error",
+                "premise failed: no @path context block was injected",
+                turns=len(a.messages),
+                metrics=agent_metrics(a),
+            )
+        truncated = any(TRUNCATION_MARK in b for b in blocks)
+        delivered = any(A5_SENTINEL in b for b in blocks)
         ok = A5_SENTINEL.lower() in reply.lower()
     finally:
         a.close()  # the storage contract says close ends the scratch lifecycle
     return Attempt(
         passed=ok,
         outcome="pass" if ok else "fail",
-        detail=f"needle_in_reply={ok} reply={reply!r}",
+        detail=f"needle_in_reply={ok} needle_delivered={delivered} "
+        f"injection_truncated={truncated} reply={reply!r}",
         turns=len(a.messages),
-        metrics=agent_metrics(a, result=result),
+        metrics={
+            **agent_metrics(a, result=result),
+            "needle_delivered": float(delivered),
+            "injection_truncated": float(truncated),
+        },
     )
 
 

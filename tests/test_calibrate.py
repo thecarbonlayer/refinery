@@ -1170,6 +1170,43 @@ def test_the_null_models_coverage_pin_is_supported_union_guards():
     assert "G4" not in CONFIRMATION_GUARDS | SCENARIO_GUARDS
 
 
+def test_ctx_candidates_stay_outside_every_calibrated_set_and_gate():
+    """Phase 4's isolation pin: the CTX context-delivery tasks are registry members
+    and NOTHING else until their own null campaign runs and a calibration installs.
+
+    Registration must not move the compaction machinery by a single name: the CTX
+    tasks join `TASKS` (so a full-suite arm measures them and their own campaign
+    can pool them) but enter no gain set, no guard set, no null-model coverage,
+    and no confirmation rerun list. And `file_injection` — the knob they observe —
+    maps to NO rule section: a candidate editing it is 'unmapped' to
+    `rule_disposition`, so the calibrated three-outcome rule cannot be applied to
+    it by accident before its calibration exists. The literal pins in the test
+    above prove the compaction sets are byte-identical; this one proves the CTX
+    names are outside all of them."""
+    from loop.calibrate import CONFIRMATION_GUARDS, MODEL_TASKS, SCENARIO_GUARDS, SUPPORTED
+    from loop.validate import (
+        _FIELD_SECTION,
+        _SECTION_CONFIRM_GUARDS,
+        CALIBRATION_REQUIRED,
+        RULE_SECTIONS,
+    )
+    from runner.tasks import TASKS
+
+    ctx = {t.name for t in TASKS if t.name.startswith("CTX-")}
+    assert ctx == {"CTX-3", "CTX-4", "CTX-5", "CTX-6", "CTX-7"}
+    for task in (t for t in TASKS if t.name in ctx):
+        assert task.primitive == "context-delivery"
+    calibrated = SUPPORTED | MODEL_TASKS | CONFIRMATION_GUARDS | SCENARIO_GUARDS
+    assert ctx.isdisjoint(calibrated), f"CTX task(s) entered a calibrated set: {ctx & calibrated}"
+    for section, guards in _SECTION_CONFIRM_GUARDS.items():
+        assert ctx.isdisjoint(guards), f"CTX task(s) entered {section}'s confirm guards"
+    assert "file_injection" not in _FIELD_SECTION, (
+        "file_injection gained a rule-section mapping — that step belongs to the "
+        "calibration install AFTER the CTX null campaign, not to task authoring"
+    )
+    assert "file_injection" not in RULE_SECTIONS | CALIBRATION_REQUIRED
+
+
 def _seven_task_arm(label: str, *, filtered: bool, attempts: int) -> dict:
     """An arm covering the whole Phase 2c coverage set at one attempt count."""
     held_out = {"G2", "CMP-6"}
