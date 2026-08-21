@@ -40,7 +40,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from runner.judge import AGREEMENT_PATH, JUDGE_PROMPT_SHA, judged_equivalent
+from runner.judge import AGREEMENT_PATH, JUDGE_PARSER_VERSION, JUDGE_PROMPT_SHA, judged_equivalent
 from runner.suite import RESULTS_DIR
 from runner.tasks.cluster_a import A1_SENTINEL
 from runner.tasks.cluster_g import G2_FACT_A, G2_FACT_B, G4_FILES, G4_NEXT, G4_REJECTED, G5_FILES
@@ -234,6 +234,10 @@ def run_validation(corpus: list[CorpusPair], provider) -> dict:
     return {
         "pass": passes,
         "judge_prompt_sha": JUDGE_PROMPT_SHA,
+        # The parser half of the artifact's identity: the activation gate refuses
+        # an artifact measured under any other parser version, exactly as it
+        # refuses one measured for any other prompt.
+        "judge_parser_version": JUDGE_PARSER_VERSION,
         "model": getattr(provider, "model", None),
         "agreement_threshold": AGREEMENT_THRESHOLD,
         "overall_agreement": overall_agreement,

@@ -46,6 +46,92 @@ def test_the_committed_agreement_artifact_was_measured_for_this_prompt():
     assert artifact["judge_prompt_sha"] == PINNED_JUDGE_PROMPT_SHA
 
 
+# The parsing code's own digest, a LITERAL like the prompt sha above and for the same
+# reason: `_normalized` + `quote_is_grounded` + `_parse_judgment` ARE the judge's
+# reading of its model's output, and the prompt sha cannot see them change. This pin
+# goes red on ANY edit to those three functions. The discipline it enforces: decide,
+# per edit, whether the change can alter a verdict or quote for the same raw output —
+# if yes, bump JUDGE_PARSER_VERSION in the same commit (the activation gate then
+# refuses the stale validation artifact until a re-run); if no (comments, formatting),
+# update this digest alone and say so in the commit.
+PINNED_JUDGE_PARSER_SOURCE_SHA = "97a91f9ae6892c13b3ff92eaa0445f07a0eea75143998428c43020f965ffe6b5"
+
+
+def _parser_source() -> str:
+    import inspect
+
+    from runner import judge
+
+    return "".join(
+        inspect.getsource(f)
+        for f in (judge._normalized, judge.quote_is_grounded, judge._parse_judgment)
+    )
+
+
+def test_judge_parser_version_is_pinned_against_the_parsing_source():
+    """Handoff item: the prompt sha alone cannot see parser-behavior changes. The
+    version constant is the artifact-facing half (the activation gate compares it);
+    this source pin is the discipline-facing half — it makes forgetting the bump
+    impossible by turning every parser edit into a deliberate decision."""
+    from runner.judge import JUDGE_PARSER_VERSION
+
+    assert JUDGE_PARSER_VERSION == 2  # 1 = strict two-line parse; 2 = grounding rule
+    digest = hashlib.sha256(_parser_source().encode()).hexdigest()
+    assert digest == PINNED_JUDGE_PARSER_SOURCE_SHA, (
+        "the judge parser's source changed: if the change can alter any verdict or "
+        "quote for the same raw judge output, bump JUDGE_PARSER_VERSION in the same "
+        "commit and queue a re-validation; either way update the pinned digest "
+        "deliberately, never reflexively"
+    )
+
+
+def test_validation_status_requires_the_artifact_to_match_the_parser_version(tmp_path):
+    """The activation gate's new conjunct: an artifact is a measurement of a
+    (prompt, parser) PAIR, and either half changing leaves it describing a judge
+    that no longer exists. Missing and mismatched versions both refuse — a missing
+    key is an artifact measured before the parser was versioned at all."""
+    from runner.judge import JUDGE_PARSER_VERSION, JUDGE_PROMPT_SHA, validation_status
+
+    good = tmp_path / "agreement.json"
+    good.write_text(
+        json.dumps(
+            {
+                "pass": True,
+                "judge_prompt_sha": JUDGE_PROMPT_SHA,
+                "judge_parser_version": JUDGE_PARSER_VERSION,
+            }
+        )
+    )
+    assert validation_status(good) == (True, "")
+
+    for version in (None, JUDGE_PARSER_VERSION + 1, "2"):
+        artifact = {"pass": True, "judge_prompt_sha": JUDGE_PROMPT_SHA}
+        if version is not None:
+            artifact["judge_parser_version"] = version
+        stale = tmp_path / "stale.json"
+        stale.write_text(json.dumps(artifact))
+        ok, why = validation_status(stale)
+        assert ok is False
+        assert "judge_parser_version" in why and "re-run" in why
+
+
+def test_the_committed_agreement_artifact_is_refused_until_revalidated_for_this_parser():
+    """The honest current state, pinned on purpose so it cannot look accidental.
+
+    The committed artifact was measured before the parser carried a version (and
+    before the grounding rule existed). The offline re-scoring below shows its
+    NUMBERS survive the stricter rule — but the gate's job is identity, not
+    arithmetic: an artifact measured under a different parser is not evidence about
+    this one. So CMP-5 and CMP-6 refuse (outcome `error`) until the queued live
+    re-validation on the new serving base writes an artifact stamped with the
+    current version. Fail closed is the designed state here, not a regression."""
+    from runner.judge import validation_status
+
+    ok, why = validation_status()
+    assert ok is False
+    assert "judge_parser_version" in why
+
+
 def test_yes_verdict_parses_quote():
     raw = "VERDICT: YES\nQUOTE: never exceed 30 seconds"
     provider = fake(scripted=lambda messages: raw)
@@ -506,6 +592,11 @@ def test_run_validation_computes_agreement_and_disagreements():
     assert result["disagree_count"] == 1
     assert result["disagreements"][0]["expected"] == "E"
     assert result["judge_prompt_sha"] == JUDGE_PROMPT_SHA
+    # The artifact records the (prompt, parser) pair it measured — the activation
+    # gate refuses it the moment either half moves.
+    from runner.judge import JUDGE_PARSER_VERSION
+
+    assert result["judge_parser_version"] == JUDGE_PARSER_VERSION
     assert result["model"] == provider.model
 
 
@@ -559,6 +650,9 @@ def test_main_writes_agreement_artifact(tmp_path):
     on_disk = json.loads(output_path.read_text())
     assert on_disk == result
     assert on_disk["judge_prompt_sha"] == JUDGE_PROMPT_SHA
+    from runner.judge import JUDGE_PARSER_VERSION
+
+    assert on_disk["judge_parser_version"] == JUDGE_PARSER_VERSION
     assert on_disk["model"] == provider.model
     assert on_disk["total_pairs"] == len(judge_validate.build_corpus())
 

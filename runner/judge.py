@@ -87,18 +87,19 @@ AGREEMENT_PATH = (
 def validation_status(path: Path | None = None) -> tuple[bool, str]:
     """Is this judge validated for THIS prompt? ``(ok, reason)``.
 
-    Contract §4: CMP-6's activation is gated on
+    Contract §4: the judged verifiers' activation (CMP-6's verdict, CMP-5's
+    extraction lane) is gated on
     ``iterations/judge-validation/agreement.json`` existing, recording
-    ``pass: true``, AND carrying the CURRENT ``JUDGE_PROMPT_SHA``. Any other
-    state returns False with the reason, and CMP-6 turns that into an
-    ``error`` outcome — never a mechanical fallback, which would silently
-    replace a meaning check with a substring check and report the result under
-    the same task name.
+    ``pass: true``, AND carrying the CURRENT ``JUDGE_PROMPT_SHA`` and
+    ``JUDGE_PARSER_VERSION``. Any other state returns False with the reason,
+    and the tasks turn that into an ``error`` outcome — never a mechanical
+    fallback, which would silently replace a meaning check with a substring
+    check and report the result under the same task name.
 
-    The sha comparison is the half that is easy to forget and the one that
-    matters most: the artifact is a measurement of a SPECIFIC prompt's
-    agreement with mechanical ground truth, and a prompt edit leaves the file
-    on disk, passing, describing a judge that no longer exists.
+    The identity comparisons are the half that is easy to forget and the one
+    that matters most: the artifact is a measurement of a SPECIFIC prompt read
+    by a SPECIFIC parser, and an edit to either leaves the file on disk,
+    passing, describing a judge that no longer exists.
 
     Fails CLOSED on every unreadable state (missing file, bad JSON, an OSError)
     — the same discipline as ``_parse_judgment``.
@@ -117,6 +118,16 @@ def validation_status(path: Path | None = None) -> tuple[bool, str]:
         return False, (
             f"validation artifact was measured for judge_prompt_sha={str(recorded_sha)[:12]!r}, "
             f"this judge is {JUDGE_PROMPT_SHA[:12]!r} — re-run the validation"
+        )
+    # The parser half of the identity, same discipline as the sha: an artifact is a
+    # measurement of a (prompt, parser) PAIR. A missing key is an artifact measured
+    # before the parser was versioned at all — refused for the same reason a
+    # mismatch is, because "the parser it describes no longer exists" covers both.
+    recorded_parser = artifact.get("judge_parser_version")
+    if recorded_parser != JUDGE_PARSER_VERSION:
+        return False, (
+            f"validation artifact was measured for judge_parser_version={recorded_parser!r}, "
+            f"this parser is {JUDGE_PARSER_VERSION} — re-run the validation"
         )
     if artifact.get("pass") is not True:
         return False, f"validation artifact records pass={artifact.get('pass')!r}"
@@ -171,6 +182,24 @@ def _usage_tokens(usage: dict) -> int:
         return int(usage.get("prompt_tokens", 0) or 0) + int(usage.get("completion_tokens", 0) or 0)
     except (TypeError, ValueError):
         return 0
+
+
+# The parser's behavior version, pinned by the activation gate BESIDE the prompt
+# sha. The sha pins what the judge is ASKED; it cannot see a change in how the
+# reply is READ — and that reading is the three functions below (``_normalized``,
+# ``quote_is_grounded``, ``_parse_judgment``). The validation artifact records the
+# version it was measured under, and ``validation_status`` refuses any artifact
+# measured under a different one, so a parser change makes the judge loudly
+# unvalidated instead of silently re-scoring history under a new rule.
+#
+# BUMP THIS, in the same commit, on any change to those functions that could alter
+# a verdict or quote for the same raw judge output — a new refusal rule, a
+# loosened or tightened match, a reordered check. Additive metadata that leaves
+# every verdict and quote untouched does not bump. ``tests/test_judge.py`` pins
+# the three functions' source by digest, so no edit can skip this decision
+# silently. History: 1 = the strict two-line parse; 2 = the grounding rule (a YES
+# must cite a verbatim span of the answer).
+JUDGE_PARSER_VERSION = 2
 
 
 def _normalized(text: str) -> str:

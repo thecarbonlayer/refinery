@@ -2263,7 +2263,15 @@ def test_cmp6_refuses_a_stale_prompt_sha_and_a_failing_artifact(monkeypatch, tmp
     assert cluster_g.run_cmp6().outcome == "error"
 
     failing = tmp_path / "failing.json"
-    failing.write_text(json.dumps({"pass": False, "judge_prompt_sha": judge_mod.JUDGE_PROMPT_SHA}))
+    failing.write_text(
+        json.dumps(
+            {
+                "pass": False,
+                "judge_prompt_sha": judge_mod.JUDGE_PROMPT_SHA,
+                "judge_parser_version": judge_mod.JUDGE_PARSER_VERSION,
+            }
+        )
+    )
     monkeypatch.setattr(judge_mod, "AGREEMENT_PATH", failing)
     attempt = cluster_g.run_cmp6()
     assert attempt.outcome == "error" and "pass=False" in attempt.detail
@@ -2355,16 +2363,26 @@ def test_cmp6_outcome_refuses_on_a_judge_that_never_delivered():
 
 
 def test_judge_validation_status_accepts_only_a_passing_artifact_at_this_prompt(tmp_path):
-    from runner.judge import JUDGE_PROMPT_SHA, validation_status
+    from runner.judge import JUDGE_PARSER_VERSION, JUDGE_PROMPT_SHA, validation_status
 
     good = tmp_path / "agreement.json"
-    good.write_text(json.dumps({"pass": True, "judge_prompt_sha": JUDGE_PROMPT_SHA}))
+    good.write_text(
+        json.dumps(
+            {
+                "pass": True,
+                "judge_prompt_sha": JUDGE_PROMPT_SHA,
+                "judge_parser_version": JUDGE_PARSER_VERSION,
+            }
+        )
+    )
     assert validation_status(good) == (True, "")
 
+    current = {"judge_prompt_sha": JUDGE_PROMPT_SHA, "judge_parser_version": JUDGE_PARSER_VERSION}
     for artifact in (
-        {"pass": True, "judge_prompt_sha": "deadbeef"},
-        {"pass": False, "judge_prompt_sha": JUDGE_PROMPT_SHA},
-        {"judge_prompt_sha": JUDGE_PROMPT_SHA},
+        {**current, "pass": True, "judge_prompt_sha": "deadbeef"},
+        {**current, "pass": True, "judge_parser_version": JUDGE_PARSER_VERSION + 1},
+        {**current, "pass": False},
+        current,
         [],
     ):
         path = tmp_path / "candidate.json"
