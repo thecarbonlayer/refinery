@@ -67,14 +67,21 @@ PROVIDER_FIELDS_FINGERPRINTED = (
     "reasoning_effort",
     "provider_order",
     "quantization",
+    # Recorded as a MARKER, not the callable: None for a network provider, else the
+    # responder's qualified name (repo code, so ``runner_sha`` pins its behavior).
+    # Scripted responders are REAL in this suite — cluster H builds
+    # ``Provider(..., responder=...)`` per task, and those results record under the
+    # suite's environment fingerprint — but those live on per-task providers inside
+    # ``runner/tasks/`` (verifier apparatus, hashed by ``runner_sha``), not on the
+    # env provider this fingerprint attests. The field is here so that a responder
+    # ever reaching the SUITE-LEVEL provider cannot masquerade as a network serving
+    # base: it would be named in the record and would move the behavior key.
+    "responder",
 )
 PROVIDER_FIELDS_EXCLUDED = {
     "api_key": "secret — identifies the account, never the served behavior; the "
     "fingerprint is written into every record and results JSON, so recording it "
     "would commit a credential (scrub rule). MUST NOT be fingerprinted.",
-    "responder": "code-level test seam (a callable, not config); Provider.from_env "
-    "never sets it, so a provider built from env — the only kind this suite "
-    "fingerprints — cannot carry one, and a callable has no stable identity to record.",
 }
 
 
@@ -118,8 +125,9 @@ def carbon_fingerprint(root: Path = CARBON_ROOT) -> dict:
     ``guard.normalize_base_url``) so a cosmetic variant of one endpoint cannot split
     keys. None means unset — the truthful record of a field that puts nothing on the
     wire, read via ``getattr`` because a carbon Provider predating a field sends
-    nothing for it whatever the env says. ``api_key`` and ``responder`` are excluded
-    by name (``PROVIDER_FIELDS_EXCLUDED``) with the reasons stated there.
+    nothing for it whatever the env says. ``responder`` is recorded as a marker (None,
+    or the callable's qualified name — see the field list above); ``api_key`` is
+    excluded by name (``PROVIDER_FIELDS_EXCLUDED``) with the reason stated there.
 
     A REMOTE base without the full pin is refused right here
     (``guard.assert_serving_pinned``): an unpinned remote serving state is
@@ -147,6 +155,20 @@ def carbon_fingerprint(root: Path = CARBON_ROOT) -> dict:
     provider = make_provider()
     serving = {field: getattr(provider, field, None) for field in PROVIDER_FIELDS_FINGERPRINTED}
     serving["base_url"] = guard.normalize_base_url(serving["base_url"])
+    # The responder marker: the callable itself is uncapturable, so what is recorded
+    # is WHICH repo callable — module.qualname, whose behavior runner_sha pins. A
+    # callable with no stable name (e.g. functools.partial) refuses: an unstable
+    # marker would move the behavior key between runs of identical behavior.
+    if serving["responder"] is not None:
+        resp = serving["responder"]
+        module = getattr(resp, "__module__", None)
+        qualname = getattr(resp, "__qualname__", None)
+        if not module or not qualname:
+            raise RuntimeError(
+                "cannot fingerprint the provider's responder: it has no stable "
+                "qualified name to record — use a module-level callable"
+            )
+        serving["responder"] = f"{module}.{qualname}"
     guard.assert_serving_pinned(
         serving["base_url"] or "", serving["provider_order"], serving["quantization"]
     )

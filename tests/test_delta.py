@@ -11,6 +11,7 @@ def _results(
     quantization: str | None = None,
     base_url: str = "http://localhost:1234/v1",
     reasoning_effort: str | None = None,
+    responder: str | None = None,
 ) -> dict:
     """Minimal results-JSON shape: name -> (split, pass_fraction). Attempts
     mirror the real suite (3 held_in, 5 held_out) so parity checks pass."""
@@ -25,6 +26,7 @@ def _results(
             "quantization": quantization,
             "base_url": base_url,
             "reasoning_effort": reasoning_effort,
+            "responder": responder,
         },
         "tasks": {
             name: {"split": split, "pass_fraction": frac, "attempts": attempts[split]}
@@ -323,6 +325,18 @@ def test_delta_refuses_mismatched_reasoning_effort():
     high = _results(tasks, reasoning_effort="high")
     with pytest.raises(ValueError, match="reasoning_effort"):
         delta(low, high)
+
+
+def test_delta_refuses_mismatched_responder():
+    """A scripted (responder-served) result against a network-served one is not a
+    comparison of harness states at all — one side never talked to a model."""
+    import pytest
+
+    tasks = {"A1": ("held_in", 1.0), "B1": ("held_in", 1.0), "A3": ("held_out", 0.4)}
+    network = _results(tasks)
+    scripted = _results(tasks, responder="runner.tasks.somewhere._scripted")
+    with pytest.raises(ValueError, match="responder"):
+        delta(network, scripted)
 
 
 def test_delta_serving_gate_covers_every_fingerprinted_provider_field():

@@ -16,7 +16,7 @@ from fractions import Fraction
 # together they cover exactly ``runner.carbon_env.PROVIDER_FIELDS_FINGERPRINTED`` —
 # a cross-module test pins that, so a field recorded in the fingerprint cannot go
 # ungated here.
-_SERVING_FIELDS = ("base_url", "reasoning_effort", "provider_order", "quantization")
+_SERVING_FIELDS = ("base_url", "reasoning_effort", "provider_order", "quantization", "responder")
 
 
 def _exact(task: dict) -> Fraction:

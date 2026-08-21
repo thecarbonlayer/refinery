@@ -52,6 +52,7 @@ _KEY_FIELDS = (
     "quantization",
     "base_url",
     "reasoning_effort",
+    "responder",
 )
 
 # The key fields a fingerprint MUST carry (``KeyError`` otherwise — a fingerprint that
@@ -71,6 +72,15 @@ class UnpinnedServing(Exception):
     measured confound inside the experiment, never a warning."""
 
 
+class MalformedBaseUrl(Exception):
+    """A base URL whose recorded identity could not match the request it produces.
+
+    The HTTP client builds request URLs by appending ``/chat/completions`` to the raw
+    ``LLM_BASE_URL`` string, so a query string, a fragment, or embedded credentials
+    each change or break the wire request in a way no normalized record could honestly
+    attribute. There is nothing legitimate to record — refuse with the remediation."""
+
+
 def behavior_key(
     config_version,
     model: str,
@@ -80,12 +90,15 @@ def behavior_key(
     quantization: str | None,
     base_url: str | None,
     reasoning_effort: str | None,
+    responder: str | None,
 ) -> str:
     """Stable identity of the behavior-determining inputs. Additive carbon releases
     (``config_version`` unchanged, no runner edit, clean tree, same serving base) keep
     this fixed; a model / verifier / config / working-tree / serving-base change moves
     it. Deliberately excludes the committed ``gemma_sha`` — that is provenance, not
-    behavior. Thin explicit-signature wrapper over ``fingerprint_behavior_key``: one
+    behavior. ``responder`` is the qualified-name MARKER of a scripted responder on
+    the fingerprinted provider (see runner/carbon_env.py), None for a real network
+    provider. Thin explicit-signature wrapper over ``fingerprint_behavior_key``: one
     derivation, one hash."""
     return fingerprint_behavior_key(
         {
@@ -97,6 +110,7 @@ def behavior_key(
             "quantization": quantization,
             "base_url": base_url,
             "reasoning_effort": reasoning_effort,
+            "responder": responder,
         }
     )
 
@@ -153,14 +167,32 @@ def assert_resumable(prior_fingerprint: dict, current_fingerprint: dict) -> None
 _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
-def is_local_base_url(base_url: str) -> bool:
-    """Whether ``base_url`` points at this machine. Parse failures read as remote —
-    a base that cannot prove it is local is not local."""
+def _split_base_url(base_url):
+    """FULL parse of a base URL, or None when any part of it fails to parse.
+
+    The one shared classification for the normalizer and the locality check below:
+    ``urlsplit().hostname`` alone is not a parse — it happily returns a hostname off
+    a netloc whose PORT is garbage (``localhost:notaport``), which once let a
+    malformed URL classify as local and record unpinned. Hostname AND port must both
+    parse, or the URL reads as unparseable — and unparseable reads as remote, so it
+    can never record unpinned."""
     try:
-        host = urlsplit(base_url).hostname
+        parts = urlsplit(base_url)
+        host = parts.hostname
+        port = parts.port  # raises ValueError on a malformed port
     except (ValueError, TypeError):
-        return False
-    return (host or "") in _LOCAL_HOSTS
+        return None
+    if not host:
+        return None
+    return parts, host, port
+
+
+def is_local_base_url(base_url: str) -> bool:
+    """Whether ``base_url`` provably points at this machine. Any parse failure —
+    including a malformed port — reads as remote: a base that cannot prove it is
+    local is not local."""
+    parsed = _split_base_url(base_url)
+    return parsed is not None and parsed[1] in _LOCAL_HOSTS
 
 
 def normalize_base_url(base_url: str) -> str:
@@ -168,23 +200,42 @@ def normalize_base_url(base_url: str) -> str:
 
     Scheme and host are lowercased (both are case-insensitive on the wire) and
     trailing slashes dropped (the HTTP client rstrips them before use), so a
-    cosmetic variant of the same endpoint cannot split behavior keys. Userinfo,
-    query and fragment are DROPPED: they never survive to the request the client
-    builds, and a credential embedded in a URL must not reach a fingerprint that
-    is written into every record — the same scrub rule that keeps ``api_key``
-    out entirely. A URL with no parseable host passes through verbatim: what
-    cannot be parsed cannot be quietly rewritten, and the pin gate reads it as
-    remote (fail closed) so it can never record unpinned anyway."""
+    cosmetic variant of the same endpoint cannot split behavior keys.
+
+    A query string, a fragment, or embedded credentials REFUSE
+    (``MalformedBaseUrl``) instead of normalizing: the client concatenates
+    ``/chat/completions`` onto the raw string, so a query swallows the endpoint
+    path into the query value, a fragment truncates the request path, and
+    userinfo becomes basic auth on the wire while being a credential no record
+    may carry. Each of those makes the recorded identity a lie about the request
+    actually sent, so there is nothing honest to record. The refusal names the
+    part found, never the URL itself — the URL may embed the credential.
+
+    A URL that fails to parse at all passes through verbatim: what cannot be
+    parsed cannot be quietly rewritten, and the shared classification above reads
+    it as remote (fail closed), so it can never record unpinned."""
     if not base_url:
         return base_url
-    try:
-        parts = urlsplit(base_url)
-        host = parts.hostname
-        port = parts.port
-    except (ValueError, TypeError):
+    parsed = _split_base_url(base_url)
+    if parsed is None:
         return base_url
-    if not host:
-        return base_url
+    parts, host, port = parsed
+    offending = []
+    if parts.username is not None or parts.password is not None:
+        offending.append("embedded credentials (userinfo)")
+    if parts.query:
+        offending.append("a query string")
+    if parts.fragment:
+        offending.append("a fragment")
+    if offending:
+        raise MalformedBaseUrl(
+            f"refusing base URL for host {host!r}: it carries {' and '.join(offending)}. "
+            f"The HTTP client appends /chat/completions to LLM_BASE_URL verbatim, so "
+            f"anything after the path changes or breaks the request in ways the recorded "
+            f"identity could not attribute — and credentials must never reach a record. "
+            f"Use a bare scheme://host[:port]/path in LLM_BASE_URL; credentials belong "
+            f"in LLM_API_KEY."
+        )
     if ":" in host:  # IPv6 literal — urlsplit strips the brackets; restore them
         host = f"[{host}]"
     port_part = f":{port}" if port is not None else ""

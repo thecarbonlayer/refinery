@@ -32,6 +32,11 @@ _CLEAN = {
 }
 
 
+def _scripted_responder(messages, **kwargs):
+    """Module-level stand-in for a scripted provider responder (cluster-H style)."""
+    raise AssertionError("never called — only its identity is fingerprinted")
+
+
 def test_fingerprint_clean_tree_has_no_dirty_sha(monkeypatch):
     _patch(
         monkeypatch,
@@ -271,6 +276,79 @@ def test_every_provider_field_is_fingerprinted_or_named_excluded(monkeypatch):
     # every exclusion carries a written reason
     for field, reason in ge.PROVIDER_FIELDS_EXCLUDED.items():
         assert reason.strip(), f"exclusion of {field!r} states no reason"
+
+
+def test_fingerprint_records_no_responder_as_none(monkeypatch):
+    """The env-built provider carries no responder; None is its truthful record."""
+    _patch(monkeypatch, _CLEAN)
+    assert ge.carbon_fingerprint(ROOT)["responder"] is None
+
+
+def test_fingerprint_records_a_responder_marker_not_the_callable(monkeypatch):
+    """A provider serving from a responder is not a network serving base at all —
+    if one ever reaches the suite-level provider, the fingerprint must say so.
+    The callable itself is uncapturable; its qualified name is recorded, and the
+    named code lives in this repo, so runner_sha pins its behavior."""
+    _patch(
+        monkeypatch,
+        _CLEAN,
+        provider=SimpleNamespace(
+            model="test-model",
+            base_url="http://localhost:1234/v1",
+            reasoning_effort=None,
+            provider_order=None,
+            quantization=None,
+            responder=_scripted_responder,
+        ),
+    )
+    fp = ge.carbon_fingerprint(ROOT)
+    assert fp["responder"] == "tests.test_carbon_env._scripted_responder"
+    from runner import guard
+
+    assert fp["behavior_key"] == guard.fingerprint_behavior_key(fp)
+
+
+def test_fingerprint_refuses_a_responder_with_no_stable_name(monkeypatch):
+    """A callable with no module/qualname (e.g. functools.partial) has no stable
+    identity to record — an unstable marker would move the behavior key between
+    runs of identical behavior. Refuse rather than guess."""
+    import functools
+
+    _patch(
+        monkeypatch,
+        _CLEAN,
+        provider=SimpleNamespace(
+            model="test-model",
+            base_url="http://localhost:1234/v1",
+            reasoning_effort=None,
+            provider_order=None,
+            quantization=None,
+            responder=functools.partial(print),
+        ),
+    )
+    with pytest.raises(RuntimeError, match="responder"):
+        ge.carbon_fingerprint(ROOT)
+
+
+def test_fingerprint_refuses_a_base_url_with_a_query(monkeypatch):
+    """The refusal reaches the fingerprint boundary: a query in LLM_BASE_URL breaks
+    the concatenated request URL, so the state must refuse to record, not record
+    a normalized identity the wire never matched."""
+    from runner import guard
+
+    _patch(
+        monkeypatch,
+        _CLEAN,
+        provider=SimpleNamespace(
+            model="test-model",
+            base_url="https://host.example/v1?tenant=a",
+            reasoning_effort=None,
+            provider_order=None,
+            quantization=None,
+        ),
+    )
+    with pytest.raises(guard.MalformedBaseUrl):
+        ge.carbon_fingerprint(ROOT)
 
 
 def test_api_key_never_reaches_the_fingerprint(monkeypatch):

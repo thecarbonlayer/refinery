@@ -16,6 +16,7 @@ BASE = {
     "quantization": None,
     "base_url": "http://localhost:1234/v1",
     "reasoning_effort": None,
+    "responder": None,
 }
 
 
@@ -42,6 +43,7 @@ def test_behavior_key_ignores_committed_gemma_sha():
         ("quantization", "fp8"),
         ("base_url", "http://localhost:11434/v1"),
         ("reasoning_effort", "high"),
+        ("responder", "runner.tasks.somewhere._scripted"),
     ],
 )
 def test_behavior_key_moves_on_any_real_behavior_input(field, value):
@@ -178,15 +180,48 @@ def test_normalize_base_url_collapses_cosmetic_variants(raw, expected):
     assert guard.normalize_base_url(raw) == expected
 
 
-def test_normalize_base_url_never_records_userinfo_or_query():
-    """A credential embedded in the URL must not reach a fingerprint that gets
-    written into every record — same scrub rule as api_key."""
-    out = guard.normalize_base_url("http://user:sk-secret@host.example:8080/v1?key=tok#frag")
-    assert out == "http://host.example:8080/v1"
-    assert "sk-secret" not in out and "tok" not in out
+def test_normalize_base_url_refuses_a_query_string():
+    """The HTTP client appends /chat/completions to the raw base_url by string
+    concatenation, so a query string swallows the endpoint path into the query
+    value — the request is broken AND two query variants would be two different
+    wire requests. Nothing legitimate to record: refuse with the remediation."""
+    with pytest.raises(guard.MalformedBaseUrl, match="LLM_BASE_URL"):
+        guard.normalize_base_url("https://host.example/v1?tenant=a")
+
+
+def test_normalize_base_url_refuses_a_fragment():
+    """Under the same concatenation, everything after # is client-side only — the
+    request path silently loses /chat/completions. A config that cannot work must
+    refuse loudly, not record."""
+    with pytest.raises(guard.MalformedBaseUrl, match="fragment"):
+        guard.normalize_base_url("https://host.example/v1#frag")
+
+
+def test_normalize_base_url_refuses_userinfo_without_echoing_the_secret():
+    """Embedded credentials DO reach the wire (the client turns userinfo into
+    basic auth), so silently dropping them would record an identity different
+    from the request actually sent — and recording them would commit a secret.
+    Refuse, and the refusal itself must not echo the credential either."""
+    with pytest.raises(guard.MalformedBaseUrl) as exc:
+        guard.normalize_base_url("http://user:sk-secret@host.example:8080/v1")
+    msg = str(exc.value)
+    assert "LLM_API_KEY" in msg
+    assert "sk-secret" not in msg
 
 
 def test_normalize_base_url_passes_the_unparseable_through():
     """What cannot be parsed cannot be normalized — it passes through verbatim and
     the pin gate reads it as remote (fail closed), so it can never record unpinned."""
     assert guard.normalize_base_url("not a url") == "not a url"
+
+
+def test_malformed_port_reads_as_remote_everywhere():
+    """One shared classification for the normalizer and the classifier: a URL
+    whose PORT does not parse is not provably local, whatever its hostname says.
+    Before this, `http://localhost:notaport/v1` classified local (hostname parses
+    fine) and recorded unpinned — contradicting the fail-closed claim."""
+    url = "http://localhost:notaport/v1"
+    assert guard.is_local_base_url(url) is False
+    assert guard.normalize_base_url(url) == url  # verbatim; cannot be normalized
+    with pytest.raises(guard.UnpinnedServing):
+        guard.assert_serving_pinned(url, None, None)
