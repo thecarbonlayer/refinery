@@ -2032,6 +2032,31 @@ def _judge_never_called(expected: str, answer: str):
     raise AssertionError("the judge was consulted where determinism already had the verdict")
 
 
+def test_cmp5_duplicate_role_assignments_resolve_last_wins():
+    """Review finding: ``found.setdefault`` made the FIRST assignment win, so
+    "approved=A retired=B ... Correction: approved=B retired=A" passed on the stale
+    first pair while the reversed order failed — the verdict depended on which half
+    the model said first. Last-wins is the fix, chosen over routing duplicates to
+    the judge because a duplicated form is still an in-form answer (deterministic
+    ground, decision 12's default) and because it is the reading CMP-5's own
+    premise demands of the model: a later statement supersedes an earlier one."""
+    from runner.tasks.cluster_g import CMP5_CURRENT, CMP5_RETIRED, cmp5_outcome, cmp5_verdict
+
+    right = f"approved={CMP5_CURRENT} retired={CMP5_RETIRED}"
+    wrong = f"approved={CMP5_RETIRED} retired={CMP5_CURRENT}"
+    correction = "... wait, that is backwards. Correction:"
+
+    # The correction is the answer — in both directions, symmetrically.
+    fixed = cmp5_outcome(f"{wrong} {correction} {right}", _judge_never_called)
+    assert (fixed.passed, fixed.outcome, fixed.verifier) == (True, "pass", "mechanical")
+    broken = cmp5_outcome(f"{right} {correction} {wrong}", _judge_never_called)
+    assert (broken.passed, broken.outcome) == (False, "fail")
+
+    # And the parsed roles report the codes that WON, not the stale ones.
+    ok, approved, retired = cmp5_verdict(f"{right} {correction} {wrong}")
+    assert ok is False and approved == CMP5_RETIRED and retired == CMP5_CURRENT
+
+
 def test_cmp5_outcome_decides_mechanically_wherever_determinism_has_the_verdict():
     """Decision 12's rule, as the layer order: mechanical checks decide wherever they
     can, and the judge is consulted exactly where a mechanical check would manufacture

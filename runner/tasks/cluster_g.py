@@ -603,10 +603,17 @@ def cmp5_verdict(reply: str) -> tuple[bool, str | None, str | None]:
     Unparsed roles come back as ``None`` (recorded in the detail, never silently
     treated as a wrong code): "the model did not answer in the form" and "the model
     named the wrong approach" are different facts about a strategy.
+
+    Duplicate assignments to the same role resolve LAST-WINS: a reply that answers
+    and then corrects itself ("approved=A ... Correction: approved=B") is answered
+    by the correction, exactly the supersession reading this task asks the model
+    to perform. The first version used ``setdefault`` — first-wins — which made
+    the verdict depend on which half the model said first (a review probe showed
+    the same content passing in one order and failing in the other).
     """
     found: dict[str, str] = {}
     for role, value in _CMP5_ROLE_RE.findall(reply):
-        found.setdefault(role.lower(), value.strip(_CMP5_TRIM))
+        found[role.lower()] = value.strip(_CMP5_TRIM)
     approved = found.get("approved")
     retired = found.get("retired")
     ok = (approved or "").upper() == CMP5_CURRENT and (retired or "").upper() == CMP5_RETIRED
