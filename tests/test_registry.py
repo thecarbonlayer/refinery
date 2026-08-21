@@ -10,7 +10,6 @@ import subprocess
 import sys
 import tempfile
 import textwrap
-from fractions import Fraction
 from pathlib import Path
 
 from runner.spec import ATTEMPTS
@@ -2029,51 +2028,148 @@ def test_cmp5_passes_only_when_both_roles_parse_to_the_right_codes():
     assert cmp5_verdict("I do not have that decision.") == (False, None, None)
 
 
-def test_cmp5_records_a_reply_that_never_used_the_form_as_not_attempted():
-    """G2's contract-§5 principle, applied to the new guard.
+def _judge_never_called(expected: str, answer: str):
+    raise AssertionError("the judge was consulted where determinism already had the verdict")
 
-    CMP-5 asks for a two-role form, and a reply that ignores it entirely — including one
-    whose PROSE is correct — is not evidence about what compaction carried. Recording it
-    as `fail` would put a formatting outcome into the pooled rate, and that rate is this
-    guard's own gate: a drop past its null quantile REJECTs a candidate. A gate whose
-    denominator is polluted by non-answers is measuring the wrong thing.
 
-    The line is drawn where the parse is: neither role parsed means the reply never
-    entered the form at all. Once EITHER role parses, the model did answer and a wrong
-    or missing code is a real failure, exactly as before.
+def test_cmp5_outcome_decides_mechanically_wherever_determinism_has_the_verdict():
+    """Decision 12's rule, as the layer order: mechanical checks decide wherever they
+    can, and the judge is consulted exactly where a mechanical check would manufacture
+    a false failure out of formatting — nowhere else. Every branch here hands the
+    verifier a judge that raises, so a judge call on any of them is itself the failure.
     """
-    from runner.tasks.cluster_g import CMP5_CURRENT, CMP5_RETIRED, cmp5_outcome
-
-    assert cmp5_outcome(f"approved={CMP5_CURRENT} retired={CMP5_RETIRED}") == (
-        True,
-        "pass",
-        None,
+    from runner.tasks.cluster_g import (
+        CMP5_CURRENT,
+        CMP5_NO_CODE,
+        CMP5_RETIRED,
+        CMP5_WRONG_IN_FORM,
+        G2_TRUNCATION_MARKER,
+        NON_ANSWER_TOOL_SYNTAX,
+        NON_ANSWER_TRUNCATED,
+        cmp5_outcome,
     )
 
-    # Correct in prose, never in the form: the answer is right and the attempt still
-    # tells us nothing about the two-role question that was asked.
+    # Both roles in the form, both right: the model answered the exact question in
+    # the exact form — determinism read it, pass.
+    v = cmp5_outcome(f"approved={CMP5_CURRENT} retired={CMP5_RETIRED}", _judge_never_called)
+    assert (v.passed, v.outcome, v.classification, v.verifier) == (True, "pass", None, "mechanical")
+
+    # Both roles in the form, wrong or missing values: the form IS the model's
+    # answer, and a wrong code in it is a real recall failure — no prose rescue.
+    for reply in (
+        f"approved={CMP5_RETIRED} retired={CMP5_CURRENT}",  # swapped roles
+        f"approved={CMP5_CURRENT} retired=None",  # a recorded shape, verbatim
+    ):
+        v = cmp5_outcome(reply, _judge_never_called)
+        assert (v.passed, v.outcome, v.verifier) == (False, "fail", "mechanical")
+        assert v.classification == CMP5_WRONG_IN_FORM
+
+    # The shared non-answer taxonomy comes first: nothing was attempted, so no
+    # later layer has anything to read.
+    for reply, label in (
+        (f"\n{G2_TRUNCATION_MARKER}", NON_ANSWER_TRUNCATED),
+        ("<|tool_call>call:bash {}<tool_call|>", NON_ANSWER_TOOL_SYNTAX),
+    ):
+        v = cmp5_outcome(reply, _judge_never_called)
+        assert (v.passed, v.outcome, v.classification) == (False, "not_attempted", label)
+
+    # Neither code anywhere in the reply: no extraction could find what is not
+    # there — the codes did not survive compaction, a mechanical fail. This is
+    # where an explicit denial lands, and it is a REAL failure now, not the
+    # conservative `not_attempted` the format-only verdict used to record.
+    denial = "I do not have information regarding which approach is approved or retired."
+    v = cmp5_outcome(denial, _judge_never_called)
+    assert (v.passed, v.outcome, v.verifier) == (False, "fail", "mechanical")
+    assert v.classification == CMP5_NO_CODE
+
+
+def test_cmp5_extraction_reads_role_claims_out_of_free_prose_with_the_judge():
+    """The rework's whole point: a reply that carries an approach code but skipped the
+    form is no longer failed on format. The validated judge is asked whether the prose
+    states each pinned role claim — and it sees ONLY that claim and the reply, the
+    same two-field constraint every judge call in this suite obeys (contract §4)."""
+    from runner.judge import Judgment
+    from runner.tasks.cluster_g import (
+        CMP5_APPROVED_FACT,
+        CMP5_CURRENT,
+        CMP5_RETIRED,
+        CMP5_RETIRED_FACT,
+        CMP5_ROLES_NOT_PRESERVED,
+        cmp5_outcome,
+    )
+
     prose = f"The approved approach is {CMP5_CURRENT}, and {CMP5_RETIRED} was retired earlier."
-    assert cmp5_outcome(prose) == (False, "not_attempted", "did not answer in the requested form")
+    calls = []
 
-    # Parsed, and wrong: a real failure, unchanged.
-    swapped = cmp5_outcome(f"approved={CMP5_RETIRED} retired={CMP5_CURRENT}")
-    assert swapped[:2] == (False, "fail")
-    # One role answered is still an answer — the other is a real miss, not a non-answer.
-    assert cmp5_outcome(f"approved={CMP5_CURRENT}")[:2] == (False, "fail")
+    def judge_yes(expected, answer):
+        calls.append((expected, answer))
+        return Judgment(True, "span", "VERDICT: YES\nQUOTE: span")
+
+    v = cmp5_outcome(prose, judge_yes)
+    assert (v.passed, v.outcome, v.classification, v.verifier) == (True, "pass", None, "judged")
+    # Both pinned role claims were asked, against the reply and nothing else.
+    assert calls == [(CMP5_APPROVED_FACT, prose), (CMP5_RETIRED_FACT, prose)]
+    assert len(v.judgments) == 2
+
+    # One role claim missing from the prose: the judge says NO to it, and the
+    # attempt is a real judged failure — the retirement fact did not survive.
+    def judge_approved_only(expected, answer):
+        return Judgment(expected == CMP5_APPROVED_FACT, "s", "VERDICT: ...\nQUOTE: s")
+
+    partial = f"The approved approach is {CMP5_CURRENT}."
+    v = cmp5_outcome(partial, judge_approved_only)
+    assert (v.passed, v.outcome, v.verifier) == (False, "fail", "judged")
+    assert v.classification == CMP5_ROLES_NOT_PRESERVED
+
+    # A single-role FORM answer with a code is the same case: the form did not
+    # deliver a complete answer, so the prose (which is all there is) is judged.
+    v = cmp5_outcome(f"approved={CMP5_CURRENT}", judge_approved_only)
+    assert (v.passed, v.outcome, v.verifier) == (False, "fail", "judged")
 
 
-def test_cmp5_only_the_non_answer_branch_publishes_its_reason():
-    """The detail string, pinned where it lands: `run_cmp5` records the parsed roles on
-    every attempt and the non-answer reason only on the branch that has one — the same
-    shape `run_g2` uses, so an analysis reading either task's records can count
-    non-answers the same way in both."""
+def test_cmp5_extraction_fails_closed_when_the_judge_never_delivers():
+    """The fail-closed constraint, verbatim: if extraction cannot run, the attempt
+    gets a taxonomy classification — never a silent pass, and never a `fail` that
+    blames the strategy under test for a judge outage."""
+    from runner.judge import Judgment
+    from runner.tasks.cluster_g import (
+        CMP5_APPROVED_FACT,
+        CMP5_CURRENT,
+        JUDGE_UNAVAILABLE,
+        cmp5_outcome,
+    )
+
+    prose = f"The approved approach is {CMP5_CURRENT}."
+
+    def outage(expected, answer):
+        return Judgment(False, "", "<provider error: service down>", ran=False)
+
+    v = cmp5_outcome(prose, outage)
+    assert (v.passed, v.outcome, v.verifier) == (False, "error", "judged")
+    assert v.classification == JUDGE_UNAVAILABLE
+
+    # A partial outage is still an outage: one role judged, the other never came
+    # back — no verdict exists for the pair, so no pass and no blame.
+    def half_outage(expected, answer):
+        if expected == CMP5_APPROVED_FACT:
+            return Judgment(True, "s", "VERDICT: YES\nQUOTE: s")
+        return Judgment(False, "", "garbled", ran=False)
+
+    v = cmp5_outcome(prose, half_outage)
+    assert (v.passed, v.outcome, v.classification) == (False, "error", JUDGE_UNAVAILABLE)
+
+
+def test_cmp5_publishes_its_classification_and_keeps_the_reply_last():
+    """The detail string, pinned where it lands: `run_cmp5` records the parsed roles
+    on every attempt, the taxonomy classification on every non-pass, and keeps
+    `reply=` last — the trailing-match convention `loop.judge_validate` reads."""
     import inspect
 
     from runner.tasks import cluster_g
 
     source = inspect.getsource(cluster_g.run_cmp5)
-    assert "cmp5_outcome(reply)" in source
-    assert "non_answer=" in source
+    assert "cmp5_outcome(reply" in source
+    assert "classification=" in source
     assert "reply={reply[:240]!r}" in source
 
 
@@ -2171,6 +2267,91 @@ def test_cmp6_refuses_a_stale_prompt_sha_and_a_failing_artifact(monkeypatch, tmp
     monkeypatch.setattr(judge_mod, "AGREEMENT_PATH", failing)
     attempt = cluster_g.run_cmp6()
     assert attempt.outcome == "error" and "pass=False" in attempt.detail
+
+
+def test_cmp5_checks_the_judge_gate_before_any_live_model_call(monkeypatch, tmp_path):
+    """CMP-5's verifier now has a judge lane, so it inherits CMP-6's activation gate.
+
+    The mechanical parse decides most attempts without the judge — but whether THIS
+    attempt will need one is only knowable after the live run is already spent, and
+    an attempt whose judged lane silently could not open would be a heterogeneous
+    record (mechanical attempts measured, judged ones erroring after the fact). So
+    the gate is checked first, before the agent exists, exactly as CMP-6 does."""
+    import runner.judge as judge_mod
+    from runner.tasks import cluster_g
+
+    def _no_agent(**kwargs):
+        raise AssertionError("CMP-5 built an agent before checking the judge gate")
+
+    monkeypatch.setattr(judge_mod, "AGREEMENT_PATH", tmp_path / "absent.json")
+    monkeypatch.setattr(cluster_g, "_plain_agent", _no_agent)
+
+    attempt = cluster_g.run_cmp5()
+    assert attempt.passed is False
+    assert attempt.outcome == "error"
+    assert "judge not validated" in attempt.detail
+    assert attempt.metrics == {"attempted": 0.0}
+
+
+def test_cmp6_outcome_classifies_non_answers_before_consulting_the_judge():
+    """The G2 taxonomy, applied to the judged guard: a reply that is nothing but
+    carbon's truncation marker or a tool-call fragment never attempted the
+    constraint, so judging it would measure the leak, not the meaning. The judge is
+    only consulted on a reply that attempted an answer — both verdict directions."""
+    from runner.judge import Judgment
+    from runner.tasks.cluster_g import (
+        CMP6_EXPECTED,
+        CMP6_NOT_EQUIVALENT,
+        G2_TRUNCATION_MARKER,
+        NON_ANSWER_TOOL_SYNTAX,
+        NON_ANSWER_TRUNCATED,
+        cmp6_outcome,
+    )
+
+    for reply, label in (
+        (f"  {G2_TRUNCATION_MARKER}", NON_ANSWER_TRUNCATED),
+        ("<|tool_call>call:list_files []<tool_call|>", NON_ANSWER_TOOL_SYNTAX),
+    ):
+        v = cmp6_outcome(reply, _judge_never_called)
+        assert (v.passed, v.outcome, v.classification, v.verifier) == (
+            False,
+            "not_attempted",
+            label,
+            "mechanical",
+        )
+
+    calls = []
+
+    def judge_yes(expected, answer):
+        calls.append((expected, answer))
+        return Judgment(True, "q", "VERDICT: YES\nQUOTE: q")
+
+    v = cmp6_outcome("backoff caps at 30s for gateway headroom", judge_yes)
+    assert (v.passed, v.outcome, v.classification, v.verifier) == (True, "pass", None, "judged")
+    assert calls == [(CMP6_EXPECTED, "backoff caps at 30s for gateway headroom")]
+
+    def judge_no(expected, answer):
+        return Judgment(False, "q", "VERDICT: NO\nQUOTE: q")
+
+    v = cmp6_outcome("something unrelated", judge_no)
+    assert (v.passed, v.outcome, v.verifier) == (False, "fail", "judged")
+    assert v.classification == CMP6_NOT_EQUIVALENT
+
+
+def test_cmp6_outcome_refuses_on_a_judge_that_never_delivered():
+    """A judge outage is not evidence about compaction. The old shape recorded a
+    provider exception as a plain `fail` — serving noise landing in a guard's rate.
+    Now it is an `error` with the shared classification, and `Judgment.ran` is what
+    tells the two kinds of False verdict apart."""
+    from runner.judge import Judgment
+    from runner.tasks.cluster_g import JUDGE_UNAVAILABLE, cmp6_outcome
+
+    def outage(expected, answer):
+        return Judgment(False, "", "<provider error: connection refused>", ran=False)
+
+    v = cmp6_outcome("a real prose answer about the backoff", outage)
+    assert (v.passed, v.outcome, v.verifier) == (False, "error", "judged")
+    assert v.classification == JUDGE_UNAVAILABLE
 
 
 def test_judge_validation_status_accepts_only_a_passing_artifact_at_this_prompt(tmp_path):
@@ -2703,51 +2884,139 @@ def _p2c_outcomes(task: str) -> dict[str, int]:
     return dict(seen)
 
 
-def test_cmp5s_docstring_states_what_its_pooled_rate_actually_compounds():
-    """The correction, checked against the record rather than merely written down.
+def test_cmp5_extraction_replays_the_campaign_record_changing_no_verdict():
+    """The rework's effect on the committed record, proved by replay: NONE.
 
-    `not_attempted` is a LABEL. It does not leave the denominator: `TaskResult`'s
-    `pass_fraction` is passes over every recorded attempt (`runner/run.py`), so CMP-5's
-    published rate is one number carrying two very different things — how often the
-    model answered in the requested form at all, and how often the answer was right
-    given that it did. An earlier version of the docstring implied the classification
-    protected the rate. It does not, and a guard whose rate is mostly a format score
-    fires on formatting.
-
-    Asserted against the committed arms, so the docstring cannot drift away from the
-    numbers it quotes: the two factors are recomputed here and must round to the
-    percentages the docstring states.
+    Every recorded CMP-5 reply across the ten Phase 2c arms goes back through the
+    new layered verifier with a judge that RAISES if consulted. Every `passed`
+    comes back identical and every arm's pooled numbers reproduce the summary —
+    the judge lane changes nothing on this record, because zero recorded replies
+    carried an approach code in prose outside the form. That is the number that
+    undercuts the rework's own story, pinned so it stays told: on THIS serving
+    base the non-answers were tool-syntax leaks and denials, not format-trapped
+    correct answers. What changes is only classification: the 9 denials become
+    real `fail`s and the leaks/truncations keep their taxonomy labels.
     """
+    from loop.judge_validate import _extract_reply
+    from runner.tasks.cluster_g import (
+        CMP5_NO_CODE,
+        CMP5_WRONG_IN_FORM,
+        NON_ANSWER_TOOL_SYNTAX,
+        NON_ANSWER_TRUNCATED,
+        cmp5_outcome,
+    )
+
+    labels = [f"p2c-null-full-{c}" for c in "abc"] + [f"p2c-null-cmp-{c}" for c in "abcdefg"]
+    seen: dict[str, int] = {}
+    for label in labels:
+        summary = json.loads((REPO_ROOT / "results" / f"{label}.json").read_text())
+        passes = attempts = 0
+        for line in (REPO_ROOT / "results" / f"{label}.jsonl").read_text().splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if record.get("task") != "CMP-5":
+                continue
+            attempts += 1
+            reply = _extract_reply(record.get("detail", ""))
+            if reply is None:  # a setup guard fired; there is no reply to re-verify
+                passes += int(record["passed"])
+                continue
+            v = cmp5_outcome(reply, _judge_never_called)
+            assert v.passed is bool(record["passed"]), (
+                f"{label} attempt {record.get('attempt')}: replay says passed={v.passed}, "
+                f"the record says {record['passed']}"
+            )
+            seen[v.classification or v.outcome] = seen.get(v.classification or v.outcome, 0) + 1
+            passes += int(v.passed)
+        recorded = summary["tasks"]["CMP-5"]
+        assert (passes, attempts) == (recorded["passes"], recorded["attempts"]), label
+
+    # The exact split, pinned — the docstring test below quotes these numbers.
+    assert seen == {
+        "pass": 17,
+        CMP5_WRONG_IN_FORM: 6,
+        CMP5_NO_CODE: 9,
+        NON_ANSWER_TOOL_SYNTAX: 43,
+        NON_ANSWER_TRUNCATED: 4,
+    }, seen
+    assert sum(seen.values()) == 79
+
+
+def test_cmp6_taxonomy_replays_the_campaign_record_changing_no_pass():
+    """CMP-6's half of the same replay. The judge verdicts themselves cannot be
+    re-run offline, so each recorded verdict is fed back through the new router:
+    the taxonomy must route exactly the replies that attempted an answer to the
+    judge (21 of 85 — the other 64 are tool-call fragments), and with the recorded
+    verdicts in place every `passed` must come back identical. What was recorded
+    as 68 plain `fail`s decomposes into 64 leaks and 4 real judged failures."""
+    from loop.judge_validate import _extract_bool, _extract_reply
+    from runner.judge import Judgment
+    from runner.tasks.cluster_g import CMP6_NOT_EQUIVALENT, NON_ANSWER_TOOL_SYNTAX, cmp6_outcome
+
+    labels = [f"p2c-null-full-{c}" for c in "abc"] + [f"p2c-null-cmp-{c}" for c in "abcdefg"]
+    seen: dict[str, int] = {}
+    consulted = 0
+    for label in labels:
+        for line in (REPO_ROOT / "results" / f"{label}.jsonl").read_text().splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if record.get("task") != "CMP-6":
+                continue
+            detail = record.get("detail", "")
+            reply = _extract_reply(detail)
+            recorded_verdict = _extract_bool(detail, "judge_verdict")
+            assert reply is not None and recorded_verdict is not None, (label, record["attempt"])
+
+            def replay_judge(expected, answer, verdict=recorded_verdict):
+                nonlocal consulted
+                consulted += 1
+                return Judgment(verdict, "q", "VERDICT: ...\nQUOTE: q")
+
+            v = cmp6_outcome(reply, replay_judge)
+            assert v.passed is bool(record["passed"]), (label, record["attempt"])
+            seen[v.classification or v.outcome] = seen.get(v.classification or v.outcome, 0) + 1
+
+    assert seen == {
+        "pass": 17,
+        CMP6_NOT_EQUIVALENT: 4,
+        NON_ANSWER_TOOL_SYNTAX: 64,
+    }, seen
+    assert sum(seen.values()) == 85
+    assert consulted == 21, "the judge is consulted exactly where an answer was attempted"
+
+
+def test_cmp5s_docstring_states_the_records_real_composition():
+    """The honest numbers, kept honest: the docstring quotes what the replay above
+    proves. An earlier version of this file learned the hard way that a docstring
+    quoting rates the record no longer supports is worse than no docstring — so the
+    claims are asserted against the same committed arms they describe."""
     import inspect
 
     from runner.tasks import cluster_g
 
     seen = _p2c_outcomes("CMP-5")
-    total = sum(seen.values())
-    attempted = total - seen.get("not_attempted", 0)
-    assert total == 79 and attempted == 23, seen
-    format_rate = round(100 * attempted / total)
-    conditional = round(100 * seen["pass"] / attempted)
-    assert (format_rate, conditional) == (29, 74), (format_rate, conditional)
-    # And the two really do compound to the published pooled rate.
-    assert Fraction(seen["pass"], total) == Fraction(attempted, total) * Fraction(
-        seen["pass"], attempted
-    )
+    assert sum(seen.values()) == 79 and seen.get("not_attempted") == 56, seen
 
-    doc = inspect.getdoc(cluster_g.run_cmp5) or ""
-    assert f"{format_rate}%" in doc and f"{conditional}%" in doc, (
-        "the docstring must state the two factors its pooled rate compounds"
-    )
-    assert "pass_fraction" in doc, "and say that non-answers stay in the denominator"
+    doc = " ".join((inspect.getdoc(cluster_g.run_cmp5) or "").split())
+    # The replay's split (pinned there): 43 leaks + 4 truncations + 9 denials, and
+    # zero prose replies carrying a code outside the form — the judge lane's real
+    # workload on this record.
+    assert "43 of the 56" in doc
+    assert "4 are truncations" in doc
+    assert "9 are explicit denials" in doc
+    assert "zero" in doc.lower(), "the docstring must state the judge lane's record workload"
+    assert "does not gate candidates" in doc
 
 
-def test_both_scenario_guards_record_the_format_robustness_rework_as_a_phase_3_item():
-    """A known weakness with no recorded next step is a weakness that gets forgotten.
-
-    CMP-5 reads mostly as a format score and CMP-6's judged verdict has the same
-    exposure from the other side, so neither should gate a candidate until answer
-    extraction stops depending on the model obeying a template. That rework is recorded
-    as Phase 3 work, in both task docstrings, where whoever next reads the task will be.
+def test_both_scenario_guards_describe_the_landed_extraction_layer():
+    """The Phase 3 rework these docstrings used to queue has now LANDED, and a
+    docstring still deferring to it would be a signpost to nowhere. Both guards
+    must describe the layered verifier as present behavior — judge where prose
+    needs reading, taxonomy for non-answers, fail-closed on an unavailable judge —
+    and must still say the honest thing about gating: nothing gates candidates
+    until re-measurement and a fresh judge validation land on the new serving base.
     """
     import inspect
 
@@ -2757,9 +3026,9 @@ def test_both_scenario_guards_record_the_format_robustness_rework_as_a_phase_3_i
         # Whitespace-normalized: these are wrapped docstrings, and a claim that a
         # sentence is present must not turn on where the line broke.
         doc = " ".join((inspect.getdoc(fn) or "").lower().split())
-        assert "phase 3" in doc, fn.__name__
-        assert "judge" in doc and "extraction" in doc, fn.__name__
-        assert "gate candidates" in doc or "gates candidates" in doc, fn.__name__
+        assert "phase 3" not in doc, f"{fn.__name__} still queues the rework it contains"
+        assert "judge" in doc and "not_attempted" in doc.replace("``", ""), fn.__name__
+        assert "gate candidates" in doc, fn.__name__
 
 
 def test_no_scenario_guards_fact_lands_in_the_verbatim_head_window():

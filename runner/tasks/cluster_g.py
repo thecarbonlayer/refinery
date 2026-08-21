@@ -17,6 +17,8 @@ task rather than a variant of G2/G4 because each fails for a different reason:
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from runner.carbon_env import make_provider
 from runner.helpers import (
@@ -27,7 +29,7 @@ from runner.helpers import (
     tool_texts,
     workspace_kwargs,
 )
-from runner.judge import judged_equivalent, validation_status
+from runner.judge import Judgment, judged_equivalent, validation_status
 from runner.spec import Attempt, TaskSpec
 
 G1_SENTINEL = "END-OF-HANDOFF-G1-8VR"
@@ -87,6 +89,20 @@ CMP5_QUESTION = (
 _CMP5_ROLE_RE = re.compile(r"\b(approved|retired)\s*[=:]\s*([^\s,;]+)", re.IGNORECASE)
 _CMP5_TRIM = "`'\"*.,;:()[]<>"
 
+# The two pinned role claims the judge is asked about when a reply skipped the form
+# but still carries an approach code (``cmp5_outcome``'s judged lane). The judge
+# sees ONE of these and the reply — never the transcript, never the ask (contract
+# §4) — so a reply that states the claim in its own words passes, and one that
+# contradicts it (a swapped role, a different code) judges NO on its own terms.
+CMP5_APPROVED_FACT = f"The approved reconciliation approach code is {CMP5_CURRENT}."
+CMP5_RETIRED_FACT = f"The retired reconciliation approach code is {CMP5_RETIRED}."
+
+# CMP-5's taxonomy labels beyond the shared non-answer pair. Constants for the same
+# reason those are: one spelling per reason, across the record and its analyses.
+CMP5_WRONG_IN_FORM = "wrong or missing code in the answered form"
+CMP5_NO_CODE = "no approach code in the reply"
+CMP5_ROLES_NOT_PRESERVED = "judged: the prose does not carry both role claims"
+
 # --- CMP-6: semantic preservation, judged (contract §2) -------------------------
 # No sentinel anywhere, deliberately: the fact is ordinary prose with a number and
 # a reason, so the only way to answer is to have kept its MEANING. `CMP6_EXPECTED`
@@ -102,6 +118,9 @@ CMP6_EXPECTED = (
     "out at 45 seconds and we need headroom for one full retry before it fires."
 )
 CMP6_QUESTION = "What is the constraint on retry backoff, and why?"
+# CMP-6's one taxonomy label of its own: the judge ran and said the meaning is not
+# there — a real judged failure, distinct from a reply that never attempted one.
+CMP6_NOT_EQUIVALENT = "judged: the reply does not state the pinned constraint"
 
 # --- CMP-7: buried facts (contract §3) ------------------------------------------
 CMP7_SENTINEL = "INCIDENT-C7-7TN"
@@ -226,6 +245,33 @@ def classify_non_answer(reply: str) -> str | None:
     if _TOOL_SYNTAX_RE.search(reply):
         return NON_ANSWER_TOOL_SYNTAX
     return None
+
+
+# The judge could not deliver a verdict at all — provider outage, or output that
+# never parsed (``Judgment.ran`` is False). One label for both scenario guards:
+# an analysis counting judge outages must not need two spellings.
+JUDGE_UNAVAILABLE = "judge unavailable: no verdict came back"
+
+
+@dataclass(frozen=True)
+class GuardVerdict:
+    """One scenario guard's classified verdict — the whole extraction/verification
+    layer's answer, separate from the task premise that produced the reply.
+
+    ``classification`` is the taxonomy label: None exactly on a pass, and a named
+    reason on every other outcome, so no non-pass is ever just lumped. ``verifier``
+    records which layer DECIDED — "mechanical" for the deterministic checks (the
+    default, decision 12), "judged" when the pinned judge read the prose — because
+    a rate whose verdicts came from two different layers must say which was which.
+    ``judgments`` carries the judge calls that were actually made (empty on a
+    mechanical verdict), for token accounting and for the record's quotes.
+    """
+
+    passed: bool
+    outcome: str  # "pass" | "fail" | "not_attempted" | "error"
+    classification: str | None
+    verifier: str  # "mechanical" | "judged"
+    judgments: tuple[Judgment, ...] = ()
 
 
 def g2_verdict(reply: str, early: bool, late: bool) -> tuple[bool, str, str | None]:
@@ -565,45 +611,56 @@ def cmp5_verdict(reply: str) -> tuple[bool, str | None, str | None]:
     return ok, approved, retired
 
 
-def cmp5_outcome(reply: str) -> tuple[bool, str, str | None]:
-    """CMP-5's whole verdict: ``(passed, outcome, non_answer_detail)``.
+def cmp5_outcome(reply: str, judge: Callable[[str, str], Judgment]) -> GuardVerdict:
+    """CMP-5's whole verdict, layered deterministic-first (decision 12's rule).
 
-    Contract §5's principle, which is not G2's alone: a reply that never attempted the
-    answer must not be recorded as a compaction failure. CMP-5 asks for a two-role form,
-    and a reply that ignores it entirely — including one whose PROSE is correct — says
-    nothing about what compaction carried. It is ``not_attempted``.
+    The old verdict was the form parse alone, and it recorded a reply that skipped
+    the form — including one whose PROSE was correct — as a non-answer. That made
+    the pooled rate compound format obedience with recall, which is why this task
+    was barred from gating candidates. The layers now, in order:
 
-    This matters more here than it would on a miner, because CMP-5's pooled rate would
-    become its own GATE: a drop past its null quantile would REJECT a candidate, and
-    formatting outcomes in that denominator make such a gate a measurement of obedience.
+    1. The shared non-answer taxonomy (``classify_non_answer``): a truncated
+       generation or a tool-call fragment never attempted the answer, so no later
+       layer is consulted about it. ``not_attempted``, labeled.
+    2. The mechanical parse, wherever it can DECIDE: both roles answered in the
+       form is the model answering the exact question in the exact form —
+       determinism reads it, pass or fail (``CMP5_WRONG_IN_FORM``), and the judge
+       is never consulted. A wrong code in a complete form answer is a real recall
+       failure, not a formatting artifact.
+    3. Still mechanical: a reply carrying NEITHER approach code cannot name the
+       roles at all — no extraction can find what is not there. ``fail`` with
+       ``CMP5_NO_CODE``. This is where an explicit denial lands, and it is a real
+       failure now rather than the old conservative ``not_attempted``: the codes
+       did not survive compaction, which is exactly what this task measures.
+    4. Only then the judge — the one place determinism would manufacture a false
+       failure out of formatting: the reply carries a code but the form did not
+       deliver a complete answer. Each pinned role claim (``CMP5_APPROVED_FACT``,
+       ``CMP5_RETIRED_FACT``) is judged against the reply alone. Both YES is a
+       pass; a delivered NO is a real judged failure
+       (``CMP5_ROLES_NOT_PRESERVED``).
 
-    WHICH IS WHAT THEY STILL ARE, corrected here because the paragraph above once read
-    as if this classification fixed it. It does not. ``not_attempted`` is a LABEL on the
-    record; ``TaskResult.pass_fraction`` (runner/run.py) divides passes by EVERY
-    recorded attempt, so a non-answer is a non-pass in the published rate exactly like a
-    wrong answer. What the label buys is that the two are TELLABLE APART afterwards --
-    which is how the 29%/74% decomposition in ``run_cmp5`` was recoverable at all. It
-    buys nothing for the gate, and until the Phase 3 rework recorded in ``run_cmp5``
-    lands, this task does not gate candidates.
-
-    The line is drawn at the parse, and only there. Neither role parsed means the reply
-    never entered the form; once EITHER role parses, the model answered, and a wrong or
-    missing code is a real failure, exactly as before.
-
-    Known consequence, stated rather than hidden: an explicit denial ("I don't have
-    those codes") parses no roles either, so it lands in ``not_attempted`` even though it
-    IS a compaction failure in substance. That is a deliberate simplification of the rule
-    as specified — the alternative is a denial-detection heuristic
-    (``loop/judge_validate`` has one) inside a mechanical verifier, which is a different
-    decision from this one. The direction is conservative for the gate: denials leave the
-    pooled rate rather than depressing it, so the guard cannot fire on them.
+    Fail closed, without blaming the strategy: if either judge call never delivers
+    a verdict (``Judgment.ran`` False — provider outage, unparseable output), the
+    attempt is ``error`` with ``JUDGE_UNAVAILABLE``, never a silent pass and never
+    a ``fail`` that would put a judge outage into a guard's rate.
     """
+    non_answer = classify_non_answer(reply)
+    if non_answer:
+        return GuardVerdict(False, "not_attempted", non_answer, "mechanical")
     ok, approved, retired = cmp5_verdict(reply)
     if ok:
-        return True, "pass", None
-    if approved is None and retired is None:
-        return False, "not_attempted", "did not answer in the requested form"
-    return False, "fail", None
+        return GuardVerdict(True, "pass", None, "mechanical")
+    if approved is not None and retired is not None:
+        return GuardVerdict(False, "fail", CMP5_WRONG_IN_FORM, "mechanical")
+    low = reply.lower()
+    if CMP5_CURRENT.lower() not in low and CMP5_RETIRED.lower() not in low:
+        return GuardVerdict(False, "fail", CMP5_NO_CODE, "mechanical")
+    judgments = (judge(CMP5_APPROVED_FACT, reply), judge(CMP5_RETIRED_FACT, reply))
+    if not all(j.ran for j in judgments):
+        return GuardVerdict(False, "error", JUDGE_UNAVAILABLE, "judged", judgments)
+    if all(j.verdict for j in judgments):
+        return GuardVerdict(True, "pass", None, "judged", judgments)
+    return GuardVerdict(False, "fail", CMP5_ROLES_NOT_PRESERVED, "judged", judgments)
 
 
 def cmp5_supersession_pending(messages: list[dict]) -> bool:
@@ -650,23 +707,36 @@ def run_cmp5() -> Attempt:
     has actually left the transcript; if it never leaves, the attempt is ``error`` —
     the task never reached the thing it measures.
 
-    WHAT THIS TASK'S RATE ACTUALLY MEASURES, stated plainly because an earlier version
-    of this docstring implied otherwise. ``not_attempted`` is a LABEL and nothing more:
-    ``TaskResult.pass_fraction`` (runner/run.py) is passes over EVERY recorded attempt,
-    so a non-answer stays in the denominator exactly like a wrong answer. The
-    classification separates the two in the record; it does not protect the rate.
+    VERIFICATION IS LAYERED, deterministic first — ``cmp5_outcome`` is the whole
+    rule. The old verdict was the form parse alone, so the published rate compounded
+    format obedience with recall; now a reply that skipped the form but carries an
+    approach code is read by the validated judge (the same seam CMP-6 uses, decision
+    12's one permitted use), every non-answer is a classified ``not_attempted``, and
+    an unavailable judge is an ``error``, never a pass and never a strategy-blamed
+    fail. The judge gate is checked BEFORE any live model call, exactly as CMP-6
+    checks it: whether an attempt will need the judge is only knowable after the
+    live run is already spent.
 
-    So the published rate is a PRODUCT of two unrelated things. Over the ten committed
-    Phase 2c arms: 23 of 79 attempts answered in the requested two-role form (29%), and
-    17 of those 23 named both codes correctly (74%). (23/79) x (17/23) is exactly the
-    17/79 the null model carries. Most of the movement available to this "guard" is
-    movement in template obedience, not in what compaction carried.
-
-    RECORDED PHASE 3 ITEM: format-robustness rework — replace the regex role parse with
-    judge-based answer extraction (the same judge seam CMP-6 already uses), so the
-    verdict reads what the reply MEANS rather than whether it matched a template. Until
-    that lands, this task reports; it does not gate candidates.
+    THE HONEST NUMBERS, from replaying the ten committed Phase 2c arms through the
+    new verifier (``tests/test_registry.py`` proves this, not this paragraph): not
+    one verdict changes. 43 of the 56 old non-answers are tool-call fragments,
+    4 are truncations, and 9 are explicit denials (now real fails);
+    zero recorded replies carried a code in prose outside the form, so the judge
+    lane's workload on this record is zero. What the rework buys is measured on the
+    NEXT serving base — a model that answers in prose stops failing on format — and
+    classified non-answers either way. Until re-measurement and a fresh judge
+    validation land there, this task reports; it does not gate candidates.
     """
+    validated, why = validation_status()
+    if not validated:
+        return Attempt(
+            False,
+            "error",
+            f"judge not validated: {why}",
+            # `attempted` alone: this exit precedes the agent, so there are no agent
+            # metrics to report beside it (same shape as CMP-6's gate exit).
+            metrics={"attempted": 0.0},
+        )
     a = _plain_agent(context_limit=900)
     try:
         a.send("We are beginning a reconciliation review. Acknowledge briefly.")
@@ -697,21 +767,69 @@ def run_cmp5() -> Attempt:
         result = a.run(CMP5_QUESTION)
         reply = result.text
         approved, retired = cmp5_verdict(reply)[1:]
-        ok, outcome, non_answer = cmp5_outcome(reply)
+        provider = make_provider()
+
+        def judge(fact: str, answer: str) -> Judgment:
+            return judged_equivalent(fact, answer, provider)
+
+        verdict = cmp5_outcome(reply, judge)
     finally:
         a.close()  # the storage contract says close ends the scratch lifecycle
+    judged = ""
+    metrics = {
+        **agent_metrics(a, result=result),
+        "attempted": float(verdict.outcome != "not_attempted"),
+    }
+    if verdict.judgments:
+        aj, rj = verdict.judgments
+        judged = (
+            f"approved_judged={aj.verdict} retired_judged={rj.verdict} "
+            f"judge_tokens={aj.tokens + rj.tokens} "
+            f"approved_quote={aj.quote[:120]!r} retired_quote={rj.quote[:120]!r} "
+        )
+        # The judge is extra model spend on this attempt; recorded beside the agent's
+        # own for the same reason CMP-6 records it (contract amendment 4).
+        metrics["judge_tokens"] = float(aj.tokens + rj.tokens)
     return Attempt(
-        passed=ok,
-        outcome=outcome,
-        detail=f"compactions={compactions} approved_answer={approved!r} "
-        f"retired_answer={retired!r} "
-        + (f"non_answer={non_answer!r} " if non_answer else "")
+        passed=verdict.passed,
+        outcome=verdict.outcome,
+        detail=f"compactions={compactions} verifier_kind={verdict.verifier} "
+        f"approved_answer={approved!r} retired_answer={retired!r} "
+        + (f"classification={verdict.classification!r} " if verdict.classification else "")
+        + judged
         # `reply=` stays LAST, the same convention run_g2 keeps: a trailing-match
         # extractor reads everything after it as the reply.
         + f"reply={reply[:240]!r}",
         turns=len(a.messages),
-        metrics={**agent_metrics(a, result=result), "attempted": float(outcome != "not_attempted")},
+        metrics=metrics,
     )
+
+
+def cmp6_outcome(reply: str, judge: Callable[[str, str], Judgment]) -> GuardVerdict:
+    """CMP-6's whole verdict: the shared non-answer taxonomy first, the judge after.
+
+    A reply that is nothing but carbon's truncation marker or a tool-call fragment
+    never attempted the constraint, so judging it would measure the leak, not the
+    meaning — ``not_attempted``, labeled, and the judge is not consulted (the one
+    deterministic step a judged task keeps, per decision 12's default). Everything
+    else goes to the judge exactly as before: a delivered YES passes, a delivered
+    NO is a real judged failure (``CMP6_NOT_EQUIVALENT``).
+
+    Fail closed without blaming the strategy: a judge that never delivers a verdict
+    (``Judgment.ran`` False) is an ``error`` with ``JUDGE_UNAVAILABLE``. The old
+    shape recorded that provider exception as a plain ``fail`` — serving noise
+    landing in a guard's rate, which is the exact confound the serving-health audit
+    flagged on this campaign.
+    """
+    non_answer = classify_non_answer(reply)
+    if non_answer:
+        return GuardVerdict(False, "not_attempted", non_answer, "mechanical")
+    judgment = judge(CMP6_EXPECTED, reply)
+    if not judgment.ran:
+        return GuardVerdict(False, "error", JUDGE_UNAVAILABLE, "judged", (judgment,))
+    if judgment.verdict:
+        return GuardVerdict(True, "pass", None, "judged", (judgment,))
+    return GuardVerdict(False, "fail", CMP6_NOT_EQUIVALENT, "judged", (judgment,))
 
 
 def run_cmp6() -> Attempt:
@@ -733,18 +851,25 @@ def run_cmp6() -> Attempt:
     measurement under a judged task's name, which is the one failure that would make
     every number this task produces uninterpretable.
 
-    ``attempted`` is published on every exit, as it is on G2 and CMP-5. This task has no
-    ``not_attempted`` outcome — the judge returns a verdict on whatever came back — so
-    the metric answers a narrower question here: what fraction of attempts got past the
-    judge gate and the compaction setup to a real answer at all. Emitted from every exit
-    for the same reason as elsewhere: a metric a failing exit stays silent about is
-    averaged over the attempts that survived, not over the attempts that were made.
+    The verdict layer is ``cmp6_outcome``: non-answers become a classified
+    ``not_attempted`` BEFORE the judge is consulted (the shared contract-§5
+    taxonomy), a delivered NO is a real judged failure, and a judge that never
+    delivers is an ``error`` with the
+    ``JUDGE_UNAVAILABLE`` classification — never a ``fail`` that would put a judge
+    outage into a guard's rate. On the ten committed Phase 2c arms the taxonomy
+    reclassifies 64 of the 68 recorded failures as tool-syntax leaks (replayed in
+    ``tests/test_registry.py``); the pass fraction is untouched, but the record now
+    says what actually happened instead of lumping it.
 
-    RECORDED PHASE 3 ITEM, shared with CMP-5: format-robustness rework — judge-based
-    role/answer extraction across the scenario guards, so a verdict turns on what a
-    reply MEANS and not on a template. CMP-6 already judges its verdict, and CMP-5's
-    pooled rate is mostly a format score until it does too; neither guard gates
-    candidates before that rework lands.
+    ``attempted`` is published on every exit, as it is on G2 and CMP-5. Emitted from
+    every exit for the same reason as elsewhere: a metric a failing exit stays
+    silent about is averaged over the attempts that survived, not over the attempts
+    that were made.
+
+    Neither scenario guard is allowed to gate candidates until the suite is
+    re-measured on the new serving base with a freshly validated judge — the
+    numbers this task has produced so far are dominated by the non-answer shapes
+    above.
     """
     validated, why = validation_status()
     if not validated:
@@ -777,26 +902,40 @@ def run_cmp6() -> Attempt:
             )
         result = a.run(CMP6_QUESTION)
         reply = result.text
-        judgment = judged_equivalent(CMP6_EXPECTED, reply, make_provider())
-        ok = judgment.verdict
+        provider = make_provider()
+
+        def judge(fact: str, answer: str) -> Judgment:
+            return judged_equivalent(fact, answer, provider)
+
+        verdict = cmp6_outcome(reply, judge)
     finally:
         a.close()  # the storage contract says close ends the scratch lifecycle
+    metrics = {
+        **agent_metrics(a, result=result),
+        "attempted": float(verdict.outcome != "not_attempted"),
+    }
+    judged = ""
+    if verdict.judgments:
+        (judgment,) = verdict.judgments
+        judged = (
+            f"judge_verdict={judgment.verdict} judge_tokens={judgment.tokens} "
+            f"judge_quote={judgment.quote[:160]!r} "
+        )
+        # The judge is a SECOND model call per attempt. Its cost is recorded
+        # beside the agent's own, or CMP-6's per-task token mean reports only
+        # half of what the task actually spent (contract amendment 4).
+        metrics["judge_tokens"] = float(judgment.tokens)
+        if judgment.ran:
+            metrics["judge_verdict"] = float(judgment.verdict)
     return Attempt(
-        passed=ok,
-        outcome="pass" if ok else "fail",
-        detail=f"compactions={compactions} verifier_kind=judged judge_verdict={ok} "
-        f"judge_tokens={judgment.tokens} judge_quote={judgment.quote[:160]!r} "
-        f"reply={reply[:240]!r}",
+        passed=verdict.passed,
+        outcome=verdict.outcome,
+        detail=f"compactions={compactions} verifier_kind={verdict.verifier} "
+        + (f"classification={verdict.classification!r} " if verdict.classification else "")
+        + judged
+        + f"reply={reply[:240]!r}",
         turns=len(a.messages),
-        metrics={
-            **agent_metrics(a, result=result),
-            "attempted": 1.0,
-            "judge_verdict": float(ok),
-            # The judge is a SECOND model call per attempt. Its cost is recorded
-            # beside the agent's own, or CMP-6's per-task token mean reports only
-            # half of what the task actually spent (contract amendment 4).
-            "judge_tokens": float(judgment.tokens),
-        },
+        metrics=metrics,
     )
 
 
