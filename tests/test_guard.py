@@ -301,6 +301,37 @@ def test_control_whitespace_probe_never_echoes_and_reads_remote():
     assert poison not in rendered
 
 
+@pytest.mark.parametrize("ch", ["\x80", "\x9f"])  # the C1 bounds: U+0080 and U+009F
+def test_c1_controls_refuse_like_c0(ch):
+    """U+0080-U+009F are category Cc while being none of isspace(), < 0x20, or
+    DEL — the previous predicate passed them into the normalizer (verbatim), the
+    classifier (which read the probe as LOCAL) and the record gate. The class
+    rule is Cc OR isspace(): C0, DEL and C1 refuse wholesale, at all three
+    boundaries."""
+    with pytest.raises(guard.MalformedBaseUrl, match="whitespace or control"):
+        guard.normalize_base_url(f"https://host.example/v1{ch}")
+    assert guard.is_local_base_url(f"http://localhost:1234/v1{ch}") is False
+    with pytest.raises(guard.MalformedBaseUrl):
+        guard.assert_recorded_base_url_clean(f"http://localhost:1234/v1{ch}", "x")
+    # the accepted-URL control: plain ASCII passes the same three gates
+    assert guard.normalize_base_url("https://host.example/v1") == "https://host.example/v1"
+    assert guard.is_local_base_url("http://localhost:1234/v1") is True
+    guard.assert_recorded_base_url_clean("https://host.example/v1", "x")
+
+
+@pytest.mark.parametrize("bad", [123, True, 4.2, {"base_url": "x"}])
+def test_recorded_base_url_gate_refuses_non_strings_gracefully(bad):
+    """urlsplit(123) raises AttributeError — not the caught ValueError/TypeError —
+    so DESCRIBING a scalar non-string crashed past the stated contract: a
+    host-safe MalformedBaseUrl naming the results file. (Containers happened to
+    raise a caught TypeError; the rule must not depend on which non-string it
+    is.) Non-strings are named generically before any parse touches them; None
+    stays a real recorded state (unset) and passes."""
+    with pytest.raises(guard.MalformedBaseUrl, match="results file"):
+        guard.assert_recorded_base_url_clean(bad, "the baseline results file")
+    guard.assert_recorded_base_url_clean(None, "the baseline results file")  # None passes
+
+
 def test_recorded_base_url_gate_refuses_poison_and_passes_clean():
     """The record-side twin of the live boundary: result files written by a
     PRE-fix runner can carry a verbatim poisoned URL, and delta/CLI format,

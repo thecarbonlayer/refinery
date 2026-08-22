@@ -391,6 +391,44 @@ def test_fingerprint_refuses_a_closure_responder(monkeypatch):
         ge.carbon_fingerprint(ROOT)
 
 
+def test_fingerprint_closure_clause_is_independently_load_bearing(monkeypatch):
+    """Every other closure fixture here ALSO fails the qualname or co_filename
+    check, so the ``__closure__ is None`` clause could rot silently behind them.
+    This fixture passes every other clause: a REAL cluster-H responder code
+    object (factory-made, defined in runner/tasks/cluster_h.py — the file
+    runner_sha hashes) rebuilt as a function whose co_qualname agrees with a
+    top-level-shaped __qualname__, holding live closure cells. Each passing
+    clause is asserted, so the fixture cannot drift into failing a different
+    check and stop pinning this one. Verified red against a mutant with only
+    the closure clause removed: this test alone failed."""
+    import inspect
+    import types
+
+    import runner.tasks.cluster_h as ch
+
+    code = next(
+        c
+        for c in ch.run_h1.__code__.co_consts
+        if isinstance(c, types.CodeType) and c.co_name == "responder"
+    )
+    resp = types.FunctionType(
+        code.replace(co_qualname="responder"),  # the one edit that makes the NAME top-level
+        ch.run_h1.__globals__,  # __module__ truthfully reads runner.tasks.cluster_h
+        "responder",
+        None,
+        tuple(types.CellType(None) for _ in code.co_freevars),  # live closure cells
+    )
+    assert inspect.isfunction(resp)
+    assert resp.__module__ == "runner.tasks.cluster_h"  # in_runner passes
+    assert resp.__qualname__.isidentifier()  # top_level passes
+    assert resp.__code__.co_qualname == resp.__qualname__  # the name-agreement passes
+    assert Path(resp.__code__.co_filename).resolve().is_relative_to(ge.RUNNER_ROOT)
+    assert resp.__closure__ is not None  # the ONE clause left to refuse it
+    _patch(monkeypatch, _CLEAN, provider=_provider_with(resp))
+    with pytest.raises(RuntimeError, match="closure"):
+        ge.carbon_fingerprint(ROOT)
+
+
 def test_fingerprint_refuses_a_lambda_responder(monkeypatch):
     lam = lambda messages, **kwargs: None  # noqa: E731 — the shape under test
     lam.__module__ = "runner.tasks.cluster_h"

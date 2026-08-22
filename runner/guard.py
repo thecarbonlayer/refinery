@@ -27,6 +27,7 @@ pure, offline-testable policy.
 from __future__ import annotations
 
 import hashlib
+import unicodedata
 from urllib.parse import urlsplit
 
 # The fingerprint fields that fold into the behavior key, in order — the LOAD-BEARING
@@ -173,8 +174,14 @@ def _has_control_or_whitespace(base_url: str) -> bool:
     BEFORE parsing (WHATWG alignment), so such a character can hide an authority
     from a raw-string scan while the parsed result grows one — and the HTTP
     client sends the RAW string, which cannot carry control characters on the
-    wire at all. A URL the wire cannot carry has no honest identity to record."""
-    return any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in base_url)
+    wire at all. A URL the wire cannot carry has no honest identity to record.
+
+    The rule is the CLASS, not an enumeration: Unicode category Cc, or
+    ``isspace()``. Cc is exactly C0, DEL and the C1 range U+0080-U+009F — and
+    C1 (bar NEL, which isspace catches) slipped past the previous ordinal
+    bounds (``< 0x20``, ``== 0x7F``): ``https://host.example/v1<U+0080>``
+    passed verbatim into the fingerprint."""
+    return any(unicodedata.category(c) == "Cc" or c.isspace() for c in base_url)
 
 
 def _forbidden_parts(base_url: str) -> list[str]:
@@ -238,7 +245,15 @@ def _describe_base(base_url) -> str:
     text ends up in logs, records and tracebacks. Every message in this module
     that talks about a base URL goes through here; none may format the URL
     itself. ``.hostname`` parses independently of a malformed port, so even an
-    unnormalizable URL usually still gets named by its host."""
+    unnormalizable URL usually still gets named by its host.
+
+    A non-string is type-checked FIRST, before urlsplit sees it: scalars raise
+    AttributeError there — not the ValueError/TypeError a parse failure raises —
+    and this function runs INSIDE refusal messages, so a describer that can
+    crash turns a host-safe refusal into a naked traceback (a recorded
+    ``"base_url": 123`` did exactly that at the record gate)."""
+    if not isinstance(base_url, str):
+        return "an unparseable base URL"
     try:
         host = urlsplit(base_url).hostname
     except (ValueError, TypeError):
