@@ -12,6 +12,7 @@ from runner.tasks import (
     cluster_f,
     cluster_g,
     cluster_h,
+    cluster_s,
 )
 
 TASKS: list[TaskSpec] = [
@@ -23,4 +24,9 @@ TASKS: list[TaskSpec] = [
     *cluster_f.SPECS,
     *cluster_g.SPECS,
     *cluster_h.SPECS,
+    # Cluster S ("S" for Select, deliberately out of letter sequence so parallel
+    # authoring streams don't all claim "I"): the tool-exposure section, its own
+    # uncalibrated suite until its null campaign runs (tests/test_sel_tasks.py
+    # proves the isolation).
+    *cluster_s.SPECS,
 ]
