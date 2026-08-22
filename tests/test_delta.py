@@ -4,7 +4,14 @@ from runner.delta import acceptance, delta
 
 
 def _results(
-    tasks: dict[str, tuple[str, float]], model: str = "carbon", runner_sha: str = "rsha1"
+    tasks: dict[str, tuple[str, float]],
+    model: str = "carbon",
+    runner_sha: str = "rsha1",
+    provider_order: str | None = None,
+    quantization: str | None = None,
+    base_url: str = "http://localhost:1234/v1",
+    reasoning_effort: str | None = None,
+    responder: str | None = None,
 ) -> dict:
     """Minimal results-JSON shape: name -> (split, pass_fraction). Attempts
     mirror the real suite (3 held_in, 5 held_out) so parity checks pass."""
@@ -15,6 +22,11 @@ def _results(
             "config_version": 1,
             "model": model,
             "runner_sha": runner_sha,
+            "provider_order": provider_order,
+            "quantization": quantization,
+            "base_url": base_url,
+            "reasoning_effort": reasoning_effort,
+            "responder": responder,
         },
         "tasks": {
             name: {"split": split, "pass_fraction": frac, "attempts": attempts[split]}
@@ -261,6 +273,130 @@ def test_delta_accepts_matching_runner_sha():
     cand = _results({"A1": ("held_in", 1.0), "B1": ("held_in", 1.0), "A3": ("held_out", 0.4)})
     d = delta(BASE, cand)
     assert "delta_in" in d and "delta_ho" in d
+
+
+def test_delta_refuses_mismatched_serving_base():
+    """Same model string, different provider or quantization is a different
+    serving base in everything but name — a Δ across them measures the serving
+    swap, not the edit."""
+    import pytest
+
+    tasks = {"A1": ("held_in", 1.0), "B1": ("held_in", 1.0), "A3": ("held_out", 0.4)}
+    pinned = _results(tasks, provider_order="deepinfra", quantization="fp8")
+    other_provider = _results(tasks, provider_order="together", quantization="fp8")
+    other_quant = _results(tasks, provider_order="deepinfra", quantization="bf16")
+    unpinned = _results(tasks)
+    with pytest.raises(ValueError, match="provider_order"):
+        delta(pinned, other_provider)
+    with pytest.raises(ValueError, match="quantization"):
+        delta(pinned, other_quant)
+    with pytest.raises(ValueError, match="provider_order"):
+        delta(pinned, unpinned)
+
+
+def test_delta_accepts_a_matching_serving_pin():
+    tasks = {"A1": ("held_in", 1.0), "B1": ("held_in", 1.0), "A3": ("held_out", 0.4)}
+    base = _results(tasks, provider_order="deepinfra", quantization="fp8")
+    cand = _results(tasks, provider_order="deepinfra", quantization="fp8")
+    d = delta(base, cand)
+    assert "delta_in" in d and "delta_ho" in d
+
+
+def test_delta_refuses_two_local_endpoints():
+    """LM Studio on :1234 vs Ollama on :11434, same model string: both unpinned,
+    both local, and still two serving bases — base_url is the only field that
+    tells them apart, so the parity gate must read it."""
+    import pytest
+
+    tasks = {"A1": ("held_in", 1.0), "B1": ("held_in", 1.0), "A3": ("held_out", 0.4)}
+    lmstudio = _results(tasks, base_url="http://localhost:1234/v1")
+    ollama = _results(tasks, base_url="http://localhost:11434/v1")
+    with pytest.raises(ValueError, match="base_url"):
+        delta(lmstudio, ollama)
+
+
+def test_delta_refuses_mismatched_reasoning_effort():
+    """reasoning_effort changes the request carbon sends; a Δ across efforts
+    measures the effort knob, not the edit."""
+    import pytest
+
+    tasks = {"A1": ("held_in", 1.0), "B1": ("held_in", 1.0), "A3": ("held_out", 0.4)}
+    low = _results(tasks, reasoning_effort="low")
+    high = _results(tasks, reasoning_effort="high")
+    with pytest.raises(ValueError, match="reasoning_effort"):
+        delta(low, high)
+
+
+def test_delta_refuses_mismatched_responder():
+    """A scripted (responder-served) result against a network-served one is not a
+    comparison of harness states at all — one side never talked to a model."""
+    import pytest
+
+    tasks = {"A1": ("held_in", 1.0), "B1": ("held_in", 1.0), "A3": ("held_out", 0.4)}
+    network = _results(tasks)
+    scripted = _results(tasks, responder="runner.tasks.somewhere._scripted")
+    with pytest.raises(ValueError, match="responder"):
+        delta(network, scripted)
+
+
+def test_delta_refuses_a_poisoned_recorded_base_url_without_echoing():
+    """A results file written by the PRE-fix runner can carry a verbatim poisoned
+    base_url (the vulnerable path recorded it when pinned). The serving-mismatch
+    message formats both raw values, and the returned dict carries both
+    fingerprints into the CLI's JSON print — so comparing records must not become
+    the disclosure path the live boundary closed. The same raw-string checks gate
+    the RECORDS first, refusing host-only and naming which file to re-record."""
+    import traceback
+
+    from runner import guard
+
+    poison = "http://user:sk-secret@host.example:notaport/v1?tenant=a#frag"
+    tasks = {"A1": ("held_in", 0.0), "A3": ("held_out", 0.4)}
+    clean = _results(tasks)
+    for poisoned_side in ("baseline", "candidate"):
+        poisoned = _results(tasks, base_url=poison)
+        pair = (poisoned, clean) if poisoned_side == "baseline" else (clean, poisoned)
+        with pytest.raises(guard.MalformedBaseUrl) as exc:
+            delta(*pair)
+        rendered = str(exc.value) + repr(exc.value) + "".join(traceback.format_exception(exc.value))
+        assert "sk-secret" not in rendered
+        assert poison not in rendered
+        assert poisoned_side in str(exc.value)  # names WHICH record to re-record
+        assert "host.example" in str(exc.value)  # host-only naming
+
+
+def test_delta_refuses_matching_poisoned_records_before_returning_fingerprints():
+    """Two identically poisoned records pass every parity gate — the old path
+    RETURNED both fingerprints verbatim and the CLI printed them as JSON. The
+    record gate must refuse before the returned dict even exists."""
+    from runner import guard
+
+    poison = "http://user:sk-secret@host.example:notaport/v1"
+    tasks = {"A1": ("held_in", 0.0), "A3": ("held_out", 0.4)}
+    with pytest.raises(guard.MalformedBaseUrl):
+        delta(_results(tasks, base_url=poison), _results(tasks, base_url=poison))
+
+
+def test_delta_refuses_a_control_whitespace_recorded_base_url():
+    """The control-whitespace class reaches records too: a tab-split authority
+    hides a credential from raw scans while parsing to a clean-looking identity."""
+    from runner import guard
+
+    poison = "https:/\t/user:sk-secret@localhost:1234/v1"
+    tasks = {"A1": ("held_in", 0.0), "A3": ("held_out", 0.4)}
+    with pytest.raises(guard.MalformedBaseUrl) as exc:
+        delta(_results(tasks, base_url=poison), _results(tasks))
+    assert "sk-secret" not in str(exc.value)
+
+
+def test_delta_serving_gate_covers_every_fingerprinted_provider_field():
+    """Cross-module consistency: the parity gate's field list plus the dedicated
+    model gate must cover exactly the Provider fields the fingerprint records —
+    a field recorded but not gated would be provenance theater."""
+    import runner.carbon_env as ge
+    from runner.delta import _SERVING_FIELDS
+
+    assert set(_SERVING_FIELDS) | {"model"} == set(ge.PROVIDER_FIELDS_FINGERPRINTED)
 
 
 def test_delta_refuses_missing_fingerprint():

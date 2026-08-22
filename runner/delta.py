@@ -11,6 +11,15 @@ from __future__ import annotations
 
 from fractions import Fraction
 
+from runner import guard
+
+# The recorded Provider fields the serving-parity gate compares. ``model`` is absent
+# only because it has its own dedicated gate (with a message naming both models);
+# together they cover exactly ``runner.carbon_env.PROVIDER_FIELDS_FINGERPRINTED`` —
+# a cross-module test pins that, so a field recorded in the fingerprint cannot go
+# ungated here.
+_SERVING_FIELDS = ("base_url", "reasoning_effort", "provider_order", "quantization", "responder")
+
 
 def _exact(task: dict) -> Fraction:
     """A task's pass rate as an EXACT fraction of its integer counts.
@@ -93,6 +102,21 @@ def delta(baseline: dict, candidate: dict) -> dict:
         raise ValueError(
             "results file lacks a fingerprint — refusing to compare unattributed measurements"
         )
+    # Record-side no-echo gate, BEFORE any gate that formats a fingerprint value
+    # and before the returned dict can exist: a results file written by a
+    # PRE-fix runner can carry a verbatim poisoned base_url (credential and
+    # all), and every path out of this function would disclose it — the
+    # serving-mismatch message below formats both raw values, the returned dict
+    # carries both fingerprints, and the CLI prints that dict as JSON. The
+    # recorded values pass the live boundary's raw-string checks here or the
+    # comparison refuses host-only (guard.MalformedBaseUrl). Once past this
+    # gate, a recorded base_url is credential-free by construction, so the
+    # mismatch message below may format it.
+    for origin, fp in (
+        ("the baseline results file", base_fp),
+        ("the candidate results file", cand_fp),
+    ):
+        guard.assert_recorded_base_url_clean(fp.get("base_url"), origin)
     # model parity: a Δ across models measures the model swap, not the edit.
     base_model = base_fp.get("model")
     cand_model = cand_fp.get("model")
@@ -108,6 +132,20 @@ def delta(baseline: dict, candidate: dict) -> dict:
             "verifier version mismatch — results were produced by different "
             "runner versions; re-measure"
         )
+    # serving parity: the same model string served from a different endpoint, by a
+    # different provider, at a different quantization, or at a different reasoning
+    # effort is a different serving base in everything but name — a Δ across serving
+    # bases measures the serving swap, not the edit. None == None is a genuine match
+    # (the field was unset on both sides). A record predating these fields cannot
+    # slip past against one carrying them: the runner that stamps them hashes to a
+    # different runner_sha, so the verifier gate above refuses that pair first.
+    for field in _SERVING_FIELDS:
+        if base_fp.get(field) != cand_fp.get(field):
+            raise ValueError(
+                f"serving mismatch on {field}: baseline {base_fp.get(field)!r} vs "
+                f"candidate {cand_fp.get(field)!r} — Δ across serving bases measures "
+                f"the serving swap, not the edit"
+            )
     # Exact throughout, floated once at the end. Subtracting two rounded means is what
     # produced a -5.56e-06 "regression" between runs with identical integer counts.
     d_in = float(exact_split_rate(candidate, "held_in") - exact_split_rate(baseline, "held_in"))
