@@ -38,9 +38,9 @@ def _scripted_responder(messages, **kwargs):
 
 
 def _runner_tree_responder(messages, **kwargs):
-    """A top-level function posing as runner-tree code (unit seam: the marker
-    policy reads __module__/__qualname__, so faking the module string tests the
-    policy without planting a real function in runner/)."""
+    """A top-level function POSING as runner-tree code via a spoofed __module__.
+    Round 3 accepted this (the policy trusted the module string); the code-object
+    checks refuse it — its co_filename is this tests file, outside runner/."""
     raise AssertionError("never called — only its identity is fingerprinted")
 
 
@@ -299,6 +299,31 @@ def test_every_provider_field_is_fingerprinted_or_named_excluded(monkeypatch):
         assert reason.strip(), f"exclusion of {field!r} states no reason"
 
 
+def test_fingerprint_refuses_a_non_string_base_url(monkeypatch):
+    """The fingerprint boundary for the type rule. Provider.from_env reads
+    os.environ and always yields a str, so this needs a DIRECTLY constructed
+    provider — and with one, a falsey non-string sailed through
+    normalize_base_url unchanged (its early return preceded every check), was
+    pinned enough to satisfy assert_serving_pinned, and was RECORDED: base_url
+    False folded into the behavior key. A base URL that is not a string cannot
+    be scanned, parsed, or honestly recorded — it refuses here."""
+    from runner import guard
+
+    _patch(
+        monkeypatch,
+        _CLEAN,
+        provider=SimpleNamespace(
+            model="test-model",
+            base_url=False,
+            reasoning_effort=None,
+            provider_order="one-provider",  # pinned: the pin gate would have passed it
+            quantization="fp8",
+        ),
+    )
+    with pytest.raises(guard.MalformedBaseUrl, match="not a string"):
+        ge.carbon_fingerprint(ROOT)
+
+
 def test_fingerprint_records_no_responder_as_none(monkeypatch):
     """The env-built provider carries no responder; None is its truthful record."""
     _patch(monkeypatch, _CLEAN)
@@ -310,13 +335,65 @@ def test_fingerprint_records_a_marker_for_a_top_level_runner_responder(monkeypat
     if one ever reaches the suite-level provider, the fingerprint must say so.
     The callable itself is uncapturable; its qualified name is recorded, and the
     ONLY callables whose qualified name is a stable identity are top-level
-    functions under runner/ — the tree runner_sha hashes."""
-    _patch(monkeypatch, _CLEAN, provider=_provider_with(_runner_tree_responder))
+    functions under runner/ — the tree runner_sha hashes. A REAL runner function
+    (never called; only its identity is read), so every check runs against the
+    truth: name, code file, co_qualname, and closure all agree."""
+    _patch(monkeypatch, _CLEAN, provider=_provider_with(ge.runner_sha))
     fp = ge.carbon_fingerprint(ROOT)
-    assert fp["responder"] == "runner.tasks.cluster_h._runner_tree_responder"
+    assert fp["responder"] == "runner.carbon_env.runner_sha"
     from runner import guard
 
     assert fp["behavior_key"] == guard.fingerprint_behavior_key(fp)
+
+
+def test_fingerprint_refuses_a_spoofed_module_string(monkeypatch):
+    """A __module__ that SAYS runner-tree is a name, not evidence: this function's
+    code object lives in the tests file, which runner_sha does not hash, so the
+    marker would pin nothing. The code-object check reads co_filename, which no
+    attribute assignment can move."""
+    _patch(monkeypatch, _CLEAN, provider=_provider_with(_runner_tree_responder))
+    with pytest.raises(RuntimeError, match="code object"):
+        ge.carbon_fingerprint(ROOT)
+
+
+def test_fingerprint_refuses_a_wraps_wrapped_external_function(monkeypatch):
+    """functools.wraps copies __module__ and __qualname__ onto the wrapper —
+    ordinary decorator behavior, not spoofing — so the NAME passes every naming
+    check while the CODE that would actually run is external and unhashed. The
+    code object cannot be copied that way: co_qualname still names the wrapper
+    and co_filename its real file."""
+    import functools
+
+    def _wrapper(messages, **kwargs):
+        return None
+
+    functools.update_wrapper(_wrapper, ge.runner_sha)
+    assert _wrapper.__module__ == "runner.carbon_env"  # the copied name...
+    assert _wrapper.__qualname__ == "runner_sha"  # ...claims runner code
+    assert _wrapper.__closure__ is None  # not even closure-backed
+    _patch(monkeypatch, _CLEAN, provider=_provider_with(_wrapper))
+    with pytest.raises(RuntimeError, match="code object"):
+        ge.carbon_fingerprint(ROOT)
+
+
+def test_fingerprint_refuses_a_wraps_wrapped_closure(monkeypatch):
+    """The commonest decorator shape: the wrapper closes over the function it
+    wraps. Same copied runner name, plus closure state no name captures."""
+    import functools
+
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            return fn(*args, **kwargs)
+
+        return wrapper
+
+    wrapped = deco(ge.runner_sha)
+    assert wrapped.__qualname__ == "runner_sha"  # the copied name is top-level-shaped
+    assert wrapped.__closure__ is not None  # the state the name cannot capture
+    _patch(monkeypatch, _CLEAN, provider=_provider_with(wrapped))
+    with pytest.raises(RuntimeError, match="code object"):
+        ge.carbon_fingerprint(ROOT)
 
 
 def test_fingerprint_refuses_a_closure_responder(monkeypatch):
@@ -336,6 +413,44 @@ def test_fingerprint_refuses_a_closure_responder(monkeypatch):
     assert a.__qualname__ == b.__qualname__  # the collision that forbids the marker
     _patch(monkeypatch, _CLEAN, provider=_provider_with(a))
     with pytest.raises(RuntimeError, match="top-level"):
+        ge.carbon_fingerprint(ROOT)
+
+
+def test_fingerprint_closure_clause_is_independently_load_bearing(monkeypatch):
+    """Every other closure fixture here ALSO fails the qualname or co_filename
+    check, so the ``__closure__ is None`` clause could rot silently behind them.
+    This fixture passes every other clause: a REAL cluster-H responder code
+    object (factory-made, defined in runner/tasks/cluster_h.py — the file
+    runner_sha hashes) rebuilt as a function whose co_qualname agrees with a
+    top-level-shaped __qualname__, holding live closure cells. Each passing
+    clause is asserted, so the fixture cannot drift into failing a different
+    check and stop pinning this one. Verified red against a mutant with only
+    the closure clause removed: this test alone failed."""
+    import inspect
+    import types
+
+    import runner.tasks.cluster_h as ch
+
+    code = next(
+        c
+        for c in ch.run_h1.__code__.co_consts
+        if isinstance(c, types.CodeType) and c.co_name == "responder"
+    )
+    resp = types.FunctionType(
+        code.replace(co_qualname="responder"),  # the one edit that makes the NAME top-level
+        ch.run_h1.__globals__,  # __module__ truthfully reads runner.tasks.cluster_h
+        "responder",
+        None,
+        tuple(types.CellType(None) for _ in code.co_freevars),  # live closure cells
+    )
+    assert inspect.isfunction(resp)
+    assert resp.__module__ == "runner.tasks.cluster_h"  # in_runner passes
+    assert resp.__qualname__.isidentifier()  # top_level passes
+    assert resp.__code__.co_qualname == resp.__qualname__  # the name-agreement passes
+    assert Path(resp.__code__.co_filename).resolve().is_relative_to(ge.RUNNER_ROOT)
+    assert resp.__closure__ is not None  # the ONE clause left to refuse it
+    _patch(monkeypatch, _CLEAN, provider=_provider_with(resp))
+    with pytest.raises(RuntimeError, match="closure"):
         ge.carbon_fingerprint(ROOT)
 
 

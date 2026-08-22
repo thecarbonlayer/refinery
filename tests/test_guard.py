@@ -211,8 +211,10 @@ def test_normalize_base_url_refuses_userinfo_without_echoing_the_secret():
 
 def test_normalize_base_url_passes_the_unparseable_through():
     """What cannot be parsed cannot be normalized — it passes through verbatim and
-    the pin gate reads it as remote (fail closed), so it can never record unpinned."""
-    assert guard.normalize_base_url("not a url") == "not a url"
+    the pin gate reads it as remote (fail closed), so it can never record unpinned.
+    The probe is whitespace-free: whitespace now refuses outright (see below), so
+    the verbatim path is only for clean-but-unparseable strings."""
+    assert guard.normalize_base_url("not-a-url") == "not-a-url"
 
 
 def test_malformed_port_reads_as_remote_everywhere():
@@ -265,6 +267,159 @@ def test_refusals_never_echo_the_raw_url():
     assert "sk-secret" not in rendered
     assert poison not in rendered
     assert "host.example" in str(exc.value)  # the host alone identifies the endpoint
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https:/\t/user:sk-secret@localhost:1234/v1",  # the probe: a tab splits the //
+        "http://localhost:1234/v1\n",  # trailing newline, urlsplit-stripped
+        "http://local host:1234/v1",  # internal space
+    ],
+)
+def test_control_or_whitespace_refuses_before_any_scan_or_parse(url):
+    """urlsplit deletes tab/newline BEFORE parsing (WHATWG alignment), so the raw
+    authority scan can be blinded: https:/<TAB>/user:secret@localhost shows no //
+    to the raw string while urlsplit parses a credentialed netloc — the normalizer
+    then records a SANITIZED identity (and classifies LOCAL, skipping the pin
+    gate) for a request the client cannot even issue, since httpx refuses control
+    characters on the wire. The rule: any whitespace or control character
+    anywhere refuses; nothing is stripped, leading or trailing included."""
+    with pytest.raises(guard.MalformedBaseUrl, match="whitespace or control"):
+        guard.normalize_base_url(url)
+
+
+def test_control_whitespace_probe_never_echoes_and_reads_remote():
+    import traceback
+
+    poison = "https:/\t/user:sk-secret@localhost:1234/v1"
+    assert guard.is_local_base_url(poison) is False  # not provably local: fail closed
+    with pytest.raises(guard.MalformedBaseUrl) as exc:
+        guard.normalize_base_url(poison)
+    rendered = str(exc.value) + repr(exc.value) + "".join(traceback.format_exception(exc.value))
+    assert "sk-secret" not in rendered
+    assert poison not in rendered
+
+
+@pytest.mark.parametrize("ch", ["\x80", "\x9f"])  # the C1 bounds: U+0080 and U+009F
+def test_c1_controls_refuse_like_c0(ch):
+    """U+0080-U+009F are category Cc while being none of isspace(), < 0x20, or
+    DEL — the previous predicate passed them into the normalizer (verbatim), the
+    classifier (which read the probe as LOCAL) and the record gate. The class
+    rule is Cc OR isspace(): C0, DEL and C1 refuse wholesale, at all three
+    boundaries."""
+    with pytest.raises(guard.MalformedBaseUrl, match="whitespace or control"):
+        guard.normalize_base_url(f"https://host.example/v1{ch}")
+    assert guard.is_local_base_url(f"http://localhost:1234/v1{ch}") is False
+    with pytest.raises(guard.MalformedBaseUrl):
+        guard.assert_recorded_base_url_clean(f"http://localhost:1234/v1{ch}", "x")
+    # the accepted-URL control: plain ASCII passes the same three gates
+    assert guard.normalize_base_url("https://host.example/v1") == "https://host.example/v1"
+    assert guard.is_local_base_url("http://localhost:1234/v1") is True
+    guard.assert_recorded_base_url_clean("https://host.example/v1", "x")
+
+
+class _DecodingBase:
+    """Not a str, but urllib's ``_coerce_args`` accepts ANY object carrying
+    ``.decode()``: it decodes, parses the decoded text, then re-encodes, so
+    ``urlsplit`` hands back a BYTES-flavoured SplitResult (hostname
+    ``b'localhost'``). Iterable of clean characters, so the whitespace scan
+    cannot stop it; truthy, so the normalizer's falsey early return cannot
+    either. This is the shape that reached ``urlsplit`` itself."""
+
+    def decode(self, encoding="ascii", errors="strict"):
+        return "http://localhost:1234/v1"
+
+    def __iter__(self):
+        return iter("http://localhost:1234/v1")
+
+    def __bool__(self):
+        return True
+
+
+class _StrBase(str):
+    """A str SUBCLASS: it IS a string, so the type rule must let it through —
+    isinstance, never ``type(x) is str``."""
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        False,  # falsey non-strings were returned UNCHANGED by the normalizer...
+        0,
+        b"",
+        b"http://localhost:1234/v1",  # ...and truthy bytes crashed the scan (TypeError)
+        _DecodingBase(),  # ...while this one reached urlsplit and decoded to bytes
+    ],
+)
+def test_non_string_base_url_refuses_at_normalizer_and_classifier(bad):
+    """The type rule is one predicate at the shared parse path, not three
+    scattered checks. Pre-fix, ``normalize_base_url`` returned every FALSEY
+    non-string unchanged before any validation ran — with a directly built
+    pinned provider, False/0/b"" were retained into the fingerprint and folded
+    into the behavior key — while truthy non-strings crashed
+    (TypeError/AttributeError) instead of refusing, and a decoding-protocol
+    object reached urlsplit and parsed to a bytes SplitResult, which the
+    normalizer would have formatted into a b'http'-shaped identity. Now: a
+    non-string refuses at the normalizer with the fail-closed contract message,
+    and reads unparseable (hence remote) at the classifier. Not reachable from
+    Provider.from_env, which reads os.environ and always yields str — this
+    closes the class."""
+    with pytest.raises(guard.MalformedBaseUrl, match="not a string"):
+        guard.normalize_base_url(bad)
+    assert guard.is_local_base_url(bad) is False  # unparseable reads remote: fail closed
+    with pytest.raises(guard.MalformedBaseUrl):  # the record gate, already guarded
+        guard.assert_recorded_base_url_clean(bad, "the baseline results file")
+
+
+def test_none_passes_and_a_str_subclass_is_treated_as_a_string():
+    """The two deliberate non-refusals, pinned so the type rule cannot swallow
+    them: None is a real recorded state (an unset base — carbon_fingerprint
+    normalizes it every run), and a str subclass is a string, so it normalizes
+    and classifies exactly like its plain-str twin."""
+    assert guard.normalize_base_url(None) is None
+    assert guard.normalize_base_url("") == ""  # empty str: still a string, still passes
+    sub = _StrBase("http://LocalHost:1234/v1/")
+    assert guard.normalize_base_url(sub) == guard.normalize_base_url(str(sub))
+    assert guard.normalize_base_url(sub) == "http://localhost:1234/v1"
+    assert guard.is_local_base_url(sub) is True
+    guard.assert_recorded_base_url_clean(sub, "x")
+
+
+@pytest.mark.parametrize("bad", [123, True, 4.2, {"base_url": "x"}])
+def test_recorded_base_url_gate_refuses_non_strings_gracefully(bad):
+    """urlsplit(123) raises AttributeError — not the caught ValueError/TypeError —
+    so DESCRIBING a scalar non-string crashed past the stated contract: a
+    host-safe MalformedBaseUrl naming the results file. (Containers happened to
+    raise a caught TypeError; the rule must not depend on which non-string it
+    is.) Non-strings are named generically before any parse touches them; None
+    stays a real recorded state (unset) and passes."""
+    with pytest.raises(guard.MalformedBaseUrl, match="results file"):
+        guard.assert_recorded_base_url_clean(bad, "the baseline results file")
+    guard.assert_recorded_base_url_clean(None, "the baseline results file")  # None passes
+
+
+def test_recorded_base_url_gate_refuses_poison_and_passes_clean():
+    """The record-side twin of the live boundary: result files written by a
+    PRE-fix runner can carry a verbatim poisoned URL, and delta/CLI format,
+    return, and serialize recorded fingerprints — the same raw-string rules must
+    gate the records on the way out, host-only, naming the offending record."""
+    import traceback
+
+    guard.assert_recorded_base_url_clean(None, "x")  # unset is a real recorded state
+    guard.assert_recorded_base_url_clean("http://localhost:1234/v1", "x")  # clean passes
+    poison = "http://user:sk-secret@host.example:notaport/v1?tenant=a#frag"
+    with pytest.raises(guard.MalformedBaseUrl) as exc:
+        guard.assert_recorded_base_url_clean(poison, "the baseline results file")
+    rendered = str(exc.value) + repr(exc.value) + "".join(traceback.format_exception(exc.value))
+    assert "sk-secret" not in rendered
+    assert poison not in rendered
+    assert "host.example" in str(exc.value)
+    assert "baseline results file" in str(exc.value)
+    with pytest.raises(guard.MalformedBaseUrl):  # the whitespace class reaches records too
+        guard.assert_recorded_base_url_clean("https:/\t/u:sk-x@localhost:1234/v1", "x")
+    with pytest.raises(guard.MalformedBaseUrl):  # non-string cannot be scanned: fail closed
+        guard.assert_recorded_base_url_clean(["http://u:sk-x@h/v1"], "x")
 
 
 def test_refusal_on_an_unsplittable_authority_still_never_echoes():
