@@ -40,7 +40,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import time
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 JUDGE_PROMPT = """You judge whether an ANSWER conveys the same meaning as an EXPECTED FACT.
@@ -73,6 +77,237 @@ QUOTE: <the exact span of ANSWER that contradicts it, or its closest attempt>
 JUDGE_PROMPT_SHA = hashlib.sha256(JUDGE_PROMPT.encode()).hexdigest()
 
 
+# --- transport: bounded retry for transient serving faults ----------------------
+#
+# The judge is a model call that does NOT go through carbon's ``Agent``, so none of
+# carbon's retry policy reaches it: ``judged_equivalent`` calls ``chat()`` directly
+# and every provider fault was terminal for its pair. This is the same defect class
+# carbon fixed in its compaction summarizer (the one unretried model call in a turn),
+# and it cost the same way — measured 2026-08-21 on the pinned OpenRouter/Novita
+# base, a live re-validation of the 635-pair corpus lost 58 pairs to HTTP 429 and
+# scored 0.899 agreement against a 0.95 threshold. Delivered-only agreement was
+# 0.9896 with zero false approvals: the judge was sound, the delivery was not.
+#
+# The policy below is carbon's, restated: same transient classes, same exponential
+# backoff, same "max_attempts bounds TOTAL tries, not retries". It is a COPY, not an
+# import, on purpose — refinery grades carbon, and a grader that took its own
+# transport correctness from the graded harness would be silently retuned by a new
+# pinned base (or, in principle, by an accepted candidate). The copy's drift alarm is
+# ``tests/test_judge.py``, which compares this classifier against carbon's own on a
+# shared probe list.
+
+# Transient status codes matched as standalone numbers, never substrings: carbon's
+# own regression — "requested 15020 tokens" contains "502", and substring matching
+# classified a context-overflow message as a transient gateway fault, spending the
+# whole retry budget on a payload that could never fit.
+_TRANSIENT_STATUS = re.compile(r"\b(?:429|502|503|504)\b")
+
+_TRANSIENT_MARKERS = (
+    "rate limit",
+    "timeout",
+    "timed out",
+    "temporarily unavailable",
+    "connection reset",
+    "connection refused",
+)
+
+
+@dataclass(frozen=True)
+class RetryPolicy:
+    """Bounded recovery for transient provider failures on the judge call.
+
+    ``max_attempts`` bounds TOTAL tries, not retries — 5 means four waits (2s, 4s,
+    8s, 16s at the shipped base) and then a give-up, which is carbon's reading of the
+    same field name.
+
+    ``max_delay_s`` is the longest SINGLE wait this policy will spend on one pair. It
+    never binds on the computed backoff (16 < 60); it exists for the server-supplied
+    ``Retry-After``, which is not ours to bound by construction. Its rule is a
+    refusal, not a clamp: an instruction we are willing to wait for is honored
+    EXACTLY, and one longer than this stops the retry and records the pair
+    undelivered. Clamping — the first version of this code — retried at 60s against a
+    server that said 120, i.e. asked again BEFORE it was allowed to, near-certainly
+    burning the try and adding load to a limiter that had just said no. Waiting the
+    full amount instead would let one endpoint stall the run without limit. Refusing
+    is the only one of the three that is both honest and bounded: four such waits
+    bound a single pair at 4 x max_delay_s, and the undelivered pair is visible to
+    the gate rather than silently under-honored.
+    """
+
+    max_attempts: int = 5
+    base_delay_ms: int = 2000
+    max_delay_s: float = 60.0
+
+
+# Refinery's own values, deliberately equal to the ones carbon ships today
+# (harness_config.json: backoff, 5, 2000). They are NOT read from carbon's config:
+# that file is the editable surface this repo's loop rewrites, and a candidate edit
+# must never be able to reach into the grader's transport.
+JUDGE_RETRY = RetryPolicy()
+
+# The wait, injectable. Tests replace this so an offline suite never spends a real
+# 2/4/8/16-second backoff (``tests/conftest.py``), and so a test can assert on the
+# delays the policy asked for rather than on wall-clock time.
+_sleep = time.sleep
+
+
+def _describe(exc: Exception) -> str:
+    """``str(exc)``, or the exception's type name when its own ``__str__`` raises.
+
+    Every branch of the fault handler reads the message — to classify it, to label
+    it, and to record it in ``raw`` — so an exception that cannot describe itself
+    would take the run down before the retry decision was even consulted. Total by
+    construction, because everything below assumes it.
+    """
+    try:
+        return str(exc)
+    except Exception:
+        return type(exc).__name__
+
+
+def transient_fault(exc: Exception) -> bool:
+    """Is ``exc`` a serving fault worth trying again? Carbon's rule, restated.
+
+    Public because ``tests/test_judge.py`` pins it against carbon's
+    ``Agent._transient_error`` — the drift alarm the copy above needs.
+    """
+    text = _describe(exc).lower()
+    if any(marker in text for marker in _TRANSIENT_MARKERS):
+        return True
+    # Status codes go through the word-boundary pattern, not ``in`` — see
+    # ``_TRANSIENT_STATUS`` for the token-count false match that prevents.
+    return _TRANSIENT_STATUS.search(text) is not None
+
+
+def fault_class(exc: Exception) -> str:
+    """A short, groupable label for one delivery fault, for the artifact's record.
+
+    Only the KNOWN transient statuses are read out of the message, by the same
+    word-boundary pattern the classifier uses; anything else is labelled by exception
+    type. A loose three-digit scrape would have relabelled "you requested 15020
+    tokens" as an HTTP 502 in the very diagnostics a human reads to find the cause.
+    """
+    described = _describe(exc)
+    status = _TRANSIENT_STATUS.search(described)
+    if status:
+        return f"http_{status.group(0)}"
+    lowered = described.lower()
+    for marker in _TRANSIENT_MARKERS:
+        if marker in lowered:
+            return marker.replace(" ", "_")
+    return type(exc).__name__
+
+
+def _header(exc: Exception, name: str) -> str | None:
+    """One header off an exception's response, matched case-INSENSITIVELY.
+
+    Duck-typed through ``exc.response.headers`` rather than typed against httpx: the
+    provider seam is carbon's, refinery does not depend on its HTTP client, and a
+    provider that raises something else simply has no header to offer.
+
+    ``httpx.Headers`` is already case-insensitive, so the direct ``get`` covers the
+    live path — but this accepts ANY mapping, and a plain dict is not. HTTP header
+    names are case-insensitive and servers send ``Retry-After`` canonically, so a
+    lowercase-only lookup silently drops the one authoritative number in this whole
+    policy. The fallback scan is what makes the promise true for every mapping,
+    rather than for the one client that happens to be underneath today.
+    """
+    headers = getattr(getattr(exc, "response", None), "headers", None)
+    if headers is None:
+        return None
+    try:
+        value = headers.get(name)
+    except (AttributeError, TypeError):
+        return None
+    if value is not None:
+        return value
+    try:
+        items = list(headers.items())
+    except (AttributeError, TypeError):
+        return None
+    for key, value in items:
+        if str(key).lower() == name:
+            return value
+    return None
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
+    """The server's own ``Retry-After`` as a wait in seconds, or None to fall back.
+
+    A 429 that names its own window is the one authoritative number in this policy —
+    ours are guesses about an undocumented ceiling, and continuing to guess over an
+    explicit instruction is how a client keeps hammering a closed window.
+
+    BOTH RFC 7231 forms are honored. The delta-seconds form is read directly. The
+    HTTP-date form is parsed and turned into a wait; an earlier version ignored it
+    on the grounds that a skewed local clock makes the arithmetic untrustworthy, and
+    that argument does not survive its own safeguard — the caller clamps every wait
+    into ``[0, max_delay_s]``, so skew can move the wait only inside a range we were
+    already willing to spend. Silently dropping a server instruction is the larger
+    error. A date already in the past means "you may retry now" (0), not "wait
+    forever".
+
+    None means FALL BACK to the computed backoff, and it is returned only for
+    genuine absence or malformation: no such header, an unparseable value, or a
+    negative delta-seconds (which the RFC does not permit and which no clock
+    explains, unlike a past date).
+
+    ``OverflowError`` is named in the date guard beside the two obvious ones, and it
+    is not hypothetical: ``Retry-After: Fri, 31 Dec 999999999999 23:59:59 GMT`` makes
+    ``parsedate_to_datetime`` raise it, and the first version of this function let
+    that escape — past ``judged_equivalent``'s fail-closed guarantee and out through
+    an entire 635-pair validation loop, because this function IS that loop's per-pair
+    isolation. Honoring the date form was right; honoring it with a guard that named
+    only the failures we had thought of was not. The caller now also refuses to let
+    ANY raise from here end a run, so this list being incomplete again would cost one
+    pair rather than the run.
+    """
+    raw = _header(exc, "retry-after")
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    try:
+        return seconds if (seconds := float(text)) >= 0 else None
+    except (TypeError, ValueError):
+        pass
+    try:
+        target = parsedate_to_datetime(text)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if target is None:
+        return None
+    if target.tzinfo is None:  # RFC 7231: an HTTP-date with no zone is GMT
+        target = target.replace(tzinfo=UTC)
+    return max((target - datetime.now(UTC)).total_seconds(), 0.0)
+
+
+def _next_delay(attempt: int, exc: Exception, policy: RetryPolicy) -> tuple[float | None, str]:
+    """``(seconds to wait before the NEXT try, why there is none)``.
+
+    ``attempt`` is 1-indexed and already incremented, so ``max_attempts`` bounds
+    total tries: at max_attempts=5 a delay is offered after tries 1-4 and refused
+    after try 5.
+
+    The reason string is non-empty only where a reader would otherwise be left
+    guessing — today, a ``Retry-After`` longer than ``max_delay_s``, which stops the
+    retry rather than under-honoring it (see ``RetryPolicy``). A budget that simply
+    ran out, or a fault that was never transient, needs no note: the fault itself is
+    already in ``raw`` and the counts say the rest.
+    """
+    if attempt >= policy.max_attempts or not transient_fault(exc):
+        return None, ""
+    server_hint = _retry_after_seconds(exc)
+    if server_hint is None:
+        return min(policy.base_delay_ms * (2 ** (attempt - 1)) / 1000, policy.max_delay_s), ""
+    if server_hint > policy.max_delay_s:
+        return None, (
+            f"the server's Retry-After asked for {server_hint:g}s, longer than the "
+            f"{policy.max_delay_s:g}s this policy will wait; retrying sooner would "
+            f"ask again before it allowed"
+        )
+    return server_hint, ""
+
+
 # The validation artifact (contract §4) and, with it, the judge's ACTIVATION
 # gate. The path lives here rather than in ``loop.judge_validate`` — which
 # writes the file — because the reader is a TASK (``runner/tasks/cluster_g.py``
@@ -84,21 +319,49 @@ AGREEMENT_PATH = (
 )
 
 
-def validation_status(path: Path | None = None) -> tuple[bool, str]:
-    """Is this judge validated for THIS prompt? ``(ok, reason)``.
+# The version of the SCORING COMPUTATION that turns per-pair judge outputs into
+# the artifact's agreement numbers and its ``pass`` verdict — the fourth pin of
+# the artifact's identity, beside the prompt sha, the parser version, and the
+# model. It lives HERE, not in ``loop.judge_validate`` where the computation
+# runs, for ``AGREEMENT_PATH``'s reason: the reader (this gate) may not import
+# ``loop``, and one constant imported by the writer keeps the stamp and the
+# check from drifting apart.
+#
+# BUMP THIS, in the same commit, on any change to ``run_validation``'s scoring
+# or pass logic that could alter agreement, the clean-denial gate, or ``pass``
+# for the same judge outputs. The gate refuses an artifact stamped with any
+# other version — or with none, which is what every artifact written before
+# this pin carries. History: 1 = verdict-equality agreement (an undelivered
+# judgment's fail-closed False could count as a correct NO); 2 = delivered-
+# verdict agreement (undelivered pairs never agree; delivered/undelivered
+# counts recorded per artifact, ``ran`` per record).
+VALIDATION_COMPUTATION_VERSION = 2
 
-    Contract §4: CMP-6's activation is gated on
+
+def validation_status(path: Path | None = None, *, judge_model: str) -> tuple[bool, str]:
+    """Is this judge validated for THIS prompt, parser, and model? ``(ok, reason)``.
+
+    Contract §4: the judged verifiers' activation (CMP-6's verdict, CMP-5's
+    extraction lane) is gated on
     ``iterations/judge-validation/agreement.json`` existing, recording
-    ``pass: true``, AND carrying the CURRENT ``JUDGE_PROMPT_SHA``. Any other
-    state returns False with the reason, and CMP-6 turns that into an
+    ``pass: true``, AND carrying the CURRENT ``JUDGE_PROMPT_SHA``,
+    ``JUDGE_PARSER_VERSION``, ``VALIDATION_COMPUTATION_VERSION``, and the model
+    the live judge will actually run on (``judge_model`` — required, so no
+    caller can forget the binding). Any
+    other state returns False with the reason, and the tasks turn that into an
     ``error`` outcome — never a mechanical fallback, which would silently
     replace a meaning check with a substring check and report the result under
     the same task name.
 
-    The sha comparison is the half that is easy to forget and the one that
-    matters most: the artifact is a measurement of a SPECIFIC prompt's
-    agreement with mechanical ground truth, and a prompt edit leaves the file
-    on disk, passing, describing a judge that no longer exists.
+    The identity comparisons are the half that is easy to forget and the one
+    that matters most: the artifact is a measurement of a SPECIFIC prompt read
+    by a SPECIFIC parser on a SPECIFIC model, and a change to any of the three
+    leaves the file on disk, passing, describing a judge that no longer
+    exists. Serving identity beyond the model string (provider, quantization)
+    is NOT bound yet, deliberately: those fields do not exist on the provider
+    seam today — they arrive with the queued fingerprint extension for the new
+    serving base, and the artifact and this check must grow them in that same
+    change rather than pretend to bind what is not recorded.
 
     Fails CLOSED on every unreadable state (missing file, bad JSON, an OSError)
     — the same discipline as ``_parse_judgment``.
@@ -117,6 +380,35 @@ def validation_status(path: Path | None = None) -> tuple[bool, str]:
         return False, (
             f"validation artifact was measured for judge_prompt_sha={str(recorded_sha)[:12]!r}, "
             f"this judge is {JUDGE_PROMPT_SHA[:12]!r} — re-run the validation"
+        )
+    # The parser half of the identity, same discipline as the sha: an artifact is a
+    # measurement of a (prompt, parser) PAIR. A missing key is an artifact measured
+    # before the parser was versioned at all — refused for the same reason a
+    # mismatch is, because "the parser it describes no longer exists" covers both.
+    recorded_parser = artifact.get("judge_parser_version")
+    if recorded_parser != JUDGE_PARSER_VERSION:
+        return False, (
+            f"validation artifact was measured for judge_parser_version={recorded_parser!r}, "
+            f"this parser is {JUDGE_PARSER_VERSION} — re-run the validation"
+        )
+    # The scoring-computation half: an artifact scored under another rule (or
+    # before scoring was versioned at all — the missing-key case) may carry a
+    # ``pass: true`` the current rule would refuse.
+    recorded_computation = artifact.get("validation_computation_version")
+    if recorded_computation != VALIDATION_COMPUTATION_VERSION:
+        return False, (
+            "validation artifact was scored under "
+            f"validation_computation_version={recorded_computation!r}, this scorer is "
+            f"{VALIDATION_COMPUTATION_VERSION} — re-run the validation"
+        )
+    # The model half of the identity: agreement measured on one model says nothing
+    # about another. A missing key refuses too — an artifact that never said which
+    # model it measured is not evidence about any.
+    recorded_model = artifact.get("model")
+    if recorded_model != judge_model:
+        return False, (
+            f"validation artifact was measured with judge model {recorded_model!r}, "
+            f"this run's judge is {judge_model!r} — re-run the validation"
         )
     if artifact.get("pass") is not True:
         return False, f"validation artifact records pass={artifact.get('pass')!r}"
@@ -137,31 +429,81 @@ class Judgment:
     Zero when the provider reported no usage (a scripted provider, a transport
     failure) — never an estimate, which would put a fabricated number in the
     same field as measured ones.
+
+    ``ran`` separates two kinds of False verdict. True means a verdict actually
+    came back in the pinned two-line format — a real NO, or a YES the grounding
+    rule refused (the judge decided; the decision failed the pair). False means
+    NO decision exists: the provider call failed or the output never parsed.
+    Both fail closed to ``verdict=False``, but a verifier that recorded the
+    second kind as a task failure would be blaming the strategy under test for
+    a judge outage — ``ran`` is what lets it refuse (outcome ``error``) instead.
+
+    ``attempts`` and ``faults`` are the DELIVERY record: how many tries this one
+    judgment took, and a label per fault that cost a try (``fault_class``). Both
+    describe the transport and neither can move a verdict — ``attempts`` is 1 and
+    ``faults`` empty on every call that succeeded first time, which is nearly all of
+    them. They exist so a validation run can state what the transport did instead of
+    leaving a human to re-derive it from hundreds of raw error strings, which is
+    exactly how the 2026-08-21 throttling was diagnosed.
     """
 
     verdict: bool
     quote: str
     raw: str
+    ran: bool = True
     tokens: int = 0
+    attempts: int = 1
+    faults: tuple[str, ...] = ()
 
 
-def _usage_tokens(usage: dict) -> int:
-    """The judge call's total tokens from an OpenAI-style usage dict, or 0.
+def _usage_tokens(usage: dict) -> tuple[int, str]:
+    """``(the judge call's total tokens, why that number is 0 when it failed)``.
 
     ``total_tokens`` when the provider reported one; otherwise the prompt/completion
     split summed, which is the only other shape carbon's own accounting produces
     (model/pricing.py takes the same two routes). Absent or unreadable usage is 0 —
     a call whose cost nobody reported is recorded as unmeasured, never estimated.
+
+    The reason string is what makes the two kinds of zero tellable apart, and it is
+    returned rather than raised because this function ALREADY handled malformed
+    scalars itself: the caller's annotation was written to fire on an exception that
+    could not reach it, so a failed measurement and a genuine zero landed in the
+    record looking identical. Reported-but-unreadable is the only case that gets a
+    reason. An ABSENT usage dict does not: that zero is the documented, expected one
+    (a scripted provider, an endpoint that reports nothing), and annotating it would
+    put a note on nearly every offline judgment while telling a reader nothing they
+    did not already know from the field's definition. What stays conflated, stated
+    plainly: an absent usage dict and a provider genuinely reporting 0 both read as
+    an unannotated 0.
     """
     if not usage:
-        return 0
+        return 0, ""
     try:
         total = int(usage.get("total_tokens", 0) or 0)
         if total:
-            return total
-        return int(usage.get("prompt_tokens", 0) or 0) + int(usage.get("completion_tokens", 0) or 0)
-    except (TypeError, ValueError):
-        return 0
+            return total, ""
+        prompt = int(usage.get("prompt_tokens", 0) or 0)
+        return prompt + int(usage.get("completion_tokens", 0) or 0), ""
+    except (AttributeError, TypeError, ValueError) as exc:
+        return 0, f"reported usage could not be read ({type(exc).__name__}: {exc})"
+
+
+# The parser's behavior version, pinned by the activation gate BESIDE the prompt
+# sha. The sha pins what the judge is ASKED; it cannot see a change in how the
+# reply is READ — and that reading is the three functions below (``_normalized``,
+# ``quote_is_grounded``, ``_parse_judgment``). The validation artifact records the
+# version it was measured under, and ``validation_status`` refuses any artifact
+# measured under a different one, so a parser change makes the judge loudly
+# unvalidated instead of silently re-scoring history under a new rule.
+#
+# BUMP THIS, in the same commit, on any change to those functions that could alter
+# a verdict or quote for the same raw judge output — a new refusal rule, a
+# loosened or tightened match, a reordered check. Additive metadata that leaves
+# every verdict and quote untouched does not bump. ``tests/test_judge.py`` pins
+# the three functions' source by digest, so no edit can skip this decision
+# silently. History: 1 = the strict two-line parse; 2 = the grounding rule (a YES
+# must cite a verbatim span of the answer).
+JUDGE_PARSER_VERSION = 2
 
 
 def _normalized(text: str) -> str:
@@ -197,8 +539,9 @@ def quote_is_grounded(quote: str, answer: str) -> bool:
 def _parse_judgment(raw: str, answer: str) -> Judgment:
     """Strict two-line parse plus the grounding rule: first line ``VERDICT: YES``
     or ``VERDICT: NO`` exactly, second line starting ``QUOTE:``. Anything else
-    fails CLOSED (verdict False, quote "") with ``raw`` preserved. Lines after the
-    second are ignored — the contract pins the first two, not the total length.
+    fails CLOSED (verdict False, quote "", and ``ran=False`` — no verdict ever
+    came back) with ``raw`` preserved. Lines after the second are ignored — the
+    contract pins the first two, not the total length.
 
     A parsed YES then has to earn its verdict: its quote must be grounded in
     ``answer``. An ungrounded YES fails closed the same way a malformed one does,
@@ -210,13 +553,13 @@ def _parse_judgment(raw: str, answer: str) -> Judgment:
     """
     lines = raw.splitlines()
     if len(lines) < 2:
-        return Judgment(False, "", raw)
+        return Judgment(False, "", raw, ran=False)
     verdict_line = lines[0].strip()
     quote_line = lines[1].strip()
     if verdict_line not in ("VERDICT: YES", "VERDICT: NO"):
-        return Judgment(False, "", raw)
+        return Judgment(False, "", raw, ran=False)
     if not quote_line.startswith("QUOTE:"):
-        return Judgment(False, "", raw)
+        return Judgment(False, "", raw, ran=False)
     quote = quote_line[len("QUOTE:") :].strip()
     if verdict_line == "VERDICT: NO":
         return Judgment(False, quote, raw)
@@ -234,7 +577,67 @@ def _parse_judgment(raw: str, answer: str) -> Judgment:
     return Judgment(True, quote, raw)
 
 
-def judged_equivalent(expected: str, answer: str, provider) -> Judgment:
+def _judgment_from(response, answer: str, attempts: int, faults: tuple[str, ...]) -> Judgment:
+    """A DELIVERED reply, turned into a Judgment. Runs OUTSIDE the retried region.
+
+    Everything here happens exactly once, whatever it does, because a reply is
+    already in hand. That placement is the safety property, not the code below it:
+    no failure in reading a reply can ask for a different one.
+
+    Two failures are possible and they resolve differently, deliberately.
+
+    A reply that cannot be READ AT ALL fails closed — ``ran=False``, no verdict —
+    the same as one that parses into nothing. That is the existing contract for "no
+    decision came back", and it is right here too: the judge produced something this
+    code cannot interpret, so there is no decision to record. It is NOT retried.
+
+    Telemetry that cannot be read is not a failure of the judgment at all. The
+    verdict stands and ``tokens`` falls back to 0, which is precisely what that
+    field already means everywhere else in this module: unmeasured, never an
+    estimate. The reason is appended beneath the judge's own output in ``raw``, the
+    same idiom the grounding refusal uses, so the loss is recorded rather than
+    silent — but it costs the number, never the verdict.
+
+    That annotation reads ``_usage_tokens``'s RETURNED reason, not an exception. The
+    first version guarded this call with ``except`` alone, which fired only when
+    reaching ``response.usage`` itself blew up — while the common case, a malformed
+    scalar inside a perfectly reachable dict, was handled inside ``_usage_tokens``
+    and returned a bare 0. So the note promised here never appeared for the case
+    that most needed it, and since 0 is also a legitimate token count, the record
+    could not say which zero it held. The reason now travels with the number, so the
+    annotation fires wherever the fallback does.
+    """
+    try:
+        judgment = _parse_judgment(response.content or "", answer)
+    except Exception as exc:
+        return Judgment(
+            False,
+            "",
+            f"<unreadable judge reply: {_describe(exc)}>",
+            ran=False,
+            attempts=attempts,
+            faults=faults,
+        )
+    try:
+        tokens, unreadable = _usage_tokens(response.usage)
+    except Exception as exc:
+        # Reaching the usage at all failed — a hostile accessor, a response object
+        # that is not what it claimed. Same resolution, different reason.
+        tokens, unreadable = 0, f"usage could not be reached ({_describe(exc)})"
+    if unreadable:
+        return replace(
+            judgment,
+            tokens=0,
+            attempts=attempts,
+            faults=faults,
+            raw=f"{judgment.raw}\n<usage unreadable: {unreadable}>",
+        )
+    return replace(judgment, tokens=tokens, attempts=attempts, faults=faults)
+
+
+def judged_equivalent(
+    expected: str, answer: str, provider, *, retry: RetryPolicy = JUDGE_RETRY
+) -> Judgment:
     """Ask the judge whether ``answer`` means the same thing as ``expected``.
 
     ``provider`` is the same seam every refinery task uses
@@ -253,6 +656,32 @@ def judged_equivalent(expected: str, answer: str, provider) -> Judgment:
     pair rather than crashing the validation or passing a task. The runner's own
     catch-all remains the outer net.
 
+    A TRANSIENT provider fault is tried again first, under ``retry`` (see
+    ``RetryPolicy``): 429/502/503/504 and the timeout/rate-limit/connection markers,
+    with exponential backoff and the server's own ``Retry-After`` when it sends one.
+    The bound is hard, and exhausting it changes nothing about the outcome — a
+    persistent fault still returns ``ran=False`` with the last error in ``raw``, so a
+    throttled judge degrades the pair exactly as before rather than quietly becoming
+    a verdict.
+
+    THE RETRY IS SCOPED TO THE CALL, and that scope is the whole safety property.
+    Only ``chat()`` sits inside the retried region; everything downstream of a reply
+    that ARRIVED — parsing, grounding, usage extraction — runs in ``_judgment_from``,
+    outside it, exactly once. The first version of this fix guarded the whole
+    original try block, and a review found what that costs: an exception raised
+    AFTER a reply arrived (a usage accessor failing with a message containing "429")
+    was classified transient, retried, and the SECOND call's verdict replaced a
+    delivered one. The same exception when it did not look transient discarded a
+    valid verdict as undelivered — a phantom judge outage. Both were reproduced.
+
+    So the boundary is structural now rather than argued: nothing after delivery can
+    re-roll a reply or unmake it. A reply that did not parse fails closed without a
+    second call (re-rolling it would put a different question to the judge, and hand
+    a free-forming judge extra chances at the pinned format). Telemetry that cannot
+    be read costs the telemetry NUMBER, never the verdict. The retry can turn a
+    NON-verdict into a verdict — that is its whole job — and can turn nothing else
+    into anything.
+
     ``answer`` therefore reaches the parser as well as the payload. It is the same
     string in both places, by construction: there is one ``answer`` in this
     function, and nothing between here and the parse can substitute another.
@@ -264,10 +693,42 @@ def judged_equivalent(expected: str, answer: str, provider) -> Judgment:
         {"role": "system", "content": JUDGE_PROMPT},
         {"role": "user", "content": payload},
     ]
-    try:
-        response = chat(messages, provider=provider, temperature=0.0, max_tokens=512)
-        judgment = _parse_judgment(response.content or "", answer)
-        return replace(judgment, tokens=_usage_tokens(response.usage))
-    except Exception as exc:
-        error_msg = f"<provider error: {exc}>"
-        return Judgment(False, "", error_msg)
+    faults: list[str] = []
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            # The retried region, and nothing else. A fault here means no reply
+            # arrived, which is the only state a second call can honestly improve.
+            response = chat(messages, provider=provider, temperature=0.0, max_tokens=512)
+        except Exception as exc:
+            faults.append(fault_class(exc))
+            try:
+                delay, refusal = _next_delay(attempt, exc, retry)
+            except Exception as policy_exc:
+                # DECIDING a retry must never be able to end a run. This code reads
+                # whatever a provider put on the wire — a header value chosen by
+                # whatever answered — and a raise here escapes the function
+                # entirely: past the fail-closed guarantee above, and past
+                # ``run_validation``, which has no per-pair guard of its own because
+                # THIS function is it. That is not hypothetical; an extreme
+                # ``Retry-After`` date raised an OverflowError the parser's guard did
+                # not name and took a whole 635-pair loop with it. The specific hole
+                # is closed in ``_retry_after_seconds``; this closes the CLASS, so
+                # the promise no longer rests on that guard being exhaustively right
+                # about every exception a malformed header can produce. A pair
+                # degrades with the reason recorded — what every other transport
+                # failure already does.
+                delay = None
+                refusal = f"the retry policy could not read this fault ({policy_exc!r})"
+            if delay is None:
+                error_msg = f"<provider error: {_describe(exc)}>"
+                if refusal:
+                    error_msg += f"\n<not retried: {refusal}>"
+                return Judgment(
+                    False, "", error_msg, ran=False, attempts=attempt, faults=tuple(faults)
+                )
+            if delay:
+                _sleep(delay)
+            continue
+        return _judgment_from(response, answer, attempt, tuple(faults))
