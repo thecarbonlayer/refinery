@@ -151,13 +151,27 @@ JUDGE_RETRY = RetryPolicy()
 _sleep = time.sleep
 
 
+def _describe(exc: Exception) -> str:
+    """``str(exc)``, or the exception's type name when its own ``__str__`` raises.
+
+    Every branch of the fault handler reads the message — to classify it, to label
+    it, and to record it in ``raw`` — so an exception that cannot describe itself
+    would take the run down before the retry decision was even consulted. Total by
+    construction, because everything below assumes it.
+    """
+    try:
+        return str(exc)
+    except Exception:
+        return type(exc).__name__
+
+
 def transient_fault(exc: Exception) -> bool:
     """Is ``exc`` a serving fault worth trying again? Carbon's rule, restated.
 
     Public because ``tests/test_judge.py`` pins it against carbon's
     ``Agent._transient_error`` — the drift alarm the copy above needs.
     """
-    text = str(exc).lower()
+    text = _describe(exc).lower()
     if any(marker in text for marker in _TRANSIENT_MARKERS):
         return True
     # Status codes go through the word-boundary pattern, not ``in`` — see
@@ -173,10 +187,11 @@ def fault_class(exc: Exception) -> str:
     type. A loose three-digit scrape would have relabelled "you requested 15020
     tokens" as an HTTP 502 in the very diagnostics a human reads to find the cause.
     """
-    status = _TRANSIENT_STATUS.search(str(exc))
+    described = _describe(exc)
+    status = _TRANSIENT_STATUS.search(described)
     if status:
         return f"http_{status.group(0)}"
-    lowered = str(exc).lower()
+    lowered = described.lower()
     for marker in _TRANSIENT_MARKERS:
         if marker in lowered:
             return marker.replace(" ", "_")
@@ -236,6 +251,16 @@ def _retry_after_seconds(exc: Exception) -> float | None:
     genuine absence or malformation: no such header, an unparseable value, or a
     negative delta-seconds (which the RFC does not permit and which no clock
     explains, unlike a past date).
+
+    ``OverflowError`` is named in the date guard beside the two obvious ones, and it
+    is not hypothetical: ``Retry-After: Fri, 31 Dec 999999999999 23:59:59 GMT`` makes
+    ``parsedate_to_datetime`` raise it, and the first version of this function let
+    that escape — past ``judged_equivalent``'s fail-closed guarantee and out through
+    an entire 635-pair validation loop, because this function IS that loop's per-pair
+    isolation. Honoring the date form was right; honoring it with a guard that named
+    only the failures we had thought of was not. The caller now also refuses to let
+    ANY raise from here end a run, so this list being incomplete again would cost one
+    pair rather than the run.
     """
     raw = _header(exc, "retry-after")
     if raw is None:
@@ -247,7 +272,7 @@ def _retry_after_seconds(exc: Exception) -> float | None:
         pass
     try:
         target = parsedate_to_datetime(text)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if target is None:
         return None
@@ -431,23 +456,36 @@ class Judgment:
     faults: tuple[str, ...] = ()
 
 
-def _usage_tokens(usage: dict) -> int:
-    """The judge call's total tokens from an OpenAI-style usage dict, or 0.
+def _usage_tokens(usage: dict) -> tuple[int, str]:
+    """``(the judge call's total tokens, why that number is 0 when it failed)``.
 
     ``total_tokens`` when the provider reported one; otherwise the prompt/completion
     split summed, which is the only other shape carbon's own accounting produces
     (model/pricing.py takes the same two routes). Absent or unreadable usage is 0 —
     a call whose cost nobody reported is recorded as unmeasured, never estimated.
+
+    The reason string is what makes the two kinds of zero tellable apart, and it is
+    returned rather than raised because this function ALREADY handled malformed
+    scalars itself: the caller's annotation was written to fire on an exception that
+    could not reach it, so a failed measurement and a genuine zero landed in the
+    record looking identical. Reported-but-unreadable is the only case that gets a
+    reason. An ABSENT usage dict does not: that zero is the documented, expected one
+    (a scripted provider, an endpoint that reports nothing), and annotating it would
+    put a note on nearly every offline judgment while telling a reader nothing they
+    did not already know from the field's definition. What stays conflated, stated
+    plainly: an absent usage dict and a provider genuinely reporting 0 both read as
+    an unannotated 0.
     """
     if not usage:
-        return 0
+        return 0, ""
     try:
         total = int(usage.get("total_tokens", 0) or 0)
         if total:
-            return total
-        return int(usage.get("prompt_tokens", 0) or 0) + int(usage.get("completion_tokens", 0) or 0)
-    except (TypeError, ValueError):
-        return 0
+            return total, ""
+        prompt = int(usage.get("prompt_tokens", 0) or 0)
+        return prompt + int(usage.get("completion_tokens", 0) or 0), ""
+    except (AttributeError, TypeError, ValueError) as exc:
+        return 0, f"reported usage could not be read ({type(exc).__name__}: {exc})"
 
 
 # The parser's behavior version, pinned by the activation gate BESIDE the prompt
@@ -559,6 +597,15 @@ def _judgment_from(response, answer: str, attempts: int, faults: tuple[str, ...]
     estimate. The reason is appended beneath the judge's own output in ``raw``, the
     same idiom the grounding refusal uses, so the loss is recorded rather than
     silent — but it costs the number, never the verdict.
+
+    That annotation reads ``_usage_tokens``'s RETURNED reason, not an exception. The
+    first version guarded this call with ``except`` alone, which fired only when
+    reaching ``response.usage`` itself blew up — while the common case, a malformed
+    scalar inside a perfectly reachable dict, was handled inside ``_usage_tokens``
+    and returned a bare 0. So the note promised here never appeared for the case
+    that most needed it, and since 0 is also a legitimate token count, the record
+    could not say which zero it held. The reason now travels with the number, so the
+    annotation fires wherever the fallback does.
     """
     try:
         judgment = _parse_judgment(response.content or "", answer)
@@ -566,20 +613,24 @@ def _judgment_from(response, answer: str, attempts: int, faults: tuple[str, ...]
         return Judgment(
             False,
             "",
-            f"<unreadable judge reply: {exc}>",
+            f"<unreadable judge reply: {_describe(exc)}>",
             ran=False,
             attempts=attempts,
             faults=faults,
         )
     try:
-        tokens = _usage_tokens(response.usage)
+        tokens, unreadable = _usage_tokens(response.usage)
     except Exception as exc:
+        # Reaching the usage at all failed — a hostile accessor, a response object
+        # that is not what it claimed. Same resolution, different reason.
+        tokens, unreadable = 0, f"usage could not be reached ({_describe(exc)})"
+    if unreadable:
         return replace(
             judgment,
             tokens=0,
             attempts=attempts,
             faults=faults,
-            raw=f"{judgment.raw}\n<usage unreadable: {exc}>",
+            raw=f"{judgment.raw}\n<usage unreadable: {unreadable}>",
         )
     return replace(judgment, tokens=tokens, attempts=attempts, faults=faults)
 
@@ -652,9 +703,26 @@ def judged_equivalent(
             response = chat(messages, provider=provider, temperature=0.0, max_tokens=512)
         except Exception as exc:
             faults.append(fault_class(exc))
-            delay, refusal = _next_delay(attempt, exc, retry)
+            try:
+                delay, refusal = _next_delay(attempt, exc, retry)
+            except Exception as policy_exc:
+                # DECIDING a retry must never be able to end a run. This code reads
+                # whatever a provider put on the wire — a header value chosen by
+                # whatever answered — and a raise here escapes the function
+                # entirely: past the fail-closed guarantee above, and past
+                # ``run_validation``, which has no per-pair guard of its own because
+                # THIS function is it. That is not hypothetical; an extreme
+                # ``Retry-After`` date raised an OverflowError the parser's guard did
+                # not name and took a whole 635-pair loop with it. The specific hole
+                # is closed in ``_retry_after_seconds``; this closes the CLASS, so
+                # the promise no longer rests on that guard being exhaustively right
+                # about every exception a malformed header can produce. A pair
+                # degrades with the reason recorded — what every other transport
+                # failure already does.
+                delay = None
+                refusal = f"the retry policy could not read this fault ({policy_exc!r})"
             if delay is None:
-                error_msg = f"<provider error: {exc}>"
+                error_msg = f"<provider error: {_describe(exc)}>"
                 if refusal:
                     error_msg += f"\n<not retried: {refusal}>"
                 return Judgment(

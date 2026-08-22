@@ -1359,3 +1359,138 @@ def test_a_retry_after_we_will_not_wait_for_stops_the_retry(slept):
     provider2 = Provider(base_url="fake://local", model="probe", api_key="x", responder=responder2)
     assert judged_equivalent("E", "a", provider2).ran is True
     assert slept == [JUDGE_RETRY.max_delay_s]
+
+
+# --- The retry decision may never end a run -------------------------------------
+#
+# Review of 08d80cd (Codex, 2026-08-22). Honoring the HTTP-date form of Retry-After
+# was the right call and it opened a new fail-closed escape: parsedate_to_datetime
+# raises OverflowError on an extreme year, which the guard did not name. Reproduced:
+# the raise escapes _retry_after_seconds, escapes judged_equivalent — past the whole
+# fail-closed guarantee — and aborts run_validation outright, because
+# judged_equivalent IS that loop's per-pair isolation and there is no second net.
+# In task execution it becomes a generic empty-metrics error record, losing the very
+# judge_attempts and refusal reason the diagnostics plumbing was added to preserve.
+
+# The real header value the escape was found with. Kept as a probe, not a synthetic
+# exception: the point is that a STRING a provider can send reaches a parser that
+# raises outside the guarded set, and only the string proves that.
+_EXTREME_DATE = "Fri, 31 Dec 999999999999 23:59:59 GMT"
+
+
+def test_an_extreme_retry_after_date_cannot_escape_the_parse_guard():
+    """The parser is handed attacker-adjacent input — a header chosen by whatever
+    answered. Its failure modes are not limited to the two the guard first named."""
+    from email.utils import parsedate_to_datetime
+
+    from runner.judge import _retry_after_seconds
+
+    # The probe is real: this is what the stdlib actually does with that string.
+    with pytest.raises(OverflowError):
+        parsedate_to_datetime(_EXTREME_DATE)
+
+    # And it must not reach the caller. Unparseable means fall back, as documented.
+    assert _retry_after_seconds(_throttled({"Retry-After": _EXTREME_DATE})) is None
+
+
+def test_a_malformed_header_degrades_one_pair_instead_of_ending_the_run(slept):
+    """The blast radius, pinned where it was measured: a 635-pair validation loop.
+
+    One provider fault carrying a malformed header used to take the whole run with
+    it. The pair now records undelivered — which is what every other transport
+    failure already does — and the loop finishes."""
+
+    def throttled_with_a_bad_date(messages):
+        raise _throttled({"Retry-After": _EXTREME_DATE})
+
+    provider = fake(scripted=throttled_with_a_bad_date)
+
+    judgment = judged_equivalent("E", "a", provider)
+    assert judgment.ran is False and judgment.verdict is False
+    assert judgment.faults == ("http_429",) * 5  # fell back to the computed backoff
+    assert slept == [2.0, 4.0, 8.0, 16.0]
+
+    corpus = [_pair(answer="a"), _pair(answer="a"), _pair(answer="a")]
+    result = judge_validate.run_validation(corpus, provider)
+    assert result["total_pairs"] == 3
+    assert result["undelivered_count"] == 3
+    assert result["pass"] is False
+
+
+def test_the_retry_decision_itself_cannot_end_a_run(monkeypatch, slept):
+    """The CLASS, not just the one hole. The retry decision reads whatever a provider
+    put on the wire, and a raise anywhere in it escapes ``judged_equivalent``
+    entirely. Closing the OverflowError alone leaves the promise resting on the
+    policy code being exhaustively right about every exception a malformed header can
+    produce — which is the assumption that just failed. A fault in DECIDING a retry
+    degrades the pair, with the reason recorded, like any other."""
+    import runner.judge as judge_mod
+
+    def exploding_policy(attempt, exc, policy):
+        raise KeyError("a shape the policy did not expect")
+
+    monkeypatch.setattr(judge_mod, "_next_delay", exploding_policy)
+
+    def failing(messages):
+        raise RuntimeError(_HTTP_429)
+
+    judgment = judged_equivalent("E", "a", fake(scripted=failing))
+    assert judgment.ran is False and judgment.verdict is False
+    assert judgment.attempts == 1
+    assert judgment.faults == ("http_429",)
+    assert "retry policy" in judgment.raw  # the reason is recorded, not swallowed
+    assert slept == []
+
+
+def test_an_exception_that_cannot_describe_itself_is_still_handled():
+    """The same class from the other side: every branch of the fault handler reads
+    ``str(exc)``, and an exception whose own ``__str__`` raises would take the run
+    down before the retry decision was ever consulted."""
+
+    class _Unspeakable(RuntimeError):
+        def __str__(self):
+            raise ValueError("this exception cannot describe itself")
+
+    def failing(messages):
+        raise _Unspeakable()
+
+    judgment = judged_equivalent("E", "a", fake(scripted=failing))
+    assert judgment.ran is False and judgment.verdict is False
+    assert judgment.attempts == 1  # not transient — nothing readable said it was
+    assert judgment.faults == ("_Unspeakable",)
+    assert "_Unspeakable" in judgment.raw
+
+
+def test_a_zero_token_count_says_whether_it_was_measured():
+    """Visibility, not scoring. ``_usage_tokens`` catches a malformed scalar and
+    returns 0 itself, so the annotation promised by the delivered-verdict path never
+    fired for the case that most needs it: zero is also a LEGITIMATE value, and an
+    unannotated 0 conflated "the judge cost nothing to measure" with "the measurement
+    failed". The verdict and the 0 fallback were always right; the record was silent
+    about which zero it was."""
+    delivered = "VERDICT: YES\nQUOTE: a"
+
+    def responding(usage):
+        response = LLMResponse(content=delivered, finish_reason="stop")
+        response.usage = usage
+        provider, _calls = _responses(response)
+        return judged_equivalent("E", "a", provider)
+
+    # Reported but unreadable: annotated, so the zero is visibly unmeasured.
+    # (`{"prompt_tokens": {}}` is deliberately NOT here: an empty dict is falsy, so
+    # `or 0` absorbs it and 0 really is the right unannotated answer.)
+    for bad in ({"total_tokens": "abc"}, {"total_tokens": [1]}, {"prompt_tokens": {"a": 1}}):
+        judgment = responding(bad)
+        assert judgment.verdict is True and judgment.tokens == 0, bad
+        assert "usage unreadable" in judgment.raw, bad
+        assert judgment.raw.startswith(delivered), bad  # beneath the judge's own output
+
+    # A provider that reported nothing is the documented, expected zero — no note.
+    for quiet in ({}, None):
+        judgment = responding(quiet)
+        assert judgment.verdict is True and judgment.tokens == 0
+        assert "usage unreadable" not in judgment.raw
+
+    # And a real number still arrives unannotated.
+    measured = responding({"total_tokens": 312})
+    assert measured.tokens == 312 and "usage unreadable" not in measured.raw
