@@ -215,22 +215,27 @@ def test_validation_status_requires_the_current_validation_computation(tmp_path)
     assert ok is False and "validation_computation_version" in why
 
 
-def test_the_committed_agreement_artifact_is_refused_until_revalidated_for_this_parser():
-    """The honest current state, pinned on purpose so it cannot look accidental.
+def test_the_committed_agreement_artifact_is_accepted_only_for_the_model_that_measured_it():
+    """The state the live re-validation produced, pinned so it cannot drift back.
 
-    The committed artifact was measured before the parser carried a version (and
-    before the grounding rule existed). The offline re-scoring below shows its
-    NUMBERS survive the stricter rule — but the gate's job is identity, not
-    arithmetic: an artifact measured under a different parser is not evidence about
-    this one. So CMP-5 and CMP-6 refuse (outcome `error`) until the queued live
-    re-validation on the new serving base writes an artifact stamped with the
-    current version. Fail closed is the designed state here, not a regression."""
-    from runner.judge import validation_status
+    The committed artifact WAS re-measured on the pinned serving base (2026-08-22):
+    it carries the current parser and computation stamps, so the parser-version
+    refusal that used to fire here no longer applies — the synthetic stale-stamp
+    tests above still cover that rule. What remains, and is the gate's real job, is
+    IDENTITY: an artifact measured by one judge model is not evidence about another,
+    so the same artifact is accepted for its own model and refused for any other."""
+    import json as _json
 
-    # Any live model: the parser-version refusal comes first regardless.
-    ok, why = validation_status(judge_model="any-model")
+    from runner.judge import AGREEMENT_PATH, validation_status
+
+    measured_with = _json.loads(AGREEMENT_PATH.read_text())["model"]
+
+    ok, why = validation_status(judge_model=measured_with)
+    assert ok is True, f"the artifact should gate open for the model that measured it: {why}"
+
+    ok, why = validation_status(judge_model="some-other-model")
     assert ok is False
-    assert "judge_parser_version" in why
+    assert measured_with in why and "some-other-model" in why
 
 
 def test_yes_verdict_parses_quote():
@@ -354,9 +359,13 @@ def test_the_committed_agreement_artifact_survives_the_grounding_rule():
         agree += int(verdict == pair.ground_truth)
         denial_yes += int(pair.is_clean_denial and verdict)
 
-    # Exactly one recorded YES loses its verdict: a G4 reply whose quote dropped the
-    # markdown emphasis around it, so the span was reconstructed rather than copied.
-    assert regrounded == 1
+    # ZERO recorded YES loses its verdict on re-scoring, and that is the point: this
+    # artifact was MEASURED under the grounding rule rather than retro-fitted to it,
+    # so re-applying the rule is a no-op. The previous artifact, measured before the
+    # rule existed, lost exactly one (a G4 reply whose quote dropped the markdown
+    # emphasis around it). A nonzero count here would mean a YES was recorded whose
+    # quote does not appear in the answer — the rule failing at measurement time.
+    assert regrounded == 0
     assert denial_yes == 0, "the clean-denial gate still holds under the stricter rule"
     assert agree / len(records) >= judge_validate.AGREEMENT_THRESHOLD
     assert artifact["pass"] is True
