@@ -1,0 +1,1069 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Carbon's editable surface</title>
+<style>
+  :root{
+    --paper:#FAF7F1;
+    --paper-2:#F1ECE1;
+    --paper-3:#E9E2D4;
+    --ink:#1A1713;
+    --ink-soft:#3B352C;
+    --muted:#6E675A;
+    --rule:#DED6C6;
+    --rule-soft:#EAE4D6;
+    --accent:#AC4526;
+    --accent-soft:#F3E3DC;
+    --verify:#33654E;
+    --verify-soft:#E2ECE5;
+    --shadow:0 1px 2px rgba(26,23,19,.04), 0 8px 24px -12px rgba(26,23,19,.14);
+    --serif:"Iowan Old Style","Charter","Palatino Linotype",Palatino,"Book Antiqua",Georgia,serif;
+    --sans:"Avenir Next","Avenir","Segoe UI",Helvetica,sans-serif;
+    --mono:"SF Mono","Menlo","Consolas",ui-monospace,monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --paper:#15130F;
+      --paper-2:#1E1B16;
+      --paper-3:#26221B;
+      --ink:#EFE9DC;
+      --ink-soft:#D5CDBD;
+      --muted:#9A9184;
+      --rule:#332E26;
+      --rule-soft:#282419;
+      --accent:#E0714C;
+      --accent-soft:#2E1E17;
+      --verify:#7DBBA0;
+      --verify-soft:#17251E;
+      --shadow:0 1px 2px rgba(0,0,0,.3), 0 8px 24px -12px rgba(0,0,0,.6);
+    }
+  }
+
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth; scroll-padding-top:78px}
+  body{
+    margin:0; background:var(--paper); color:var(--ink);
+    font-family:var(--serif); font-size:17.5px; line-height:1.68;
+    -webkit-font-smoothing:antialiased;
+    text-rendering:optimizeLegibility;
+  }
+
+  /* ---------- layout ---------- */
+  .wrap{max-width:1020px; margin:0 auto; padding:0 28px}
+  .prose{max-width:680px}
+  section{padding:64px 0; border-top:1px solid var(--rule-soft)}
+  section:first-of-type{border-top:none}
+
+  /* ---------- nav ---------- */
+  nav{
+    position:sticky; top:0; z-index:20;
+    background:color-mix(in srgb, var(--paper) 88%, transparent);
+    backdrop-filter:saturate(140%) blur(10px);
+    border-bottom:1px solid var(--rule);
+  }
+  .navin{
+    max-width:1020px; margin:0 auto; padding:11px 28px;
+    display:flex; align-items:center; gap:18px; flex-wrap:wrap;
+  }
+  .brand{
+    font-family:var(--sans); font-weight:600; font-size:12.5px;
+    letter-spacing:.16em; text-transform:uppercase; color:var(--ink);
+  }
+  .brand span{color:var(--accent)}
+  .navlinks{display:flex; gap:5px; margin-left:auto; flex-wrap:wrap}
+  .navlinks a{
+    font-family:var(--sans); font-size:12px; letter-spacing:.06em;
+    text-decoration:none; color:var(--muted);
+    padding:4px 9px; border-radius:4px; transition:.16s;
+  }
+  .navlinks a:hover{color:var(--accent); background:var(--accent-soft)}
+  .navlinks a.lead{color:var(--ink-soft)}
+  .navlinks a.other{border:1px solid var(--rule)}
+
+  /* ---------- header ---------- */
+  header{padding:96px 0 60px}
+  .eyebrow{
+    font-family:var(--sans); font-size:11.5px; letter-spacing:.2em;
+    text-transform:uppercase; color:var(--accent); margin:0 0 22px;
+  }
+  h1{
+    font-size:clamp(38px,6.4vw,62px); line-height:1.04; margin:0 0 26px;
+    font-weight:400; letter-spacing:-.02em;
+  }
+  h1 em{font-style:italic; color:var(--accent)}
+  .standfirst{font-size:21px; line-height:1.55; color:var(--ink-soft); max-width:620px; margin:0}
+  .meta{
+    margin-top:38px; padding-top:20px; border-top:1px solid var(--rule);
+    font-family:var(--sans); font-size:12.5px; color:var(--muted);
+    display:flex; gap:30px; flex-wrap:wrap;
+  }
+  .meta b{color:var(--ink); font-weight:600}
+
+  /* ---------- headings ---------- */
+  h2{
+    font-size:31px; font-weight:400; letter-spacing:-.015em;
+    margin:0 0 8px; line-height:1.2;
+  }
+  .num{
+    font-family:var(--sans); font-size:11.5px; letter-spacing:.2em;
+    text-transform:uppercase; color:var(--accent); display:block; margin-bottom:12px;
+  }
+  h3{font-size:21px; font-weight:600; letter-spacing:-.01em; margin:44px 0 10px}
+  p{margin:0 0 18px}
+  .lede{font-size:19px; color:var(--ink-soft); margin-bottom:30px}
+
+  /* ---------- small parts ---------- */
+  .term{
+    font-family:var(--mono); font-size:.86em;
+    background:var(--paper-2); padding:1px 5px; border-radius:3px;
+    color:var(--ink-soft);
+  }
+  .rule-box{
+    background:var(--paper-2); border-left:3px solid var(--accent);
+    padding:20px 24px; margin:28px 0; border-radius:0 6px 6px 0;
+  }
+  .rule-box p:last-child{margin-bottom:0}
+  .rule-box .t{
+    font-family:var(--sans); font-size:11px; letter-spacing:.16em;
+    text-transform:uppercase; color:var(--accent); margin:0 0 8px; display:block;
+  }
+  ul.plain{list-style:none; padding:0; margin:0 0 18px}
+  ul.plain li{padding-left:22px; position:relative; margin-bottom:9px}
+  ul.plain li::before{
+    content:""; position:absolute; left:2px; top:.68em;
+    width:6px; height:6px; border-radius:50%; background:var(--accent); opacity:.55;
+  }
+
+  /* ---------- figures ---------- */
+  figure{margin:34px 0}
+  figure svg{width:100%; height:auto; display:block}
+  figcaption{
+    font-family:var(--sans); font-size:12.5px; color:var(--muted);
+    margin-top:12px; line-height:1.5; max-width:660px;
+  }
+  .fig-frame{
+    background:var(--paper-2); border:1px solid var(--rule);
+    border-radius:8px; padding:20px 14px; overflow-x:auto;
+  }
+  .d-panel{fill:var(--paper); stroke:var(--rule)}
+  .d-panel-2{fill:var(--paper-3); stroke:var(--rule)}
+  .d-line{stroke:var(--rule); fill:none}
+  .d-txt{fill:var(--ink); font-family:var(--sans); font-size:13px}
+  .d-txt-s{fill:var(--muted); font-family:var(--sans); font-size:11.5px}
+  .d-txt-b{fill:var(--ink); font-family:var(--sans); font-size:13px; font-weight:600}
+  .d-lab{fill:var(--accent); font-family:var(--sans); font-size:10.5px; letter-spacing:.14em; font-weight:600}
+  .d-acc{fill:var(--accent)}
+  .d-acc-s{stroke:var(--accent); fill:none}
+  .d-mono{fill:var(--ink); font-family:var(--mono); font-size:11.5px}
+  .d-mono-s{fill:var(--muted); font-family:var(--mono); font-size:11px}
+  .d-chip{fill:var(--accent-soft); stroke:color-mix(in srgb, var(--accent) 30%, transparent)}
+  .d-chip-t{fill:var(--accent); font-family:var(--mono); font-size:11px}
+  .d-lock{fill:var(--paper-3); stroke:var(--rule)}
+  .d-lock-t{fill:var(--muted); font-family:var(--mono); font-size:11px}
+
+  /* ---------- field cards ---------- */
+  .knob{
+    border:1px solid var(--rule); border-radius:8px;
+    background:var(--paper-2); padding:22px 24px; margin:22px 0;
+    box-shadow:var(--shadow);
+  }
+  .khead{display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; margin-bottom:6px}
+  .kid{
+    font-family:var(--mono); font-size:13px; font-weight:600;
+    background:var(--ink); color:var(--paper);
+    padding:3px 9px; border-radius:4px;
+  }
+  .kname{font-size:19px; font-weight:600; letter-spacing:-.01em}
+  .badge{
+    font-family:var(--sans); font-size:10.5px; letter-spacing:.11em;
+    text-transform:uppercase; padding:3px 8px; border-radius:20px;
+    border:1px solid var(--rule); color:var(--muted); background:var(--paper);
+    white-space:nowrap;
+  }
+  .badge.menu{border-color:color-mix(in srgb, var(--accent) 35%, transparent); color:var(--accent); background:var(--accent-soft)}
+  .badge.warn{border-color:var(--accent); color:var(--paper); background:var(--accent); font-weight:600}
+  .krow{display:grid; grid-template-columns:118px 1fr; gap:14px; margin-bottom:13px}
+  .krow:last-child{margin-bottom:0}
+  .klab{
+    font-family:var(--sans); font-size:10.5px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--muted); padding-top:5px;
+  }
+  .kbody{font-size:16.5px; line-height:1.6}
+  .kbody p{margin:0 0 10px}
+  .kbody p:last-child{margin:0}
+  .val{
+    font-family:var(--mono); font-size:13.5px;
+    background:var(--paper); border:1px solid var(--rule);
+    padding:2px 7px; border-radius:4px; color:var(--ink);
+    display:inline-block; margin:0 4px 4px 0;
+  }
+  .val b{color:var(--accent); font-weight:600}
+
+  .dial{display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:4px}
+  .dial > div{
+    background:var(--paper); border:1px solid var(--rule);
+    border-radius:6px; padding:11px 14px; font-size:15.5px; line-height:1.5;
+  }
+  .dial .dl{
+    font-family:var(--sans); font-size:10px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--accent); display:block; margin-bottom:4px;
+  }
+  @media (max-width:640px){
+    .dial{grid-template-columns:1fr}
+    .krow{grid-template-columns:1fr; gap:4px}
+    .klab{padding-top:0}
+  }
+
+  .menu{margin:6px 0 0; border-top:1px solid var(--rule); padding-top:14px}
+  .menu > .mt{
+    font-family:var(--sans); font-size:10.5px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--accent); display:block; margin-bottom:10px;
+  }
+  .mi{
+    background:var(--paper); border:1px solid var(--rule); border-left:3px solid var(--rule);
+    border-radius:0 6px 6px 0; padding:13px 16px; margin-bottom:10px;
+  }
+  .mi.now{border-left-color:var(--accent)}
+  .mi:last-child{margin-bottom:0}
+  .mi .mn{font-family:var(--mono); font-size:14px; font-weight:600; color:var(--ink)}
+  .mi .tagnow{
+    font-family:var(--sans); font-size:9.5px; letter-spacing:.12em; text-transform:uppercase;
+    color:var(--accent); border:1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    background:var(--accent-soft); padding:2px 6px; border-radius:20px; margin-left:8px;
+    vertical-align:2px;
+  }
+  .mi p{margin:6px 0 0; font-size:15.5px; line-height:1.55}
+  .mi .cost{
+    display:block; margin-top:7px; font-size:14.5px; color:var(--muted);
+    font-family:var(--sans); line-height:1.5;
+  }
+  .adv{
+    margin-top:12px; border:1px dashed var(--rule); border-radius:6px;
+    padding:13px 16px; background:var(--paper);
+  }
+  .adv .at{
+    font-family:var(--sans); font-size:10px; letter-spacing:.14em; text-transform:uppercase;
+    color:var(--muted); display:block; margin-bottom:8px;
+  }
+  .adv dl{margin:0; font-size:15.5px; line-height:1.55}
+  .adv dt{font-family:var(--mono); font-size:13.5px; color:var(--ink); margin-top:9px}
+  .adv dt:first-child{margin-top:0}
+  .adv dd{margin:2px 0 0; color:var(--ink-soft)}
+  .adv .df{font-family:var(--sans); font-size:12px; color:var(--muted)}
+
+  .watch{
+    border-top:1px solid var(--rule); margin-top:16px; padding-top:13px;
+    font-size:15.5px; color:var(--ink-soft); line-height:1.6;
+  }
+  .watch .wl{
+    font-family:var(--sans); font-size:10.5px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--accent); display:block; margin-bottom:5px;
+  }
+  .tid{
+    font-family:var(--mono); font-size:12.5px; font-weight:600;
+    background:var(--paper-3); padding:1px 6px; border-radius:3px; color:var(--ink);
+  }
+
+  /* ---------- tables ---------- */
+  .tbl{width:100%; border-collapse:collapse; font-size:16px; margin:26px 0 10px}
+  .tbl th{
+    font-family:var(--sans); font-size:10.5px; letter-spacing:.16em; text-transform:uppercase;
+    color:var(--muted); text-align:left; padding:0 14px 10px 0;
+    border-bottom:1px solid var(--rule); font-weight:600;
+  }
+  .tbl td{padding:13px 14px 13px 0; border-bottom:1px solid var(--rule-soft); vertical-align:top}
+  .tbl td.k{font-family:var(--mono); font-size:13.5px; white-space:nowrap; width:1%}
+  .tbl td.s{font-size:15px; line-height:1.5}
+  .tbl a{color:var(--ink); text-decoration:none; border-bottom:1px solid var(--rule)}
+  .tbl a:hover{border-color:var(--accent); color:var(--accent)}
+  .flag{
+    font-family:var(--sans); font-size:10px; letter-spacing:.1em; text-transform:uppercase;
+    padding:2px 7px; border-radius:20px; white-space:nowrap;
+    border:1px solid var(--rule); color:var(--muted); background:var(--paper);
+  }
+  .flag.gap{border-color:var(--accent); background:var(--accent); color:var(--paper); font-weight:600}
+  .flag.ok{border-color:color-mix(in srgb, var(--verify) 40%, transparent); color:var(--verify); background:var(--verify-soft)}
+
+  footer{
+    padding:56px 0 90px; border-top:1px solid var(--rule);
+    font-family:var(--sans); font-size:13px; color:var(--muted);
+  }
+  footer a{color:var(--accent); text-decoration:none; border-bottom:1px solid var(--rule)}
+
+  @media (prefers-reduced-motion: no-preference){
+    .rise{opacity:0; transform:translateY(14px); animation:rise .7s cubic-bezier(.2,.7,.3,1) forwards}
+    .rise:nth-child(1){animation-delay:.05s}
+    .rise:nth-child(2){animation-delay:.13s}
+    .rise:nth-child(3){animation-delay:.21s}
+    .rise:nth-child(4){animation-delay:.29s}
+    @keyframes rise{to{opacity:1; transform:none}}
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="navin">
+    <div class="brand">Carbon<span>.</span> editable surface</div>
+    <div class="navlinks">
+      <a class="lead" href="#basics">Basics</a>
+      <a class="lead" href="#turn">Where fields apply</a>
+      <a class="lead" href="#fields">The 11 fields</a>
+      <a class="lead" href="#menus">Strategy menus</a>
+      <a class="lead" href="#locked">Locked</a>
+      <a class="lead" href="#coverage">Coverage</a>
+      <a class="lead" href="#glossary">Glossary</a>
+      <a class="other" href="clusters-explained.html">The tasks →</a>
+    </div>
+  </div>
+</nav>
+
+<div class="wrap">
+
+<header>
+  <p class="eyebrow rise">A guide for people new to this codebase</p>
+  <h1 class="rise">Carbon's editable surface,<br><em>field by field</em></h1>
+  <p class="standfirst rise">Carbon keeps its entire behavioural configuration in one versioned JSON file. This page covers every editable field, every strategy value on every menu, and what each one does to the agent.</p>
+  <div class="meta rise">
+    <span><b>11</b> editable fields</span>
+    <span><b>4</b> carry strategy menus</span>
+    <span><b>7</b> locked fields</span>
+    <span><b>6</b> immutable invariants</span>
+  </div>
+</header>
+
+<!-- ============================================================ BASICS -->
+<section id="basics">
+  <div class="prose">
+    <span class="num">Part one</span>
+    <h2>The surface</h2>
+    <p class="lede">Carbon is a language model plus a harness. This page is about the harness's configuration.</p>
+
+    <p>The harness's behaviour used to be smeared across the code as module-level constants: the system prompt in <span class="term">agent.py</span>, the truncation budget in <span class="term">limits.py</span>, the summarizer prompt in <span class="term">compaction.py</span>, constructor defaults buried in signatures. Changing behaviour meant editing code, and knowing which of five files to edit.</p>
+    <p>Now those knobs are a first-class primitive. One JSON file, <span class="term">harness/harness_config.json</span>, is the <b>entire</b> editable surface. An editor that may touch only that file can retune the whole harness and nothing else, and the diff of what changed is the diff of one small file.</p>
+
+    <h3>Three properties make it safe to hand over</h3>
+    <ul class="plain">
+      <li><b>Versioned.</b> The file carries an integer <span class="term">version</span>, bumped on every change. Rollback is reverting the file. Comparing two behaviours is diffing two versions of it.</li>
+      <li><b>Frozen.</b> <span class="term">HarnessConfig</span> is a frozen dataclass and every consumer binds its values at import. The lifecycle is edit, restart, revert to roll back. No in-place mutation, no hot reload.</li>
+      <li><b>Validated at load.</b> <span class="term">load_config</span> rejects unknown keys, missing fields, wrong types, non-positive counts, a strategy name not on its menu, and a malformed <span class="term">@path</span> regex — loudly, at import. A malformed surface must fail the run, never silently fall back to a default the editor believed it had replaced.</li>
+    </ul>
+
+    <h3>Three zones</h3>
+    <p>Not every field in the file is editable. Carbon publishes all three zones as data through <span class="term">surface_manifest()</span>, and Refinery reads that rather than keeping its own copy — so a new field becomes proposable the day Carbon adds it.</p>
+  </div>
+
+  <figure>
+    <div class="fig-frame">
+      <svg viewBox="0 0 900 300" role="img" aria-label="Three zones: eleven editable fields, seven locked fields, and six immutable invariants.">
+        <text x="24" y="26" class="d-lab">harness/harness_config.json</text>
+
+        <rect x="24" y="40" width="272" height="216" rx="8" class="d-panel" stroke-width="1.5"/>
+        <text x="46" y="70" class="d-txt-b" font-size="17">11 editable fields</text>
+        <text x="46" y="90" class="d-txt-s">Refinery may propose an edit.</text>
+        <line x1="46" y1="104" x2="274" y2="104" class="d-line"/>
+        <text x="46" y="126" class="d-mono">system_prompt · temperature</text>
+        <text x="46" y="146" class="d-mono">max_tokens · max_tool_steps</text>
+        <text x="46" y="166" class="d-mono">default_context_limit</text>
+        <text x="46" y="186" class="d-mono">compaction · compaction_prompt</text>
+        <text x="46" y="206" class="d-mono">file_injection · tool_output</text>
+        <text x="46" y="226" class="d-mono">retry · verify_attempts</text>
+        <rect x="46" y="236" width="66" height="16" rx="8" class="d-chip"/>
+        <text x="79" y="248" class="d-chip-t" text-anchor="middle">editable</text>
+
+        <rect x="314" y="40" width="272" height="216" rx="8" class="d-panel" stroke-width="1.5"/>
+        <text x="336" y="70" class="d-txt-b" font-size="17">7 locked fields</text>
+        <text x="336" y="90" class="d-txt-s">Same file. Not proposable.</text>
+        <line x1="336" y1="104" x2="564" y2="104" class="d-line"/>
+        <text x="336" y="126" class="d-mono-s">version · require_run</text>
+        <text x="336" y="146" class="d-mono-s">approval_tools</text>
+        <text x="336" y="166" class="d-mono-s">code_extensions</text>
+        <text x="336" y="186" class="d-mono-s">attach_pattern</text>
+        <text x="336" y="206" class="d-mono-s">max_item_chars</text>
+        <text x="336" y="226" class="d-mono-s">memory_search_limit</text>
+        <rect x="336" y="236" width="58" height="16" rx="8" class="d-lock"/>
+        <text x="365" y="248" class="d-lock-t" text-anchor="middle">locked</text>
+
+        <rect x="604" y="40" width="272" height="216" rx="8" class="d-panel" stroke-width="1.5"/>
+        <text x="626" y="70" class="d-txt-b" font-size="17">6 invariants</text>
+        <text x="626" y="90" class="d-txt-s">Not in the file. Code, permanently.</text>
+        <line x1="626" y1="104" x2="854" y2="104" class="d-line"/>
+        <text x="626" y="126" class="d-txt-s">Tool arguments validated</text>
+        <text x="626" y="146" class="d-txt-s">Edits match exactly once</text>
+        <text x="626" y="166" class="d-txt-s">Workspace and secret bounds</text>
+        <text x="626" y="186" class="d-txt-s">Subagent workspace identity</text>
+        <text x="626" y="206" class="d-txt-s">Verification integrity</text>
+        <text x="626" y="226" class="d-txt-s">No executable code hooks</text>
+        <rect x="626" y="236" width="76" height="16" rx="8" class="d-lock"/>
+        <text x="664" y="248" class="d-lock-t" text-anchor="middle">immutable</text>
+
+        <text x="450" y="284" class="d-txt-s" text-anchor="middle">Refinery reads all three lists from Carbon's own manifest, so the contract cannot drift.</text>
+      </svg>
+    </div>
+    <figcaption>The middle column is the interesting one. Those fields sit in the editable file but are marked non-editable, each for a stated reason.</figcaption>
+  </figure>
+
+  <figure>
+    <div class="fig-frame">
+      <svg viewBox="0 0 900 210" role="img" aria-label="Edit the file, pass load_config validation, restart so values bind, and the harness behaves differently. A malformed file fails the run at import.">
+        <defs>
+          <marker id="a1" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+            <path d="M0 0 L7 3.5 L0 7 z" fill="var(--rule)"/>
+          </marker>
+          <marker id="a2" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+            <path d="M0 0 L7 3.5 L0 7 z" fill="var(--accent)"/>
+          </marker>
+        </defs>
+        <rect x="14" y="24" width="180" height="62" rx="6" class="d-panel"/>
+        <text x="30" y="49" class="d-txt-b">1 · Edit the file</text>
+        <text x="30" y="69" class="d-txt-s">and bump version</text>
+
+        <rect x="216" y="24" width="220" height="62" rx="6" class="d-panel"/>
+        <text x="232" y="49" class="d-txt-b">2 · load_config validates</text>
+        <text x="232" y="69" class="d-txt-s">types, ranges, menu names</text>
+
+        <rect x="458" y="24" width="180" height="62" rx="6" class="d-panel"/>
+        <text x="474" y="49" class="d-txt-b">3 · Restart</text>
+        <text x="474" y="69" class="d-txt-s">values bind at import</text>
+
+        <rect x="660" y="24" width="226" height="62" rx="6" class="d-panel"/>
+        <text x="676" y="49" class="d-txt-b">4 · New behaviour</text>
+        <text x="676" y="69" class="d-txt-s">harness-wide</text>
+
+        <path d="M194 55 H 212" class="d-line" stroke-width="1.6" marker-end="url(#a1)"/>
+        <path d="M436 55 H 454" class="d-line" stroke-width="1.6" marker-end="url(#a1)"/>
+        <path d="M638 55 H 656" class="d-line" stroke-width="1.6" marker-end="url(#a1)"/>
+
+        <path d="M326 86 V 118" class="d-acc-s" stroke-width="1.6" marker-end="url(#a2)"/>
+        <rect x="176" y="120" width="300" height="48" rx="6" class="d-panel-2"/>
+        <text x="196" y="141" class="d-txt-b">A malformed file fails the run</text>
+        <text x="196" y="159" class="d-txt-s">Loudly, at import. Never a silent default.</text>
+
+        <rect x="540" y="120" width="346" height="48" rx="6" class="d-panel-2"/>
+        <text x="560" y="141" class="d-txt-b">Rollback is reverting the file</text>
+        <text x="560" y="159" class="d-txt-s">Comparing two behaviours is diffing two versions.</text>
+
+        <text x="450" y="194" class="d-lab" text-anchor="middle">PURE DATA — THE DIFF OF WHAT CHANGED IS THE DIFF OF ONE SMALL FILE</text>
+      </svg>
+    </div>
+    <figcaption>No hot reload, deliberately. The file on disk and the behaviour in memory must never disagree — that drift is what the surface exists to prevent.</figcaption>
+  </figure>
+</section>
+
+<!-- ============================================================ TURN -->
+<section id="turn">
+  <div class="prose">
+    <span class="num">Part two</span>
+    <h2>Where each field applies</h2>
+    <p class="lede">The fields are easier to hold in mind against the shape of a turn.</p>
+    <p>Below is one turn top to bottom, with each field attached to the point where it takes effect.</p>
+  </div>
+
+  <figure>
+    <div class="fig-frame">
+      <svg viewBox="0 0 900 610" role="img" aria-label="One turn top to bottom, with the config fields that apply at each stage.">
+        <defs>
+          <marker id="loop" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+            <path d="M0 0 L7 3.5 L0 7 z" fill="var(--accent)"/>
+          </marker>
+        </defs>
+        <line x1="60" y1="30" x2="60" y2="580" class="d-line" stroke-width="1.5"/>
+
+        <circle cx="60" cy="42" r="7" class="d-acc"/>
+        <text x="90" y="38" class="d-txt-b">Pre-turn: compaction check</text>
+        <text x="90" y="57" class="d-txt-s">If the estimated window exceeds limit × trigger_fraction, compact the transcript.</text>
+        <rect x="90" y="66" width="153" height="20" rx="10" class="d-chip"/><text x="166" y="80" class="d-chip-t" text-anchor="middle">default_context_limit</text>
+        <rect x="251" y="66" width="80" height="20" rx="10" class="d-chip"/><text x="291" y="80" class="d-chip-t" text-anchor="middle">compaction</text>
+        <rect x="339" y="66" width="126" height="20" rx="10" class="d-chip"/><text x="402" y="80" class="d-chip-t" text-anchor="middle">compaction_prompt</text>
+
+        <circle cx="60" cy="120" r="7" class="d-acc"/>
+        <text x="90" y="116" class="d-txt-b">@path injection</text>
+        <text x="90" y="135" class="d-txt-s">Files referenced in the message are read and injected. Oversized ones are truncated.</text>
+        <rect x="90" y="144" width="106" height="20" rx="10" class="d-chip"/><text x="143" y="158" class="d-chip-t" text-anchor="middle">file_injection</text>
+
+        <circle cx="60" cy="198" r="7" class="d-acc"/>
+        <text x="90" y="194" class="d-txt-b">The provider call</text>
+        <text x="90" y="213" class="d-txt-s">System prompt, sampling temperature, completion budget.</text>
+        <rect x="90" y="222" width="100" height="20" rx="10" class="d-chip"/><text x="140" y="236" class="d-chip-t" text-anchor="middle">system_prompt</text>
+        <rect x="198" y="222" width="87" height="20" rx="10" class="d-chip"/><text x="241" y="236" class="d-chip-t" text-anchor="middle">temperature</text>
+        <rect x="293" y="222" width="80" height="20" rx="10" class="d-chip"/><text x="333" y="236" class="d-chip-t" text-anchor="middle">max_tokens</text>
+
+        <circle cx="60" cy="276" r="7" class="d-acc"/>
+        <text x="90" y="272" class="d-txt-b">A tool result returns</text>
+        <text x="90" y="291" class="d-txt-s">Every result passes truncation exactly once before entering the transcript.</text>
+        <rect x="90" y="300" width="87" height="20" rx="10" class="d-chip"/><text x="133" y="314" class="d-chip-t" text-anchor="middle">tool_output</text>
+
+        <circle cx="60" cy="354" r="7" class="d-acc"/>
+        <text x="90" y="350" class="d-txt-b">The tool loop iterates</text>
+        <text x="90" y="369" class="d-txt-s">Back to the provider with the result, up to a hard per-turn round cap.</text>
+        <rect x="90" y="378" width="106" height="20" rx="10" class="d-chip"/><text x="143" y="392" class="d-chip-t" text-anchor="middle">max_tool_steps</text>
+
+        <path d="M540 364 H 640 V 208 H 560" class="d-acc-s" stroke-width="1.5" stroke-dasharray="4 5" marker-end="url(#loop)"/>
+        <text x="652" y="290" class="d-txt-s">loop</text>
+
+        <circle cx="60" cy="432" r="7" class="d-acc"/>
+        <text x="90" y="428" class="d-txt-b">On a provider exception: bounded retry</text>
+        <text x="90" y="447" class="d-txt-s">A transient failure may be retried. The attempt count is bounded.</text>
+        <rect x="90" y="456" width="47" height="20" rx="10" class="d-chip"/><text x="113" y="470" class="d-chip-t" text-anchor="middle">retry</text>
+
+        <circle cx="60" cy="510" r="7" class="d-acc"/>
+        <text x="90" y="506" class="d-txt-b">Post-turn: the verification gate</text>
+        <text x="90" y="525" class="d-txt-s">If the turn changed code, re-prompt until a real passing test run is observed.</text>
+        <rect x="90" y="534" width="113" height="20" rx="10" class="d-chip"/><text x="146" y="548" class="d-chip-t" text-anchor="middle">verify_attempts</text>
+        <rect x="211" y="534" width="94" height="20" rx="10" class="d-lock"/><text x="258" y="548" class="d-lock-t" text-anchor="middle">require_run</text>
+        <text x="315" y="548" class="d-txt-s">locked on</text>
+
+        <text x="60" y="600" class="d-lab">TURN ENDS — THE REPLY IS RETURNED</text>
+      </svg>
+    </div>
+    <figcaption>Four of these are objects with a bounded strategy menu inside: compaction, file_injection, tool_output, retry. The other seven are scalars.</figcaption>
+  </figure>
+</section>
+
+<!-- ============================================================ FIELDS -->
+<section id="fields">
+  <div class="prose">
+    <span class="num">Part three</span>
+    <h2>The eleven editable fields</h2>
+    <p class="lede">In the order they apply during a turn. Each card gives the current value, the bounds, the effect of moving it, and which tasks observe it.</p>
+    <p>Values are from <b>config version 7</b>. They change when a candidate is accepted, so treat them as a current reading rather than a fixed truth. <span class="term">uv run python -m loop.cli surface</span> prints the live contract.</p>
+  </div>
+
+  <!-- system_prompt -->
+  <div class="knob">
+    <div class="khead"><span class="kid">system_prompt</span><span class="kname">The agent's default system prompt</span></div>
+    <div class="krow"><div class="klab">Controls</div><div class="kbody">
+      <p>The system message prepended to every conversation. It frames general disposition: explore before editing, prefer <span class="term">list_files</span> and <span class="term">search_text</span> over shell equivalents, read before changing, and never report done without running the project's tests.</p>
+    </div></div>
+    <div class="krow"><div class="klab">Current (v7)</div><div class="kbody">
+      <p>440 characters. The load-bearing clause is the last one: <span class="val">Never claim it works on your word alone — if you haven't run it, run it.</span></p>
+    </div></div>
+    <div class="krow"><div class="klab">Bounds</div><div class="kbody"><p>Any string. The only field on the surface with no numeric bound and no menu.</p></div></div>
+    <div class="krow"><div class="klab">Effect</div><div class="kbody">
+      <div class="dial">
+        <div><span class="dl">Add framing</span>Reaches every provider call, so a single clause can shift behaviour across the whole suite at once.</div>
+        <div><span class="dl">Trim framing</span>Frees window space and removes whatever that clause was holding up. The two are hard to separate.</div>
+      </div>
+    </div></div>
+    <div class="watch"><span class="wl">Coverage</span>Every task that drives a live model — all of them except cluster H, which uses a scripted provider with no system message. That makes this the broadest field on the surface and the easiest to regress with. Trim the tool-use framing and <span class="tid">D1</span> and <span class="tid">D2</span> go red immediately; trim the verify-before-done clause and cluster <span class="tid">B</span> follows.</div>
+  </div>
+
+  <!-- temperature -->
+  <div class="knob">
+    <div class="khead"><span class="kid">temperature</span><span class="kname">Sampling temperature</span></div>
+    <div class="krow"><div class="klab">Controls</div><div class="kbody">
+      <p>The sampling temperature sent on every provider call.</p>
+    </div></div>
+    <div class="krow"><div class="klab">Current (v7)</div><div class="kbody">
+      <p><span class="val"><b>null</b></span> — which is not the same as 0.0. Null means Carbon sends no temperature field at all and defers to the provider's own default. Every number, including 0.0, is a pin; null is the only way to match a harness that never pins the value.</p>
+    </div></div>
+    <div class="krow"><div class="klab">Bounds</div><div class="kbody"><p>A number from <span class="val">0</span> to <span class="val">2</span>, or <span class="val">null</span>. JSON has one number type, so a proposed <span class="term">1</span> is read as 1.0 rather than bounced on a type technicality.</p></div></div>
+    <div class="krow"><div class="klab">Effect</div><div class="kbody">
+      <div class="dial">
+        <div><span class="dl">Lower</span>More deterministic sampling. Less variance between attempts, and less chance of finding a second route through a hard task.</div>
+        <div><span class="dl">Raise</span>More variance. On a suite that averages 3 or 5 attempts, this widens the spread on every pass fraction at once.</div>
+      </div>
+    </div></div>
+    <div class="watch"><span class="wl">Coverage</span>Same as the system prompt: every live-model task. Every provider call carries this value, so nothing that drives a real model is blind to it.</div>
+  </div>
+
+  <!-- max_tokens -->
+  <div class="knob">
+    <div class="khead"><span class="kid">max_tokens</span><span class="kname">Default completion budget</span></div>
+    <div class="krow"><div class="klab">Controls</div><div class="kbody">
+      <p>The completion ceiling per provider call. A response that reaches it terminates with <span class="term">finish_reason=length</span>, mid-sentence.</p>
+    </div></div>
+    <div class="krow"><div class="klab">Current (v7)</div><div class="kbody"><p><span class="val">4096</span></p></div></div>
+    <div class="krow"><div class="klab">Bounds</div><div class="kbody"><p>Positive integer.</p></div></div>
+    <div class="krow"><div class="klab">Effect</div><div class="kbody">
+      <div class="dial">
+        <div><span class="dl">Lower</span>Long generations truncate. The agent did not fail; it was not allowed to finish.</div>
+        <div><span class="dl">Raise</span>Headroom for long output. Costs more, and a long reply consumes more window on the next turn.</div>
+      </div>
+    </div></div>
+    <div class="watch"><span class="wl">Coverage</span><span class="tid">G1</span> is the sole observer, and it binds hard: it needs roughly 1,878 completion tokens, about thirty times the next-hungriest task (<span class="tid">B1</span>'s ~52-token tool-call arguments). No task fails because this is too small, so the field is <b>guard-only</b> — defended, not mined.</div>
+  </div>
+
+  <!-- default_context_limit -->
+  <div class="knob">
+    <div class="khead"><span class="kid">default_context_limit</span><span class="kname">Context-window budget</span></div>
+    <div class="krow"><div class="klab">Controls</div><div class="kbody">
+      <p>The approximate token budget for the transcript. Not a hard wall — it is the base the compaction trigger is computed from.</p>
+      <p>Compaction fires when the estimated window exceeds <b>limit × trigger_fraction</b>. The estimate counts message content and tool-call arguments alike, at about four characters per token.</p>
+    </div></div>
+    <div class="krow"><div class="klab">Current (v7)</div><div class="kbody">
+      <p><span class="val">4000</span> tokens, with <span class="term">compaction.trigger_fraction = 0.8</span>, so compaction fires above <span class="val"><b>3200</b></span>.</p>
+    </div></div>
+    <div class="krow"><div class="klab">Bounds</div><div class="kbody"><p>Positive integer.</p></div></div>
+    <div class="krow"><div class="klab">Effect</div><div class="kbody">
+      <div class="dial">
+        <div><span class="dl">Lower</span>Compaction fires sooner and more often. Every additional pass is another chance to lose a fact.</div>
+        <div><span class="dl">Raise</span>More history carried verbatim. Costs more per call, and models attend to the head and tail of a long window far more reliably than the middle.</div>
+      </div>
+    </div></div>
+    <div class="watch"><span class="wl">Coverage</span><span class="tid">A1</span> and <span class="tid">A3</span>. A1's window peaks around 3,630 tokens against the 3,200 trigger, so compaction genuinely fires and this field moves it. A3 peaks around 1,185 and never compacts, so it observes the lowering direction only. <span class="tid">G2</span> is <i>not</i> an observer — it pins <span class="term">context_limit=700</span> itself. Nothing fails on window size, so this field is <b>guard-only</b>.</div>
+  </div>
+
+  <!-- compaction -->
+  <div class="knob">
+    <div class="khead"><span class="kid">compaction</span><span class="kname">Transcript compaction policy</span><span class="badge menu">Strategy menu · 3</span></div>
+    <div class="krow"><div class="klab">Controls</div><div class="kbody">
+      <p>When the trigger fires, compaction keeps <span class="term">keep_head</span> messages at the front, keeps a tail, and replaces the middle with a single system-role checkpoint message. This object decides how all of that is done.</p>
+    </div></div>
+    <div class="krow"><div class="klab">Current (v7)</div><div class="kbody">
+      <p><span class="val">strategy: <b>token_budget_checkpoint</b></span> <span class="val">keep_head: 2</span> <span class="val">keep_tail: 4</span> <span class="val">trigger_fraction: 0.8</span> <span class="val">summary_max_tokens: 1024</span></p>
+    </div></div>
+    <div class="krow"><div class="klab">Parameters</div><div class="kbody">
+      <p><b>keep_head</b>, <b>keep_tail</b>, <b>summary_max_tokens</b> — positive integers. <b>trigger_fraction</b> — greater than 0 and at most 1.</p>
+      <p>Two structural rules apply whatever the strategy. Head and tail boundaries are snapped to whole-turn cuts, so compaction never orphans a tool result from its assistant <span class="term">tool_calls</span> message — the API rejects that with a 400. And if snapping leaves nothing safe in the middle, the history is returned unchanged: a large window this turn beats a corrupt one.</p>
+    </div></div>
+
+    <div class="menu">
+      <span class="mt">Strategy menu</span>
+      <div class="mi">
+        <span class="mn">summarize_middle</span>
+        <p>Cut point by message count: keep the last <span class="term">keep_tail</span> messages. The summarizer receives only the base <span class="term">compaction_prompt</span>. Whatever comes back is used as-is.</p>
+        <span class="cost">Consequence: the checkpoint is free-form prose. A file list can come back as "some files", and nothing constrains that.</span>
+      </div>
+      <div class="mi">
+        <span class="mn">structured_checkpoint</span>
+        <p>Same cut point. The prompt is extended with nine required headings — goal, constraints, decisions, completed work, files read or changed, exact commands and tool calls, failures and rejected approaches, current state, next steps — plus instructions to merge any earlier checkpoint and preserve identifiers, paths, arguments and error tails verbatim.</p>
+        <span class="cost">Consequence: still prose, under headings. A heading can be satisfied with a vague sentence, and the prior checkpoint is folded into the transcript as ordinary history, so it is re-compressed on every pass.</span>
+      </div>
+      <div class="mi now">
+        <span class="mn">token_budget_checkpoint</span><span class="tagnow">Current</span>
+        <p>Three substantive differences from the other two.</p>
+        <p><b>1 — the cut point is a token budget.</b> Walk back from the newest message until <span class="term">recent_token_reserve</span> tokens are retained, then snap back to the enclosing turn boundary. The newest message is always kept even if it alone exceeds the reserve, and the cut never crosses <span class="term">head_end</span>.</p>
+        <p><b>2 — the prior checkpoint is passed as its own message</b>, labelled as existing state to update, and removed from the material to be compressed. If the middle held only the prior checkpoint, it is carried forward verbatim rather than re-summarised.</p>
+        <p><b>3 — a deterministic state block is appended after summarizing.</b> The set of paths read and paths modified is extracted from the assistant's actual tool-call arguments, merged with the previous block, and attached verbatim.</p>
+        <span class="cost">Why 1: a fixed message count is a proxy that fails in both directions. Four tail messages are nearly nothing after a turn of one-line acknowledgements, and far over budget after a turn that read a file.</span>
+        <span class="cost">Why 2: a model shown the same content twice — once as "carry this forward" and once as "compress this" — compresses it. That double presentation is precisely how a fact erodes across repeated compactions.</span>
+        <span class="cost">Why 3: the file list stops being something the summarizer must remember and becomes something the harness knows. Extracted from tool-call arguments rather than tool results, because a result can be an error string and a failed call still records what the agent was working on.</span>
+        <div class="adv">
+          <span class="at">Additive parameters, valid only under this strategy</span>
+          <dl>
+            <dt>recent_token_reserve <span class="df">— default 0, disabled</span></dt>
+            <dd>Tokens of recent history to retain. At 0 there is no budget to enforce, so the strategy falls back to the plain message-count cut used by the other two. Also changes the compaction floor: under a budget, <span class="term">keep_tail</span> is not the mechanism, so gating on it would refuse to compact a short-but-enormous history.</dd>
+            <dt>completion_reserve <span class="df">— default 0, disabled</span></dt>
+            <dd>Tokens held back for the reply. <span class="term">trigger_fraction</span> scales with the window, but a completion does not: the reply that has to fit is about the same size at 4k and at 128k, so a fraction that leaves room at one leaves far too little or absurdly much at the other. Whichever trigger is tighter wins, so adding a reserve can only ever compact earlier.</dd>
+            <dt>checkpoint_fallback <span class="df">— default head_tail</span></dt>
+            <dd>Which positional truncation strategy bounds a checkpoint that outgrows <span class="term">summary_max_tokens × 4</span> characters. The deterministic state block is attached <b>after</b> that cut, so the state that must not be paraphrased also cannot be truncated away.</dd>
+          </dl>
+        </div>
+      </div>
+    </div>
+
+    <div class="watch"><span class="wl">Coverage</span>Miner: <span class="tid">G4</span>. Guards: <span class="tid">A1</span> and <span class="tid">G2</span>. <span class="tid">A3</span> never compacts, so nothing in this object can move it. <span class="tid">H2</span> is not an observer either: it detects the summarizer call by payload shape rather than prompt text, which makes it invariant to every sub-field here by construction — and <span class="term">tests/test_registry.py</span> asserts that invariance directly.</div>
+  </div>
+
+  <!-- compaction_prompt -->
+  <div class="knob">
+    <div class="khead"><span class="kid">compaction_prompt</span><span class="kname">The summarizer's base instructions</span></div>
+    <div class="krow"><div class="klab">Controls</div><div class="kbody">
+      <p>The system message for the summarizer call. Each strategy above appends its own extension to this text.</p>
+    </div></div>
+    <div class="krow"><div class="klab">Current (v7)</div><div class="kbody">
+      <p>It asks for a short checkpoint another model will use to continue, and enumerates what must be preserved verbatim: every concrete fact, code, name, decision, file path, and the current goal and next step. It closes with <span class="val">Be terse but lose nothing the next turn needs.</span></p>
+    </div></div>
+    <div class="krow"><div class="klab">Bounds</div><div class="kbody"><p>Any string.</p></div></div>
+    <div class="krow"><div class="klab">Effect</div><div class="kbody">
+      <div class="dial">
+        <div><span class="dl">Demand more</span>Naming a class of state raises its retention odds. Naming everything produces a long checkpoint, which consumes the window compaction just freed.</div>
+        <div><span class="dl">Demand less</span>A shorter checkpoint, and more of the retention decision delegated to the summarizer.</div>
+      </div>
+    </div></div>
+    <div class="watch"><span class="wl">Coverage</span>The same three as the object above. Miner: <span class="tid">G4</span>. Guards: <span class="tid">A1</span>, <span class="tid">G2</span>. H2's shape-based detection exists precisely so a legitimate rewrite of this field cannot make that fixture misread a summarizer call as a main call and report a recovery regression that never happened.</div>
+  </div>
+
+  <!-- file_injection -->
+  <div class="knob">
+    <div class="khead"><span class="kid">file_injection</span><span class="kname">Truncation policy for @path context blocks</span><span class="badge menu">Strategy menu · 2</span><span class="badge warn">Unguarded</span></div>
+    <div class="krow"><div class="klab">Controls</div><div class="kbody">
+      <p>When the user's message matches the <span class="term">@path</span> pattern, the named file is read and injected as a context block. This object decides what survives if the file exceeds the budget.</p>
+      <p>It applies <b>only</b> on an <span class="term">@path</span> match. No other route into the window uses it.</p>
+    </div></div>
+    <div class="krow"><div class="klab">Current (v7)</div><div class="kbody">
+      <p><span class="val">strategy: <b>head_tail</b></span> <span class="val">budget: 4000</span> <span class="val">tail_fraction: 0.5</span></p>
+      <p>So an oversized file arrives as 2,000 leading characters, a truncation marker, and 2,000 trailing.</p>
+    </div></div>
+    <div class="krow"><div class="klab">Parameters</div><div class="kbody">
+      <p><b>budget</b> — positive integer, in characters. <b>tail_fraction</b> — strictly between 0 and 1, the share of the budget spent on the suffix.</p>
+      <p>Under budget, the text passes through unmodified. Truncation is a no-op, not a reformat.</p>
+    </div></div>
+    <div class="menu">
+      <span class="mt">Strategy menu — see the comparison in part four</span>
+      <div class="mi"><span class="mn">keep_head</span><p>Retain a prefix of <span class="term">budget</span> characters, append a marker recording how many were dropped.</p></div>
+      <div class="mi now"><span class="mn">head_tail</span><span class="tagnow">Current</span><p>Retain a prefix and a suffix, with the marker inserted between them.</p></div>
+    </div>
+    <div class="watch"><span class="wl">Coverage</span>Miner: <span class="tid">A4</span>. Guards: <b>none</b>. A4 is the suite's only <span class="term">@path</span> sender and has no tools, so the injected block is its sole route to the answer — which also makes it the only observer, and it is already the miner. This field has something to mine and nothing to regress against. Closing that needs a second <span class="term">@path</span> task with a passing prior, not a table edit.</div>
+  </div>
+
+  <!-- tool_output -->
+  <div class="knob">
+    <div class="khead"><span class="kid">tool_output</span><span class="kname">Truncation policy for tool results</span><span class="badge menu">Strategy menu · 3</span></div>
+    <div class="krow"><div class="klab">Controls</div><div class="kbody">
+      <p>Every tool result passes truncation exactly once before entering the transcript. When the result exceeds the budget, this object decides what happens to it.</p>
+      <p>This is the most consequential field on the surface. A command emitting 840,000 characters cannot enter a few-thousand-token window, so something has to give.</p>
+    </div></div>
+    <div class="krow"><div class="klab">Current (v7)</div><div class="kbody">
+      <p><span class="val">strategy: <b>head_tail</b></span> <span class="val">budget: 4000</span> <span class="val">tail_fraction: 0.6</span></p>
+      <p>So an oversized result arrives as 1,600 leading characters, a marker, and 2,400 trailing.</p>
+    </div></div>
+    <div class="krow"><div class="klab">Trust domains</div><div class="kbody">
+      <p>Tool output is untrusted, so it is handled by <span class="term">truncate_tool_result</span> rather than <span class="term">truncate</span>. Any line resembling one of the harness's own recovery footers is relabelled as quoted text <b>before</b> the cut — before, so an attacker cannot inflate the excerpt past the budget by packing it with lookalikes.</p>
+      <p>That relabelling applies to the model's copy only, never to anything written to disk or re-applied. A relabelled <span class="term">git diff</span>, spilled to a file and re-applied, wrote five corrupted lines and reported success: an add-only hunk has no context line for the patcher to mismatch.</p>
+    </div></div>
+    <div class="menu">
+      <span class="mt">Strategy menu</span>
+      <div class="mi"><span class="mn">keep_head</span><p>Retain a prefix. Appropriate when the salient content is at the start — a header, a summary line.</p><span class="cost">Consequence: a test suite that prints thousands of PASS lines and then one FAILED line loses the failure entirely.</span></div>
+      <div class="mi now"><span class="mn">head_tail</span><span class="tagnow">Current</span><p>Retain a prefix and a suffix. Appropriate for command output, where the actionable line is usually last.</p><span class="cost">Consequence: the middle is unrecoverable. There is no route back to it.</span></div>
+      <div class="mi"><span class="mn">offload_to_file</span>
+        <p>Lose nothing. The complete result is written to <span class="term">.carbon/offload/&lt;sha256-prefix&gt;.txt</span> under the workspace root. The model receives the same head-and-tail excerpt plus a footer naming the file — as a workspace-relative path, so the model's own <span class="term">read_file</span> resolves it — and giving the exact next call: a ranged read, or a <span class="term">search_text</span> with the pattern spelled out.</p>
+        <span class="cost">What changes: the middle is withheld rather than destroyed. It is one tool call away.</span>
+        <span class="cost">Scope and small print. Offered on the tool-result menu only; <span class="term">file_injection</span> does not get it, because an <span class="term">@path</span> block is already re-openable and copying it would hand the model a duplicate of what it holds. It is best-effort by construction: it runs mid-turn after the assistant's tool_calls are already in the transcript, so a failed write degrades to a plain head_tail excerpt and says so in the marker rather than abandoning the turn. The filename is a content hash, so a repeated identical result re-lands on the same file. The write is atomic via a private temp file and a replace, which matters because the name is deterministic and a workspace the agent does not own could pre-place a symlink there. Only the newest 64 spills are retained, and the directory is git-ignored.</span>
+        <span class="cost">One interaction worth knowing: when the caller supplies a continuation hint — as <span class="term">read_file</span> does — the strategy downgrades to head_tail for that call, so the model is offered one recovery route rather than two. Otherwise a paged read would spill a copy of a file it is already holding, one file deeper every time.</span>
+      </div>
+    </div>
+    <div class="watch"><span class="wl">Coverage</span>Miners: <span class="tid">E1</span>, <span class="tid">E3</span>, <span class="tid">E4</span>. Guards: <span class="tid">E2</span>, <span class="tid">D3</span>.
+      <br><br><b>The nuance is worth stating precisely.</b> <span class="tid">E4</span> is the task an offload configuration can genuinely turn green: it gates the pass on recovery from the offloaded artifact itself, so neither a larger budget nor a luckier excerpt can fake it. <span class="tid">E3</span> stays red even under offload, because its verifier requires the value inside the first plain run's <i>inline</i> result; the only values that satisfy that are flood-sized budgets, which <span class="tid">E1</span>'s economy verdict prices out. <span class="tid">E2</span> and <span class="tid">D3</span> catch the opposite failure — a candidate that floods the window or loses the tail dies on them.
+      <br><br>Two deliberate exclusions from this field's observer set. <span class="tid">A2</span> is not listed: its value survives every budget down to 8,736, so no legal value moves its verdict either way. <span class="tid">C1</span> and <span class="tid">C2</span> are not listed either, and that is now a property of the code — their leak predicates read the <b>raw</b> tool result, precisely so a candidate cannot raise a containment score by clamping away the evidence.</div>
+  </div>
+
+  <!-- max_tool_steps -->
+  <div class="knob">
+    <div class="khead"><span class="kid">max_tool_steps</span><span class="kname">Tool-call rounds per turn</span></div>
+    <div class="krow"><div class="klab">Controls</div><div class="kbody">
+      <p>The hard cap on tool-call rounds within a single turn before the agent loop gives up. It is the loop's only stop condition by default; there is no wall-clock bound unless a caller opts into one.</p>
+    </div></div>
+    <div class="krow"><div class="klab">Current (v7)</div><div class="kbody"><p><span class="val">20</span></p></div></div>
+    <div class="krow"><div class="klab">Bounds</div><div class="kbody"><p>Positive integer.</p></div></div>
+    <div class="krow"><div class="klab">Effect</div><div class="kbody">
+      <div class="dial">
+        <div><span class="dl">Lower</span>Deep tasks terminate half-finished. The agent is not confused; it exhausted its rounds.</div>
+        <div><span class="dl">Raise</span>Deeper chains complete. A stuck loop also runs longer before giving up, and every round is a provider call.</div>
+      </div>
+    </div></div>
+    <div class="watch"><span class="wl">Coverage</span>Observed by every task that makes a tool call. <span class="tid">F2</span> is the binding guard: it forces ten provider calls and fails at any budget of 9 or less. <span class="tid">F1</span> and <span class="tid">G3</span> also observe, but need roughly 3 and 2 rounds, so F2 dominates them. Nine observers have failure headroom, yet none fails <i>on depth</i>, so raising the budget cannot turn any of them green — the field is <b>guard-only</b>.</div>
+  </div>
+
+  <!-- retry -->
+  <div class="knob">
+    <div class="khead"><span class="kid">retry</span><span class="kname">Transient provider-failure policy</span><span class="badge menu">Strategy menu · 2</span></div>
+    <div class="krow"><div class="klab">Controls</div><div class="kbody">
+      <p>What happens when a provider call raises for a reason unrelated to the work — rate limiting, a 503, a brief outage. Whether to retry, how many times, and the delay schedule.</p>
+    </div></div>
+    <div class="krow"><div class="klab">Current (v7)</div><div class="kbody">
+      <p><span class="val">strategy: <b>backoff</b></span> <span class="val">max_attempts: 5</span> <span class="val">base_delay_ms: 2000</span></p>
+    </div></div>
+    <div class="krow"><div class="klab">Parameters</div><div class="kbody">
+      <p><b>max_attempts</b> — integer from 1 to 5. It bounds <b>total tries</b>, not retries: at 3, a delay is offered after try 1 and try 2 and refused at try 3, for three tries in all.</p>
+      <p><b>base_delay_ms</b> — integer from 0 to 10,000. Delay before try <i>n</i> is <span class="term">base_delay_ms × 2^(n−1)</span> milliseconds.</p>
+    </div></div>
+    <div class="menu">
+      <span class="mt">Strategy menu</span>
+      <div class="mi"><span class="mn">fail_fast</span><p>No retry. One call, and the exception propagates.</p><span class="cost">Note: <span class="term">can_retry</span> is gated on the strategy, so this ignores <span class="term">max_attempts</span> entirely. Under fail_fast the call count is exactly 1 whatever the number says — which is why H3 derives its expectation from both fields, not from max_attempts alone.</span></div>
+      <div class="mi now"><span class="mn">backoff</span><span class="tagnow">Current</span><p>Retry with exponential backoff. At the current values the delays are 2s, 4s, 8s and 16s, for five tries in total.</p><span class="cost">Consequence: a genuinely dead provider keeps the turn alive for about 30 seconds before the exception surfaces.</span></div>
+    </div>
+    <div class="watch"><span class="wl">Coverage</span><span class="tid">H1</span> is the only observer: it fails under fail_fast at any attempt count, and under backoff with <span class="term">max_attempts=1</span>. <span class="tid">H2</span> takes the overflow branch, which returns before <span class="term">can_retry</span> is consulted. <span class="tid">H3</span> derives its expectation from the same config Carbon reads, so it passes for all ten legal pairs — invariant by construction, which makes it a canary for Carbon's retry code rather than an observer of this field. <b>base_delay_ms is observed by nothing at all</b>; it only feeds a sleep. Guard-only.</div>
+  </div>
+
+  <!-- verify_attempts -->
+  <div class="knob">
+    <div class="khead"><span class="kid">verify_attempts</span><span class="kname">Re-prompts before a turn is marked unverified</span></div>
+    <div class="krow"><div class="klab">Controls</div><div class="kbody">
+      <p>When a turn changes code and the instruction root declares a test command under <span class="term">## Testing</span>, the agent may not report done until a real passing run of that command is observed <i>after</i> the change. The model runs it with bash; the harness only watches the receipts. This field caps the re-prompts.</p>
+      <p>On exhaustion the reply is marked unverified. The gate never implies a pass it did not observe.</p>
+    </div></div>
+    <div class="krow"><div class="klab">Current (v7)</div><div class="kbody"><p><span class="val">3</span></p></div></div>
+    <div class="krow"><div class="klab">Bounds</div><div class="kbody"><p>Positive integer. Note that whether the gate exists at all is a <b>locked</b> field, <span class="term">require_run</span> — Refinery may tune the re-prompt count, never the gate.</p></div></div>
+    <div class="krow"><div class="klab">Effect</div><div class="kbody">
+      <div class="dial">
+        <div><span class="dl">Lower</span>Fewer chances for the agent to go back and run the tests, so more turns end marked unverified.</div>
+        <div><span class="dl">Raise</span>More chances to comply, and more wasted provider calls when the agent was never going to run them.</div>
+      </div>
+    </div></div>
+    <div class="watch"><span class="wl">Coverage</span>Cluster <span class="tid">B</span> only, for a structural reason: the gate is armed by a test command in the task's instruction root, and cluster B is the only cluster that ships one. Every other task uses a neutral directory, so the gate never arms. Miners: <span class="tid">B1</span>, <span class="tid">B2</span>, <span class="tid">B3</span>. Guards: <span class="tid">B2</span>, <span class="tid">B3</span>. Re-prompts track the field one-to-one.</div>
+  </div>
+</section>
+
+<!-- ============================================================ MENUS -->
+<section id="menus">
+  <div class="prose">
+    <span class="num">Part four</span>
+    <h2>The three menus, compared</h2>
+    <p class="lede">Same inputs, different strategy values, side by side.</p>
+    <h3>Truncating a large tool result</h3>
+    <p>One result of 10,000 characters, budget 4,000, <span class="term">tail_fraction 0.6</span>. Here is what enters the transcript under each strategy.</p>
+  </div>
+
+  <figure>
+    <div class="fig-frame">
+      <svg viewBox="0 0 900 380" role="img" aria-label="A 10,000 character result under three strategies. keep_head retains the first 4,000. head_tail retains 1,600 and 2,400. offload_to_file retains the same excerpt and appends a footer naming a file holding all 10,000.">
+        <text x="30" y="24" class="d-lab">THE RESULT AS THE TOOL RETURNED IT — 10,000 CHARS</text>
+        <rect x="30" y="34" width="840" height="26" rx="4" class="d-panel-2"/>
+        <text x="450" y="52" class="d-txt-s" text-anchor="middle">complete</text>
+
+        <text x="30" y="96" class="d-txt-b">keep_head</text>
+        <text x="120" y="96" class="d-txt-s">4,000 leading chars, then a marker</text>
+        <rect x="30" y="106" width="840" height="26" rx="4" fill="none" stroke="var(--rule)" stroke-width="1.4"/>
+        <rect x="31" y="107" width="336" height="24" rx="3" class="d-acc" opacity=".85"/>
+        <rect x="369" y="107" width="60" height="24" rx="3" class="d-panel-2"/>
+        <text x="399" y="124" class="d-mono-s" text-anchor="middle">marker</text>
+        <text x="860" y="124" class="d-txt-s" text-anchor="end">6,000 trailing chars discarded</text>
+
+        <text x="30" y="170" class="d-txt-b">head_tail</text>
+        <text x="120" y="170" class="d-txt-s">1,600 leading, marker, 2,400 trailing</text>
+        <rect x="30" y="180" width="840" height="26" rx="4" fill="none" stroke="var(--rule)" stroke-width="1.4"/>
+        <rect x="31" y="181" width="134" height="24" rx="3" class="d-acc" opacity=".85"/>
+        <rect x="167" y="181" width="60" height="24" rx="3" class="d-panel-2"/>
+        <text x="197" y="198" class="d-mono-s" text-anchor="middle">marker</text>
+        <rect x="667" y="181" width="202" height="24" rx="3" class="d-acc" opacity=".85"/>
+        <text x="447" y="198" class="d-txt-s" text-anchor="middle">6,000 middle chars discarded</text>
+
+        <text x="30" y="244" class="d-txt-b">offload_to_file</text>
+        <text x="140" y="244" class="d-txt-s">the same excerpt, then a footer naming the spill</text>
+        <rect x="30" y="254" width="840" height="26" rx="4" fill="none" stroke="var(--rule)" stroke-width="1.4"/>
+        <rect x="31" y="255" width="134" height="24" rx="3" class="d-acc" opacity=".85"/>
+        <rect x="167" y="255" width="60" height="24" rx="3" class="d-panel-2"/>
+        <text x="197" y="272" class="d-mono-s" text-anchor="middle">marker</text>
+        <rect x="600" y="255" width="130" height="24" rx="3" class="d-acc" opacity=".85"/>
+        <rect x="734" y="255" width="135" height="24" rx="3" class="d-chip"/>
+        <text x="801" y="272" class="d-chip-t" text-anchor="middle">footer: path</text>
+
+        <path d="M801 280 V 306" class="d-acc-s" stroke-width="1.6" marker-end="url(#a2b)"/>
+        <defs><marker id="a2b" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7 z" fill="var(--accent)"/></marker></defs>
+        <rect x="330" y="308" width="540" height="52" rx="6" class="d-panel"/>
+        <text x="350" y="330" class="d-txt-b">All 10,000 chars, written under the workspace root</text>
+        <text x="350" y="349" class="d-mono-s">.carbon/offload/&lt;hash&gt;.txt — one ranged read_file or search_text away</text>
+
+        <rect x="30" y="308" width="280" height="52" rx="6" class="d-panel-2"/>
+        <text x="48" y="330" class="d-txt-b">Under budget</text>
+        <text x="48" y="349" class="d-txt-s">No-op. The text passes through unmodified.</text>
+      </svg>
+    </div>
+    <figcaption>Only <span class="term">tool_output</span> offers the third value. The excerpt and the footer are what the model reads; the spilled file holds the tool's exact bytes, un-relabelled.</figcaption>
+  </figure>
+
+  <div class="prose">
+    <h3>Compacting the transcript</h3>
+    <p>All three produce the same shape — head, one checkpoint message, tail. They differ in where the tail is cut, what the summarizer is instructed to produce, and what happens to the checkpoint afterwards.</p>
+  </div>
+
+  <figure>
+    <div class="fig-frame">
+      <svg viewBox="0 0 900 400" role="img" aria-label="The transcript before and after compaction under three strategies. All keep a head and a tail with one checkpoint between. They differ in the cut mechanism and in what is attached to the checkpoint.">
+        <text x="30" y="24" class="d-lab">THE TRANSCRIPT BEFORE COMPACTION</text>
+        <rect x="30" y="34" width="840" height="26" rx="4" class="d-panel-2"/>
+        <rect x="31" y="35" width="96" height="24" rx="3" class="d-acc" opacity=".85"/>
+        <text x="79" y="52" class="d-mono-s" text-anchor="middle" fill="var(--paper)">head</text>
+        <text x="470" y="52" class="d-txt-s" text-anchor="middle">the middle</text>
+        <rect x="773" y="35" width="96" height="24" rx="3" class="d-acc" opacity=".85"/>
+        <text x="821" y="52" class="d-mono-s" text-anchor="middle" fill="var(--paper)">tail</text>
+
+        <text x="30" y="98" class="d-txt-b">summarize_middle</text>
+        <rect x="30" y="108" width="840" height="26" rx="4" fill="none" stroke="var(--rule)" stroke-width="1.4"/>
+        <rect x="31" y="109" width="96" height="24" rx="3" class="d-acc" opacity=".85"/>
+        <rect x="131" y="109" width="638" height="24" rx="3" class="d-panel-2"/>
+        <text x="450" y="126" class="d-txt-s" text-anchor="middle">free-form checkpoint</text>
+        <rect x="773" y="109" width="96" height="24" rx="3" class="d-acc" opacity=".85"/>
+        <text x="30" y="152" class="d-txt-s">cut by message count · base prompt only · no post-processing</text>
+
+        <text x="30" y="196" class="d-txt-b">structured_checkpoint</text>
+        <rect x="30" y="206" width="840" height="26" rx="4" fill="none" stroke="var(--rule)" stroke-width="1.4"/>
+        <rect x="31" y="207" width="96" height="24" rx="3" class="d-acc" opacity=".85"/>
+        <rect x="131" y="207" width="638" height="24" rx="3" class="d-panel-2"/>
+        <text x="450" y="224" class="d-txt-s" text-anchor="middle">checkpoint under nine required headings</text>
+        <rect x="773" y="207" width="96" height="24" rx="3" class="d-acc" opacity=".85"/>
+        <text x="30" y="250" class="d-txt-s">cut by message count · headings enforced in the prompt · no post-processing</text>
+
+        <text x="30" y="294" class="d-txt-b">token_budget_checkpoint</text>
+        <rect x="222" y="282" width="66" height="16" rx="8" class="d-chip"/>
+        <text x="255" y="294" class="d-chip-t" text-anchor="middle">current</text>
+        <rect x="30" y="304" width="840" height="26" rx="4" fill="none" stroke="var(--rule)" stroke-width="1.4"/>
+        <rect x="31" y="305" width="96" height="24" rx="3" class="d-acc" opacity=".85"/>
+        <rect x="131" y="305" width="452" height="24" rx="3" class="d-panel-2"/>
+        <text x="357" y="322" class="d-txt-s" text-anchor="middle">prior checkpoint, updated</text>
+        <rect x="585" y="305" width="150" height="24" rx="3" class="d-chip"/>
+        <text x="660" y="322" class="d-chip-t" text-anchor="middle">file state, exact</text>
+        <rect x="739" y="305" width="130" height="24" rx="3" class="d-acc" opacity=".85"/>
+        <text x="804" y="322" class="d-mono-s" text-anchor="middle" fill="var(--paper)">tail by tokens</text>
+        <text x="30" y="348" class="d-txt-s">cut by token reserve, snapped to a turn · prior checkpoint passed separately, to update rather than compress</text>
+        <text x="30" y="366" class="d-txt-s">· read/modified paths extracted from tool-call arguments and appended verbatim, after any bounding</text>
+      </svg>
+    </div>
+    <figcaption>Shaded blocks survive verbatim. The pale block is model-written. The third strategy narrows the pale block's responsibility: the file list moves out of prose and into deterministic extraction.</figcaption>
+  </figure>
+
+  <div class="prose">
+    <h3>Retrying a failed provider call</h3>
+  </div>
+
+  <figure>
+    <div class="fig-frame">
+      <svg viewBox="0 0 900 230" role="img" aria-label="fail_fast makes one call then raises. backoff makes up to five calls with delays of 2, 4, 8 and 16 seconds.">
+        <text x="30" y="30" class="d-txt-b">fail_fast</text>
+        <line x1="150" y1="52" x2="330" y2="52" class="d-line" stroke-width="1.5"/>
+        <circle cx="160" cy="52" r="9" class="d-acc"/>
+        <text x="160" y="78" class="d-txt-s" text-anchor="middle">try 1</text>
+        <path d="M300 44 L 316 60 M316 44 L 300 60" class="d-acc-s" stroke-width="2"/>
+        <text x="344" y="57" class="d-txt-s">the exception propagates</text>
+        <text x="30" y="78" class="d-txt-s">exactly 1 call</text>
+
+        <line x1="30" y1="102" x2="870" y2="102" class="d-line"/>
+
+        <text x="30" y="136" class="d-txt-b">backoff</text>
+        <text x="30" y="158" class="d-txt-s">up to 5 calls</text>
+        <line x1="150" y1="152" x2="800" y2="152" class="d-line" stroke-width="1.5"/>
+        <circle cx="160" cy="152" r="9" class="d-acc"/><text x="160" y="178" class="d-txt-s" text-anchor="middle">try 1</text>
+        <circle cx="300" cy="152" r="9" class="d-acc"/><text x="300" y="178" class="d-txt-s" text-anchor="middle">try 2</text>
+        <circle cx="440" cy="152" r="9" class="d-acc"/><text x="440" y="178" class="d-txt-s" text-anchor="middle">try 3</text>
+        <circle cx="580" cy="152" r="9" class="d-acc"/><text x="580" y="178" class="d-txt-s" text-anchor="middle">try 4</text>
+        <circle cx="720" cy="152" r="9" class="d-acc"/><text x="720" y="178" class="d-txt-s" text-anchor="middle">try 5</text>
+        <text x="230" y="140" class="d-mono-s" text-anchor="middle">2s</text>
+        <text x="370" y="140" class="d-mono-s" text-anchor="middle">4s</text>
+        <text x="510" y="140" class="d-mono-s" text-anchor="middle">8s</text>
+        <text x="650" y="140" class="d-mono-s" text-anchor="middle">16s</text>
+        <path d="M770 144 L 786 160 M786 144 L 770 160" class="d-acc-s" stroke-width="2"/>
+
+        <rect x="30" y="196" width="840" height="26" rx="4" class="d-panel-2"/>
+        <text x="450" y="213" class="d-txt-b" text-anchor="middle">max_attempts bounds total tries, not retries. At 3: one try and two more.</text>
+      </svg>
+    </div>
+    <figcaption>Delay before try <i>n</i> is base_delay_ms × 2^(n−1). Nothing in the suite observes the delay itself; it only determines how long a doomed turn takes to surface its exception.</figcaption>
+  </figure>
+</section>
+
+<!-- ============================================================ LOCKED -->
+<section id="locked">
+  <div class="prose">
+    <span class="num">Part five</span>
+    <h2>What is locked, and why</h2>
+    <p class="lede">The boundary is what makes the surface trustworthy. Without it, "editable" would mean "anything".</p>
+    <h3>Seven non-editable fields</h3>
+    <p>These live in the same file as the eleven. Carbon marks them non-editable in its schema, and Refinery reads that marking rather than maintaining its own list.</p>
+  </div>
+
+  <table class="tbl">
+    <thead><tr><th>Field</th><th>Reason</th></tr></thead>
+    <tbody>
+      <tr><td class="k">require_run</td><td class="s">Whether a code change must be backed by an observed passing test run. Making the verification gate optional would make honesty optional. Part of verification integrity.</td></tr>
+      <tr><td class="k">approval_tools</td><td class="s">Which tools the approval gate guards. Part of the permission system, not an optimisation surface.</td></tr>
+      <tr><td class="k">code_extensions</td><td class="s">Which file extensions arm the test gate on write or edit. Shortening the list would silently disarm the gate for whole languages.</td></tr>
+      <tr><td class="k">attach_pattern</td><td class="s">The regex recognising an <span class="term">@path</span> reference. A context-delivery parser contract, not an optimisation knob. Must compile and carry at least one capture group; the use site extracts via group(1).</td></tr>
+      <tr><td class="k">memory_search_limit</td><td class="s">Max hits from cross-session recall. Locked until the suite has miners and guards that can observe it. An unobserved field is not a safe field to tune.</td></tr>
+      <tr><td class="k">max_item_chars</td><td class="s">A compatibility re-export only. The real budgets live in <span class="term">file_injection.budget</span> and <span class="term">tool_output.budget</span> through their policy objects.</td></tr>
+      <tr><td class="k">version</td><td class="s">Managed by the pipeline. Incremented automatically on every accepted edit.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="prose">
+    <h3>Six immutable invariants</h3>
+    <p>These are correctness and trust properties, not optimisation choices. They are not in the file at all. Carbon publishes them beside the editable schema so an external improver does not waste proposals on behaviour it is intentionally forbidden to weaken.</p>
+  </div>
+
+  <table class="tbl">
+    <thead><tr><th>Invariant</th><th>What it guarantees</th></tr></thead>
+    <tbody>
+      <tr><td class="k">tool_argument_validation</td><td class="s">Malformed or incomplete tool calls never execute.</td></tr>
+      <tr><td class="k">unique_atomic_edits</td><td class="s">An edit must match exactly once and report the resulting diff.</td></tr>
+      <tr><td class="k">workspace_and_secret_boundaries</td><td class="s">No strategy may expand file access or weaken secret-file refusal.</td></tr>
+      <tr><td class="k">subagent_workspace_identity</td><td class="s">Delegated workers use the workspace explicitly bound by the parent, read-only. A worker runs under its own Policy, so a mutating tool would execute outside the parent's approval gate.</td></tr>
+      <tr><td class="k">verification_integrity</td><td class="s">Fresh, real test receipts and fail-closed verification are not editable.</td></tr>
+      <tr><td class="k">strategy_registry_and_config_validation</td><td class="s">Refinery may <b>select</b> vetted strategies. It may not install executable code hooks.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="prose">
+    <div class="rule-box">
+      <span class="t">Why the last invariant is the load-bearing one</span>
+      <p>Refinery selects from menus that Carbon authored and reviewed. So when Refinery finds an improvement no menu value can express, it cannot invent one. It has to write the request down and hand it to a person.</p>
+      <p>There are exactly three candidate kinds. A <b>configuration_candidate</b> can be applied and evaluated automatically. A <b>strategy_surface_gap</b> needs a reviewed Carbon strategy implementation first. A <b>correctness_defect</b> needs a locked Carbon fix, and must never become a knob.</p>
+      <p><span class="term">offload_to_file</span> started as the second kind. E3 held that slot from the suite repair onward, recorded as "needs a tool_output strategy that preserves the middle of a large result — an offload that hands back a retrievable path". A person read that request and implemented the strategy. The gap entry left the table when the strategy shipped, not when the task was softened.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ COVERAGE -->
+<section id="coverage">
+  <div class="prose">
+    <span class="num">Part six</span>
+    <h2>Which fields are observed</h2>
+    <p class="lede">A field is only safe to tune if some task can report that you made things worse.</p>
+    <p>Refinery's coverage table assigns each field three roles, and the ordering between them is what the tests enforce.</p>
+    <ul class="plain">
+      <li><b>Observers</b> — tasks whose mechanism genuinely routes through this field <i>and</i> whose verdict some legal value can move. "Reads a tool result" is not enough: a 45-character result never meets a 4,000-character budget, so the task is invariant and the coverage is decorative.</li>
+      <li><b>Miners</b> ⊆ observers — observers with failure headroom that moving the field could turn green.</li>
+      <li><b>Guards</b> ⊆ observers — observers that can still regress, meaning their prior is not already <span class="term">fail</span>. A task already at 0.0 cannot drop further.</li>
+    </ul>
+  </div>
+
+  <table class="tbl">
+    <thead><tr><th>Field</th><th>Miners</th><th>Guards</th><th>Standing</th></tr></thead>
+    <tbody>
+      <tr><td class="k">system_prompt</td><td class="s">every live task with headroom</td><td class="s">every live task expected to pass</td><td><span class="flag ok">Mined + guarded</span></td></tr>
+      <tr><td class="k">temperature</td><td class="s">every live task with headroom</td><td class="s">every live task expected to pass</td><td><span class="flag ok">Mined + guarded</span></td></tr>
+      <tr><td class="k">tool_output</td><td class="s">E1, E3, E4</td><td class="s">E2, D3</td><td><span class="flag ok">Mined + guarded</span></td></tr>
+      <tr><td class="k">compaction</td><td class="s">G4</td><td class="s">A1, G2</td><td><span class="flag ok">Mined + guarded</span></td></tr>
+      <tr><td class="k">compaction_prompt</td><td class="s">G4</td><td class="s">A1, G2</td><td><span class="flag ok">Mined + guarded</span></td></tr>
+      <tr><td class="k">verify_attempts</td><td class="s">B1, B2, B3</td><td class="s">B2, B3</td><td><span class="flag ok">Mined + guarded</span></td></tr>
+      <tr><td class="k">max_tokens</td><td class="s">none</td><td class="s">G1</td><td><span class="flag">Guard only</span></td></tr>
+      <tr><td class="k">max_tool_steps</td><td class="s">none</td><td class="s">F1, F2, G3</td><td><span class="flag">Guard only</span></td></tr>
+      <tr><td class="k">default_context_limit</td><td class="s">none</td><td class="s">A1, A3</td><td><span class="flag">Guard only</span></td></tr>
+      <tr><td class="k">retry</td><td class="s">none</td><td class="s">H1</td><td><span class="flag">Guard only</span></td></tr>
+      <tr><td class="k">file_injection</td><td class="s">A4</td><td class="s"><b>none</b></td><td><span class="flag gap">Unguarded</span></td></tr>
+    </tbody>
+  </table>
+
+  <div class="prose">
+    <p><b>Guard-only</b> is not a defect. It means every observer already passes, so there is nothing to mine and only something to protect. Four fields sit there. Note the precise claim for <span class="term">max_tool_steps</span>: it has nine observers <i>with</i> failure headroom, but none of them fails on tool-round depth, so raising the budget cannot turn any of them green. "No failing observer" would be plainly false.</p>
+    <p><b>Unguarded</b> is a real gap, recorded rather than hidden behind a guard that cannot see the field. <span class="term">file_injection</span>'s only observer is <span class="tid">A4</span>, which is also its miner, so a candidate can be measured as an improvement with nothing able to catch a matching regression. Closing it needs a second <span class="term">@path</span> task with a passing prior.</p>
+    <p>One more absence worth naming explicitly: <span class="term">base_delay_ms</span> is observed by nobody. It only feeds <span class="term">time.sleep</span>, and no verifier measures elapsed time.</p>
+    <p>The table also carries no capability gaps today. That slot was held by E3 — "needs a strategy that preserves the middle of a large result" — until Carbon shipped <span class="term">offload_to_file</span>, at which point E3 moved to that field's miners with E4 alongside it to prove path-recoverability specifically.</p>
+
+    <div class="rule-box">
+      <span class="t">What no test can enforce, stated plainly</span>
+      <p>The observer tuples are authored assertions about Carbon's internals. An audit found six of them false at once, and padding a row with irrelevant task names satisfies every mechanical check — the subset rules only relate the roles to each other, never to Carbon. A reviewer has demonstrated a plausible new field passing the whole contract with no real coverage.</p>
+      <p>So this is a human-audited claim with mechanical guardrails, not a proof. Changing a row means re-measuring, not editing a tuple. The table also lives in <span class="term">loop/</span> rather than <span class="term">runner/</span> on purpose: <span class="term">runner_sha</span> is a content hash of the runner package and every recorded result is stamped with it, so correcting a row here does not invalidate every baseline.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ GLOSSARY -->
+<section id="glossary">
+  <div class="prose">
+    <span class="num">Part seven</span>
+    <h2>Glossary</h2>
+    <p class="lede">Terms this page uses, and where they appear in the source.</p>
+  </div>
+
+  <table class="tbl">
+    <thead><tr><th>Term</th><th>Meaning</th><th>In the code</th></tr></thead>
+    <tbody>
+      <tr><td class="s"><b>Harness</b></td><td class="s">Everything around the model: context budget, truncation, compaction, tool loop, retry policy, system prompt.</td><td class="k">harness/</td></tr>
+      <tr><td class="s"><b>Editable surface</b></td><td class="s">The one versioned JSON file holding every behavioural config field.</td><td class="k">harness_config.json</td></tr>
+      <tr><td class="s"><b>Config field</b></td><td class="s">One value on the surface. Eleven are editable; seven are locked.</td><td class="k">knob, field</td></tr>
+      <tr><td class="s"><b>Strategy menu</b></td><td class="s">The bounded enum of values a strategy field accepts. Carbon authors the menu; Refinery selects from it.</td><td class="k">strategy</td></tr>
+      <tr><td class="s"><b>Truncation</b></td><td class="s">Cutting one oversized item before it enters the context window.</td><td class="k">limits.py</td></tr>
+      <tr><td class="s"><b>Marker</b></td><td class="s">The line appended by truncation recording how many characters were dropped and under which strategy.</td><td class="k">truncation marker</td></tr>
+      <tr><td class="s"><b>Recovery footer</b></td><td class="s">The line offload_to_file appends, naming the spilled file and the exact next call.</td><td class="k">_footer</td></tr>
+      <tr><td class="s"><b>Compaction</b></td><td class="s">Replacing the middle of the transcript with one checkpoint message.</td><td class="k">compaction.py</td></tr>
+      <tr><td class="s"><b>Checkpoint</b></td><td class="s">The system message that replaces the compacted middle.</td><td class="k">checkpoint.py</td></tr>
+      <tr><td class="s"><b>Miner</b></td><td class="s">An observer with failure headroom that this field could turn green.</td><td class="k">miners</td></tr>
+      <tr><td class="s"><b>Guard</b></td><td class="s">An observer that can still regress, so a bad value would break it.</td><td class="k">guards</td></tr>
+      <tr><td class="s"><b>Candidate</b></td><td class="s">One proposed config edit, waiting to be measured.</td><td class="k">candidate</td></tr>
+      <tr><td class="s"><b>Strategy surface gap</b></td><td class="s">An improvement no menu value can express. A written request for a person, never a config edit that approximates one.</td><td class="k">strategy_surface_gap</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<footer>
+  <div>Companion page: <a href="clusters-explained.html">What Refinery tests, and why each test exists</a> — the 8 clusters and all 27 tasks.</div>
+  <div style="margin-top:8px">Source: <span class="term">harness/harness_config.py</span> for the schema and the loader · <span class="term">harness/limits.py</span> and <span class="term">harness/compaction.py</span> for the strategy registries · <span class="term">harness/agent.py</span> for the retry registry and the verification gate · <span class="term">loop/knob_coverage.py</span> for coverage.</div>
+  <div style="margin-top:8px">Values are config version 7. Run <span class="term">uv run python -m loop.cli surface</span> for the live contract.</div>
+</footer>
+
+</div>
+</body>
+</html>

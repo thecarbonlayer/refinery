@@ -788,19 +788,104 @@ def _require_supported(where: str, calibration: SectionCalibration, *results: di
         )
 
 
-def _collapses(baseline: dict, candidate: dict, excluded: frozenset[str] | set[str]) -> list[str]:
-    """Tasks that went from a full pass to zero — the catastrophic per-task veto.
+def _full_pass_established(name: str, record: dict, calibration: SectionCalibration | None) -> bool:
+    """Is this task's FULL-PASS STATUS established, or merely observed once?
 
-    Shared by `evaluate()` and `confirmed()` so the two cannot drift: the confirmation
-    is the ONLY road to ACCEPT, so a protection that runs on the first measurement and
-    not on the second is a protection with a door in it.
+    The veto below reads a single baseline arm. For a task whose full-pass status is an
+    established fact, a 1.00 in that arm CONFIRMS a standing claim and a fall to zero is
+    a catastrophe. For a task with no such status, the same 1.00 is one sample, and the
+    fall is what "we do not know this task's rate" predicts. Two sources of establishment,
+    both already first-class in this program:
+
+    - ``expected_baseline == "pass"``: the registry's authored, human-reviewed claim that
+      the task holds, carried in the measurement itself (``runner/suite.py`` stamps it per
+      task). ``loop.knob_coverage`` already splits guards and miners on exactly this field,
+      and says in as many words that an ``uncertain`` prior is weaker than a ``pass`` one.
+    - membership in the calibration's COVERED set: the campaign measured a null
+      distribution for these, so their status is established by data rather than by
+      authoring. This is what keeps A1/G2/G5/CMP-7 — all authored ``uncertain`` because
+      nothing had measured them yet — fully protected.
+
+    A record with NO prior at all is treated as ESTABLISHED, deliberately — but NOT for
+    the reason first written here. That reason claimed the default protects historical
+    records; it does not. ``runner/suite.py`` stamps ``expected_baseline``
+    unconditionally, and a sweep of all 63 committed aggregate results found the field
+    on every one of their 987 task records. There is no legacy case. The default applies
+    only to synthetic or malformed records — chiefly this repo's own test fixtures.
+
+    It is kept because its FAILURE DIRECTION is the safe one. Treating an absent prior as
+    established can only cause a false REJECT, never a wrong ACCEPT; treating it as
+    unestablished would do the reverse. Where a rule must guess, it should guess toward
+    refusing the candidate.
     """
-    return sorted(
+    if calibration is not None and name in calibration.covered:
+        return True
+    prior = record.get("expected_baseline")
+    return prior is None or prior == "pass"
+
+
+def _collapses(
+    baseline: dict,
+    candidate: dict,
+    excluded: frozenset[str] | set[str],
+    calibration: SectionCalibration | None = None,
+) -> tuple[list[str], list[str]]:
+    """Tasks that went from a full pass to zero, split by whether that full pass was an
+    ESTABLISHED status: ``(established, unestablished)``. Only the first list vetoes.
+
+    Both `evaluate()` and `confirmed()` call this, and they treat the two lists
+    DIFFERENTLY on purpose — see `confirmed()` for the arithmetic. The established list
+    vetoes at both stages. The unestablished list is recorded and not vetoed at stage 1,
+    where a screening measurement at 3-5 attempts produces one by pure noise about 21% of
+    the time across a full suite; it VETOES at the confirmation, where the same movement
+    at 10 attempts is a 1.4e-05 event and the outcome on the table is ACCEPT.
+
+    So the catastrophic protection still has no door in it: every collapse blocks the
+    only road to ACCEPT. What changed is that a single screening sample no longer
+    rejects a candidate before it can be measured properly.
+
+    WHY THE SPLIT (2026-08-22). The veto used to fire on any task reading exactly 1.00
+    in the baseline arm. That is sound for a task with a standing full-pass claim and
+    unsound for a task without one, and the difference started to matter when whole new
+    suites entered the default registry: every candidate validation runs the suite
+    UNFILTERED, and this veto reads the whole result set even under a calibration whose
+    split means read only the supported set. A new task with an ``uncertain`` prior that
+    scored 3/3 then 0/3 from ordinary variance — around 1.6% per pair at a true rate
+    near 0.5, and there are now many such tasks — would REJECT a candidate that had
+    cleared every calibrated bound. An uncalibrated task must not veto a calibrated
+    decision.
+
+    What is deliberately NOT done: the unestablished collapse is never dropped. At stage
+    1 it is recorded as context; at the confirmation it is a reason. Narrowing what a
+    rule VETOES on must never narrow what it REPORTS — the same principle
+    ``unreachable_probable`` already follows, and the reason a reader of the record still
+    sees every collapse this run measured.
+    """
+    fell = [
         n
         for n in baseline["tasks"]
         if n not in excluded
         and _exact(baseline["tasks"][n]) == 1
         and _exact(candidate["tasks"][n]) == 0
+    ]
+    established = sorted(
+        n for n in fell if _full_pass_established(n, baseline["tasks"][n], calibration)
+    )
+    unestablished = sorted(set(fell) - set(established))
+    return established, unestablished
+
+
+def _unestablished_collapse_note(names: list[str]) -> str:
+    """The recorded observation for a collapse that does not veto. Names the tasks and
+    says plainly why it is not a verdict, so nobody reads its absence from `reasons` as
+    the collapse having gone unnoticed."""
+    return (
+        "collapsed to zero but NOT vetoing, full-pass status not established: "
+        + ", ".join(names)
+        + " — each read 1.00 in this baseline arm alone, with no `pass` prior and no "
+        "measured null distribution, so a fall to zero is within what an unmeasured rate "
+        "predicts and this pair cannot tell it from a real regression; recorded for a "
+        "human, and for the task's own calibration when it earns one"
     )
 
 
@@ -886,8 +971,9 @@ def evaluate(
                 )
 
     # Complete-collapse veto, causal-filtered: a collapse the edited section cannot
-    # reach is the grader's noise wearing the candidate's name.
-    collapses = _collapses(baseline, candidate, excluded)
+    # reach is the grader's noise wearing the candidate's name. Established status only
+    # (see `_collapses`); an unestablished collapse is recorded as context below.
+    collapses, unestablished_collapses = _collapses(baseline, candidate, excluded, calibration)
     if collapses:
         reasons.append("full-pass task collapsed to zero: " + ", ".join(collapses))
 
@@ -927,8 +1013,15 @@ def evaluate(
     # assembles it: appending to `reasons` here would make the `if reasons:` REJECT
     # below fire on a run whose only "reason" is a note about what was not subtracted.
     context: tuple[str, ...] = ()
+    if unestablished_collapses:
+        context += (_unestablished_collapse_note(unestablished_collapses),)
+    # `+=`, never `=`. This branch REBOUND the tuple until 2026-08-22, which silently
+    # discarded the collapse note appended just above whenever both applied — and
+    # production passes `unreachable_probable` on exactly the calibrated path where the
+    # collapse note matters most (`loop/validate.py`). A channel that drops one note
+    # when a second arrives is worse than no channel, because the gap is invisible.
     if unreachable_probable:
-        context = (
+        context += (
             "unreachable_probable, kept in the means (evidence-grade, not proof): "
             + ", ".join(sorted(unreachable_probable))
             + " — the edited knob showed no activity on these, but it can CREATE that "
@@ -1276,9 +1369,53 @@ def confirmed(
     # collapsing to zero invisible to every other check in this function. It is not a
     # calibration-only guard: an uncalibrated pair could always hide a collapse behind
     # a split mean that stayed inside its allowance, and now it cannot.
-    collapses = _collapses(confirm_baseline, confirm_candidate, excluded)
+    collapses, unestablished_collapses = _collapses(
+        confirm_baseline, confirm_candidate, excluded, calibration
+    )
     if collapses:
         reasons.append("full-pass task collapsed to zero: " + ", ".join(collapses))
+    # HERE, unlike `evaluate()`, an UNESTABLISHED collapse vetoes too. The suppression
+    # is stage-1 only, and the asymmetry is the whole point rather than an oversight:
+    #
+    #   - This function is the only road to ACCEPT. `evaluate()` can only screen.
+    #   - Both arms of this pair are FRESH, so a collapse here is an independent
+    #     observation — a second one when stage 1 saw it too, a first one at higher
+    #     power when it did not.
+    #   - The counts differ by an order of magnitude in what noise can produce. With
+    #     both arms fresh, the chance a collapse is noise is P(full pass) x P(zero) at
+    #     that stage's attempt count, worst case over the true rate: 1.6e-02 per task at
+    #     n=3 (about 21% across the ~15 unestablished tasks a full suite now carries),
+    #     against 9.5e-07 at the confirmation's n=10 (about 1.4e-05 across the same
+    #     set). Suppressing here would buy a negligible reduction in false rejections.
+    #   - It would pay for it with the one wrong-ACCEPT path this rule has. A task with
+    #     an `uncertain` prior outside the covered set has no carrier quantile, no guard
+    #     quantile and no place in the supported means: with the veto suppressed its
+    #     mechanical safety margin is exactly zero, so a real regression would ride to
+    #     ACCEPT as a note. A false REJECT here costs one rerun; a wrong ACCEPT ships a
+    #     regression, which is the failure this program exists to prevent.
+    #
+    # Recurrence across the two stages was considered as the discriminator and rejected
+    # on the code: a `Decision` carries `improved_tasks` (gains only) and split means,
+    # never a per-task movement map, so the first decision's collapses are not available
+    # here in structured form. Making them so is a record-shape change to something that
+    # round-trips through disk; this rule needs no new field, and a collapse at these
+    # counts is already decisive on its own.
+    if unestablished_collapses:
+        reasons.append(
+            "full-pass task collapsed to zero in the confirmation: "
+            + ", ".join(unestablished_collapses)
+            + " — full-pass status is not established for "
+            + ("it" if len(unestablished_collapses) == 1 else "these")
+            + " (no `pass` prior, outside the calibration's covered set), which is why "
+            "the same movement was recorded and NOT vetoed in the first decision. This "
+            "is the ACCEPT gate and both arms here are fresh, so the movement is an "
+            "independent observation at the confirmation's own attempt counts rather "
+            "than the single screening sample it was at stage 1"
+        )
+    # Nothing is left as context-only in this function: every collapse it sees is now a
+    # reason. The channel stays for future non-vetoing notes and so both return sites
+    # below keep the same shape as `evaluate()`'s.
+    context: tuple[str, ...] = ()
 
     # Mechanical: same unconditional veto as evaluate(), same reason wording — it does
     # not matter that this is the confirmation and not the first run.
@@ -1411,7 +1548,7 @@ def confirmed(
     if reasons:
         return Decision(
             outcome=REJECT,
-            reasons=tuple(reasons),
+            reasons=tuple(reasons) + context,
             delta_in=report[0],
             delta_ho=report[1],
             threshold_in=report[2],
@@ -1440,7 +1577,7 @@ def confirmed(
         )
     return Decision(
         outcome=ACCEPT,
-        reasons=(accepted_reason,),
+        reasons=(accepted_reason,) + context,
         delta_in=report[0],
         delta_ho=report[1],
         threshold_in=report[2],

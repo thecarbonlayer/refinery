@@ -568,3 +568,28 @@ def test_open_pr_refuses_rejected(repos):
             gh_run=None,
             log=lambda *_: None,
         )
+
+
+def test_pr_body_prose_matches_the_collapse_rule_as_it_actually_is():
+    """A PR body is what a human approves a merge from, so its prose is part of the
+    rule's interface.
+
+    Both render paths asserted that a full-pass -> zero movement is a promotion veto
+    FULL STOP. Since 2026-08-22 that is only true at the confirmation: in the first
+    decision the veto applies where full-pass status is established and the movement is
+    merely recorded elsewhere. A body could therefore print "collapsed to zero but NOT
+    vetoing" from the decision's own reasons directly beside prose swearing the
+    opposite. Pinned at the source because both occurrences are format strings rendered
+    on different branches (calibrated and uncalibrated), and a test that exercised only
+    one would leave the other free to drift.
+    """
+    source = (REPO_ROOT / "loop" / "prpipe.py").read_text()
+    assert "promotion veto even when" not in source, (
+        "the unconditional-veto claim is back in a PR body; the first decision vetoes "
+        "only on established full-pass status"
+    )
+    assert source.count("promotion veto at the confirmation even when") == 2, (
+        "both render paths (calibrated and uncalibrated) must carry the corrected claim"
+    )
+    # The qualifier itself, not just the absence of the old sentence.
+    assert source.count("only where full-pass status is established") == 2

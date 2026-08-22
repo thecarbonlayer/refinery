@@ -105,9 +105,15 @@ SUITE_WIDE_KNOBS = frozenset({"system_prompt", "temperature"})
 # for the buried fact. So it is a guard on the row, not a miner: the regression it
 # watches for is a budget (or an offload strategy) that changes how much bulk the
 # fact has to survive.
+# ONB-1/ONB-4 added 2026-08-21 with the onboarding candidate suite: each registers
+# the read-only trio and reads seeded files back whole, so a legal budget below the
+# largest seeded source cuts the very bytes their oracles need (ONB-1's pointer
+# target; ONB-4's stale README, whose read is also the task's live premise). Guards
+# on the row, never miners — their priors are `uncertain` and the regression they
+# watch is a budget that stops the reads arriving intact.
 _TOOL_RESULT_READERS = (
     "A2", "B1", "B2", "B3", "C3", "CMP-7", "D1", "D2", "D3",
-    "E1", "E2", "E3", "E4", "F1", "F2", "G3",
+    "E1", "E2", "E3", "E4", "F1", "F2", "G3", "ONB-1", "ONB-4",
 )  # fmt: skip
 
 # The budget below which each task's largest tool result stops arriving intact.
@@ -123,6 +129,19 @@ MEASURED_BREAK_BUDGETS: dict[str, int] = {
     "D1": 8,  # the answer itself, read back out of the tool result by `tool_texts`
     "D2": 6,  # same shape as D1
     "F1": 113,  # already listed before this pass
+    # Measured 2026-08-22 by running carbon's own `truncate_tool_result` over the
+    # ORACLE-RELEVANT read — the file each verdict needs, not whichever seeded file
+    # happens to be largest. Same convention as the entries above: the budget below
+    # which that read stops arriving INTACT, i.e. its own length.
+    # The verdict-level threshold is lower and is measured too, because `head_tail`
+    # keeps spanning the sentinel for a while below the intact point: ONB-1 loses its
+    # token at 263 and below, ONB-4 its stale copy at 159 and below. So each number
+    # here is an UPPER bound on where this knob starts perturbing the task — sufficient
+    # for the observer/guard classification, and not a claim the verdict flips there.
+    # `tests/test_registry.py` pins both thresholds through the real door, so neither a
+    # fixture resize nor a strategy change can drift past this table.
+    "ONB-1": 340,  # docs/release.md, the pointer target the oracle needs read whole
+    "ONB-4": 262,  # README.md, the stale copy whose read is the live premise
 }
 
 # Every task that makes any tool call at all, so the per-turn round budget binds
@@ -136,9 +155,12 @@ MEASURED_BREAK_BUDGETS: dict[str, int] = {
 # and nobody re-read this one.
 # CMP-7 makes three `bash` calls across three turns and needs a call-then-answer
 # round on each, so a `max_tool_steps` of 1 binds it.
+# ONB-1/ONB-4 (2026-08-21) each need at least one read round before answering —
+# ONB-1's discovery may take several (list/search, then read) — so a per-turn round
+# budget binds them like every other tool user.
 _TOOL_USERS = (
     "A2", "B1", "B2", "B3", "C1", "C2", "C3", "CMP-7", "D1", "D2", "D3",
-    "E1", "E2", "E3", "E4", "F1", "F2", "G3", "G5",
+    "E1", "E2", "E3", "E4", "F1", "F2", "G3", "G5", "ONB-1", "ONB-4",
 )  # fmt: skip
 
 KNOB_COVERAGE: dict[str, dict[str, tuple[str, ...]]] = {
@@ -214,6 +236,8 @@ KNOB_COVERAGE: dict[str, dict[str, tuple[str, ...]]] = {
             "F1",
             "F2",
             "G3",
+            "ONB-1",
+            "ONB-4",
         ),  # fmt: skip
     },
     # F2 forces 10 model calls and fails at any budget <= 9 — the only binding

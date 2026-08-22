@@ -13,6 +13,7 @@ from runner.tasks import (
     cluster_f,
     cluster_g,
     cluster_h,
+    cluster_i,
 )
 
 TASKS: list[TaskSpec] = [
@@ -28,4 +29,5 @@ TASKS: list[TaskSpec] = [
     # the eight lettered clusters, and a stable suite order keeps recorded logs
     # comparable across the boundary.
     *cluster_ctx.SPECS,
+    *cluster_i.SPECS,
 ]
