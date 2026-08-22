@@ -309,7 +309,7 @@
 <header>
   <p class="eyebrow rise">A guide for people new to this codebase</p>
   <h1 class="rise">What Refinery tests,<br>and <em>why each test exists</em></h1>
-  <p class="standfirst rise">Refinery is a benchmark harness. It grades Carbon, a coding agent, from outside Carbon's own repository. This page explains the eight task clusters and all 27 tasks.</p>
+  <p class="standfirst rise">Refinery is a benchmark harness. It grades Carbon, a coding agent, from outside Carbon's own repository. This page explains the eight lettered task clusters and the 27 tasks they held when it was written, in August 2026. The suite has grown since — A5 and the CMP scenario guards joined those clusters, and four candidate suites (CTX, ONB, VER/LOOP, SEL) were added in the days after. <code>runner/tasks/</code> is the registry; this page is a snapshot, not a count.</p>
   <div class="meta rise">
     <span><b>8</b> clusters</span>
     <span><b>27</b> tasks</span>
@@ -424,6 +424,10 @@
       <p>A candidate that moves any single task from a 1.0 baseline pass fraction to 0.0 is rejected, even when another task's gain hides the collapse inside the split average.</p>
     </div>
     <p>Smaller per-task regressions stay visible as warnings rather than hard failures. Three- and five-attempt fractions are noisy, so small movement is not signal.</p>
+    <div class="rule-box">
+      <span class="t">Since this page was written</span>
+      <p>The rule above is what <code>runner delta</code> <b>reports</b>. It is no longer what promotes. Measured against six runs with nothing changed between them, it wrongly accepted 6 of the 12 pairs, so <code>loop/acceptance.py</code> replaced it with three outcomes: <b>REJECT</b>, <b>CONFIRM</b> (a real gain, promising but not accepted), and <b>ACCEPT</b>, which only a fresh paired re-run can reach. The collapse veto is also no longer the only one — a rise in mechanical security failures blocks unconditionally. See the README's <i>Deciding</i> section.</p>
+    </div>
   </div>
 
   <figure>
