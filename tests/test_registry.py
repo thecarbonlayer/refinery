@@ -26,7 +26,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # loop-discipline one (cluster_v.py) — both registered, neither consumed by any
 # calibrated gate (their own isolation tests pin that). The Phase 4 context
 # candidates live in cluster "A", the mechanism family owning the @path door.
-CLUSTERS = frozenset("ABCDEFGHIV")
+CLUSTERS = frozenset("ABCDEFGHISV")
+# A set, not the string "ABCDEFGHS": `"EF" in "ABCDEFGHS"` is True, so a substring
+# test would accept a malformed multi-letter cluster id. "S" (Select) is the
+# tool-exposure section — out of letter sequence deliberately, so the parallel
+# task-authoring streams (decision 20) don't all claim "I".
 
 # Phase 1 measurement contract §6's vetted primitive vocabulary, copied verbatim
 # from the plan's Global Constraints list (exactly 12) — never re-derived from
@@ -163,13 +167,19 @@ def test_registry_shape():
     # one assertion that catches a task added to a cluster's SPECS and nowhere else —
     # the membership set below would have to be edited to hide it, which is a
     # deliberate act rather than an omission.
-    assert len(names) == 47
+    assert len(names) == 51
     # 28 through Phase 2b, 31 once the Phase 2c scenario guards landed, 37 with
     # the cluster-V verification/loop candidate suite. A literal count is the one
     # assertion that catches a task added to a cluster's SPECS and nowhere else —
     # the membership set below would have to be edited to hide it, which is a
     # deliberate act rather than an omission.
-    assert len(names) == 47
+    assert len(names) == 51
+    # 28 through Phase 2b, 31 once the Phase 2c scenario guards landed, 35 with
+    # the tool-exposure section (SEL-2..5, program/sel-task-authoring). A literal
+    # count is the one assertion that catches a task added to a cluster's SPECS and
+    # nowhere else — the membership set below would have to be edited to hide it,
+    # which is a deliberate act rather than an omission.
+    assert len(names) == 51
     for t in TASKS:
         assert t.split in ATTEMPTS
         assert t.cluster in CLUSTERS
@@ -226,6 +236,10 @@ def test_registry_membership():
         "LOOP-4",
         "LOOP-5",
         "LOOP-6",
+        "SEL-2",
+        "SEL-3",
+        "SEL-4",
+        "SEL-5",
     }
     held_in = {t.name for t in TASKS if t.split == "held_in"}
     held_out = {t.name for t in TASKS if t.split == "held_out"}
@@ -262,11 +276,9 @@ def test_registry_membership():
         "VER-4",
         "LOOP-2",
         "LOOP-4",
+        "SEL-2",
+        "SEL-4",
     }
-    # V splits are 3/3 by design at authoring (LOOP-2 held_in per the miner-analog
-    # precedent, the LOOP-3/LOOP-4 twins split across — see cluster_v.SPECS); the
-    # FINAL assignment is a phase-gate input (decision 14's complements), so a
-    # reassignment edits this pin deliberately.
     assert held_out == {
         "A3",
         "A4",
@@ -286,6 +298,8 @@ def test_registry_membership():
         "LOOP-3",
         "LOOP-5",
         "LOOP-6",
+        "SEL-3",
+        "SEL-5",
     }
 
 
@@ -858,6 +872,7 @@ _AGENT_CONSTRUCTORS = frozenset(
         "_agent",
         "_fault_agent",
         "_v_agent",
+        "_sel_agent",  # cluster_s: same single-return shape as _calculator_agent
     }
 )
 
@@ -936,6 +951,7 @@ _TASK_CLUSTER_MODULES = (
     "cluster_h",
     "cluster_i",
     "cluster_v",
+    "cluster_s",
 )
 
 

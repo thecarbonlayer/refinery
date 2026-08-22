@@ -356,6 +356,29 @@ KNOB_COVERAGE: dict[str, dict[str, tuple[str, ...]]] = {
     # which makes it a canary for carbon's retry CODE and not an observer of this
     # knob at all. `base_delay_ms` is observed by nobody; it only feeds `time.sleep`.
     "retry": {"observers": ("H1",), "miners": (), "guards": ("H1",)},
+    # tool_exposure (carbon seam 3, Select; program/tool-exposure-knob +
+    # program/sel-task-authoring). Every tool-carrying agent routes its offered
+    # set through `Agent._exposed_specs`, but this row claims only the tasks
+    # DESIGNED to discriminate exposure values, plus the roadmap's named
+    # cross-section guards. The SEL tasks (cluster_s) each pin one axis: SEL-2
+    # is the miner (one relevant tool among 30 plausible decoys — the map's
+    # prerequisite shape, `uncertain` prior because nothing has measured a
+    # 31-tool registry); SEL-3 (near-duplicate decoy), SEL-4 (exposure order:
+    # any query_match k <= 30 removes its needed tool, proven offline through
+    # carbon's own selector), and SEL-5 (vocabulary mismatch: any k <= 6
+    # removes the only tool that can answer) guard the ways a filtering value
+    # can win the miner and quietly break selection. D1/D2 are the roadmap's
+    # own guard clause — "the needed calculator must never be selected away" —
+    # a registry-of-one shape none of the SEL fixtures covers. NOTE: the SEL
+    # section is UNCALIBRATED (tests/test_sel_tasks.py proves its names appear
+    # in no committed calibration artifact); this row states reachability, not
+    # measured rates, and no SEL number gates anything until the section's own
+    # null campaign runs (decision 20).
+    "tool_exposure": {
+        "observers": ("SEL-2", "SEL-3", "SEL-4", "SEL-5", "D1", "D2"),
+        "miners": ("SEL-2",),
+        "guards": ("SEL-3", "SEL-4", "SEL-5", "D1", "D2"),
+    },
 }
 
 # Knobs no observer fails BECAUSE OF: the loop may defend them but has nothing to
