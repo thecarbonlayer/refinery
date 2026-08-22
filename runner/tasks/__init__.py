@@ -12,6 +12,7 @@ from runner.tasks import (
     cluster_f,
     cluster_g,
     cluster_h,
+    cluster_v,
 )
 
 TASKS: list[TaskSpec] = [
@@ -23,4 +24,8 @@ TASKS: list[TaskSpec] = [
     *cluster_f.SPECS,
     *cluster_g.SPECS,
     *cluster_h.SPECS,
+    # cluster V is the verification/loop-discipline CANDIDATE suite: runnable,
+    # but outside every calibrated gate and campaign set until its human gate
+    # (tests/test_cluster_v.py pins the isolation).
+    *cluster_v.SPECS,
 ]
