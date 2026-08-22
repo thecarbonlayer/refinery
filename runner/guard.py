@@ -185,10 +185,16 @@ def _is_non_string(base_url) -> bool:
     check ran, so a directly built pinned provider recorded one into the
     behavior key.
 
-    ``isinstance``, not ``type(...) is str``: a str subclass IS a string and
+    The test is the real TYPE HIERARCHY, not ``isinstance``: ``isinstance``
+    consults ``__class__``, which any object may set to ``str``, and such a
+    proxy passed the predicate, reached ``urlsplit`` at all three sites, and
+    classified LOCAL (skipping the pin gate) — while a falsey one was handed
+    back unchanged by the normalizer and recorded into a behavior key.
+    ``issubclass(type(x), str)`` reads the type slot, which no attribute can
+    spoof, and still accepts a genuine str SUBCLASS — that is a string and
     keeps working. None is not filtered here — callers decide, and for the
     normalizer and the record gate an unset base is a real recorded state."""
-    return not isinstance(base_url, str)
+    return not issubclass(type(base_url), str)
 
 
 def _has_control_or_whitespace(base_url: str) -> bool:
