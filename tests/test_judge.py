@@ -904,3 +904,254 @@ def test_pairs_from_record_asserts_no_clean_denial_with_ground_truth():
     # This should raise an AssertionError with a clear message.
     with pytest.raises(AssertionError, match="clean denial.*ground_truth"):
         judge_validate.pairs_from_record(synthetic_record, "synthetic.jsonl")
+
+
+# --- Transport: bounded retry and pacing (delivery, never verdicts) --------------
+#
+# Measured 2026-08-21 on the pinned OpenRouter/Novita base: a live re-validation
+# scored 0.899 agreement (571/635) and failed its gate. All 58 undelivered pairs
+# were HTTP 429, spread from index 11 to 634 in 37 bursts (longest 6), at a
+# sustained ~50 requests/minute. Delivered-only agreement was 0.9896 with zero
+# false approvals — the judge was sound, the transport was not. These tests pin
+# the two halves of the fix and, just as importantly, its boundary: retry may
+# turn a NON-verdict into a verdict, and must never turn one verdict into another.
+
+_HTTP_429 = (
+    "Client error '429 Too Many Requests' for url 'https://openrouter.ai/api/v1/chat/completions'"
+)
+
+
+def _flaky(faults: list[Exception], reply: str = "VERDICT: YES\nQUOTE: a"):
+    """A responder that raises ``faults`` in order, then answers ``reply``."""
+    remaining = list(faults)
+
+    def responder(messages):
+        if remaining:
+            raise remaining.pop(0)
+        return reply
+
+    return responder
+
+
+def test_a_transient_fault_is_retried_and_can_still_deliver(slept):
+    """The defect, inverted. One 429 used to be terminal for its pair: judged_equivalent
+    caught the provider exception and returned ran=False, so the pair scored as an
+    undelivered non-verdict. It now retries under a bounded backoff and delivers."""
+    provider = fake(scripted=_flaky([RuntimeError(_HTTP_429)]))
+
+    judgment = judged_equivalent("E", "a", provider)
+
+    assert judgment.ran is True and judgment.verdict is True
+    assert judgment.attempts == 2
+    assert judgment.faults == ("http_429",)
+    assert slept == [2.0]  # carbon's policy: base_delay_ms=2000, doubling
+
+
+def test_a_persistent_fault_still_records_undelivered(slept):
+    """The fail-closed contract does not change. Retries are BOUNDED: a fault that
+    outlives the budget still records ran=False, so a throttled judge degrades the
+    pair rather than silently becoming a verdict."""
+    from runner.judge import JUDGE_RETRY
+
+    def always_429(messages):
+        raise RuntimeError(_HTTP_429)
+
+    judgment = judged_equivalent("E", "a", fake(scripted=always_429))
+
+    assert judgment.ran is False and judgment.verdict is False
+    assert judgment.quote == ""
+    assert "provider error" in judgment.raw and "429" in judgment.raw
+    assert judgment.attempts == JUDGE_RETRY.max_attempts == 5
+    assert judgment.faults == ("http_429",) * 5
+    assert slept == [2.0, 4.0, 8.0, 16.0]  # bounded: four waits, then it gives up
+
+
+def test_a_persistent_fault_still_counts_as_undelivered_in_the_artifact():
+    """And the same thing seen from the scorer: an exhausted retry budget is still a
+    pair with no verdict — not agreement, in the disagreement list, and counted in
+    ``undelivered_count``. Scoring is untouched by the retry."""
+
+    def always_429(messages):
+        raise RuntimeError(_HTTP_429)
+
+    corpus = [_pair(answer="a", ground_truth=False)]  # False == the fail-closed verdict
+    result = judge_validate.run_validation(corpus, fake(scripted=always_429))
+
+    assert result["records"][0]["ran"] is False
+    assert result["agree_count"] == 0  # a non-verdict never agrees, even by accident
+    assert result["undelivered_count"] == 1
+    assert result["disagree_count"] == 1
+    assert result["pass"] is False
+
+
+def test_a_non_transient_fault_is_not_retried(slept):
+    """The budget is for serving faults, not for defects. A 401 will fail identically
+    five times; spending the budget on it delays the run and hides the real cause."""
+
+    def unauthorized(messages):
+        raise RuntimeError("Client error '401 Unauthorized' for url 'https://x/y'")
+
+    judgment = judged_equivalent("E", "a", fake(scripted=unauthorized))
+
+    assert judgment.ran is False
+    assert judgment.attempts == 1
+    assert judgment.faults == ("RuntimeError",)
+    assert slept == []
+
+
+def test_an_unparseable_reply_is_never_retried(slept):
+    """The boundary that keeps this fix a DELIVERY fix. A reply that arrived and did
+    not parse is a fact about the judge, not about the transport — re-rolling it would
+    hand a free-forming judge extra chances and change what the artifact measures.
+    Only a provider EXCEPTION (nothing arrived) is retried."""
+    calls = []
+
+    def freeforms(messages):
+        calls.append(1)
+        return "I think so, probably."
+
+    judgment = judged_equivalent("E", "a", fake(scripted=freeforms))
+
+    assert judgment.ran is False and judgment.verdict is False
+    assert judgment.attempts == 1 and len(calls) == 1
+    assert judgment.faults == ()
+    assert slept == []
+
+
+def test_the_servers_own_retry_after_beats_the_computed_backoff(slept):
+    """When the 429 carries a Retry-After, the server has told us how long it wants;
+    guessing over that is how a client keeps hammering a window it was asked to skip.
+    Clamped to ``max_delay_s`` so a hostile or absurd value cannot stall the run."""
+    from runner.judge import JUDGE_RETRY
+
+    class _Response:
+        def __init__(self, value):
+            self.headers = {"retry-after": value}
+
+    class _Throttled(RuntimeError):
+        def __init__(self, value):
+            super().__init__(_HTTP_429)
+            self.response = _Response(value)
+
+    honored = judged_equivalent("E", "a", fake(scripted=_flaky([_Throttled("7")])))
+    assert honored.ran is True
+    assert slept == [7.0]  # not the computed 2.0
+
+    slept.clear()
+    clamped = judged_equivalent("E", "a", fake(scripted=_flaky([_Throttled("86400")])))
+    assert clamped.ran is True
+    assert slept == [JUDGE_RETRY.max_delay_s]
+
+    slept.clear()
+    # An HTTP-date Retry-After is not parsed; the computed backoff stands.
+    http_date = _Throttled("Wed, 21 Oct 2026 07:28:00 GMT")
+    dated = judged_equivalent("E", "a", fake(scripted=_flaky([http_date])))
+    assert dated.ran is True
+    assert slept == [2.0]
+
+    slept.clear()
+    # And a response that carries headers but not this one, which is the shape the
+    # 2026-08-21 429s may well have had — str(exc) captured no headers, so the
+    # evidence cannot say. Either way the computed backoff stands.
+    silent = _Throttled("7")
+    silent.response.headers = {}
+    quiet = judged_equivalent("E", "a", fake(scripted=_flaky([silent])))
+    assert quiet.ran is True
+    assert slept == [2.0]
+
+
+def test_the_live_validation_run_paces_its_calls(slept, tmp_path):
+    """The other half. 635 calls issued back to back at ~50/minute is what provoked
+    the throttling; the retry recovers from it, the pace stops asking for it. Paced
+    BETWEEN calls only — nothing before the first, nothing after the last."""
+    from loop.judge_validate import JUDGE_PACE_SECONDS
+
+    corpus = [_pair(answer="a"), _pair(answer="a"), _pair(answer="a")]
+    provider = fake(scripted=lambda m: "VERDICT: YES\nQUOTE: a")
+
+    judge_validate.run_validation(corpus, provider, pace_seconds=0.25)
+    assert slept == [0.25, 0.25]
+
+    # Off by default, so scripted callers (this suite) pay nothing …
+    slept.clear()
+    judge_validate.run_validation(corpus, provider)
+    assert slept == []
+
+    # … and on for the live entry point, which is the one that hits a real endpoint.
+    slept.clear()
+    result = judge_validate.main(provider=provider, output_path=tmp_path / "a.json")
+    assert JUDGE_PACE_SECONDS > 0
+    assert slept == [JUDGE_PACE_SECONDS] * (result["total_pairs"] - 1)
+    assert result["delivery"]["pace_seconds"] == JUDGE_PACE_SECONDS
+
+
+def test_the_artifact_records_what_the_transport_did():
+    """Delivery diagnostics, so the next run's report can state plainly what happened
+    instead of a human re-deriving it from 635 raw strings (which is how tonight's
+    cause was found). Counts of retries, of pairs that recovered, and faults by class.
+    """
+
+    def one_429_then_fine(messages):
+        text = messages[1]["content"]
+        if "flaky" in text and not getattr(one_429_then_fine, "done", False):
+            one_429_then_fine.done = True
+            raise RuntimeError(_HTTP_429)
+        if "dead" in text:
+            raise RuntimeError(_HTTP_429)
+        return "VERDICT: YES\nQUOTE: a"
+
+    corpus = [
+        _pair(answer="a-fine"),
+        _pair(answer="a-flaky"),
+        _pair(answer="a-dead"),
+    ]
+    result = judge_validate.run_validation(corpus, fake(scripted=one_429_then_fine))
+    delivery = result["delivery"]
+
+    assert delivery["pairs_retried"] == 2  # the flaky one and the dead one
+    assert delivery["pairs_recovered_by_retry"] == 1  # only the flaky one came back
+    assert delivery["retries_attempted"] == 1 + 4  # one, then a whole exhausted budget
+    # Faults counts every try that was LOST, which is one more than the retries the
+    # exhausted pair bought: 1 (flaky) + 5 (dead, every try in its budget).
+    assert delivery["faults_by_class"] == {"http_429": 6}
+    assert delivery["faults_total"] == 6
+    assert delivery["pace_seconds"] == 0.0
+    # And per record, beside the raw the human reads.
+    assert [r["attempts"] for r in result["records"]] == [1, 2, 5]
+    assert result["records"][2]["faults"] == ["http_429"] * 5
+
+
+def test_the_judges_transient_rule_agrees_with_carbons():
+    """Reuse of semantics, pinned. This is the same defect class carbon fixed in its
+    compaction summarizer, and the classifier is deliberately a COPY rather than an
+    import: the grader must not take its own transport correctness from the harness it
+    grades (an accepted candidate, or a new pinned base, would silently retune the
+    judge). A copy needs a drift alarm, which is this test.
+
+    The probe list carries carbon's own regression: "requested 15020 tokens" contains
+    "502" as a substring and must NOT be transient — matching status codes with `in`
+    spent a whole retry budget on a payload that could never fit.
+    """
+    from harness.agent import Agent
+
+    from runner.judge import transient_fault
+
+    probes = [
+        _HTTP_429,
+        "Server error '502 Bad Gateway' for url 'https://x/y'",
+        "Server error '503 Service Unavailable'",
+        "Server error '504 Gateway Timeout'",
+        "API rate limit exceeded",
+        "Read timed out",
+        "the model is temporarily unavailable",
+        "connection reset by peer",
+        "connection refused",
+        "Client error '401 Unauthorized' for url 'https://x/y'",
+        "Client error '400 Bad Request' for url 'https://x/y'",
+        "this model's maximum context length is 8192 tokens; you requested 15020 tokens",
+        "no such file or directory",
+    ]
+    mine = [transient_fault(RuntimeError(p)) for p in probes]
+    theirs = [Agent._transient_error(RuntimeError(p)) for p in probes]
+    assert mine == theirs
+    assert mine[-2] is False  # the token-count substring trap, still shut

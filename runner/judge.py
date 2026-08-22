@@ -40,6 +40,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -71,6 +73,147 @@ QUOTE: <the exact span of ANSWER that contradicts it, or its closest attempt>
 # exact prompt. Changing JUDGE_PROMPT without re-running validation must be a
 # visible, deliberate act, never a silent drift.
 JUDGE_PROMPT_SHA = hashlib.sha256(JUDGE_PROMPT.encode()).hexdigest()
+
+
+# --- transport: bounded retry for transient serving faults ----------------------
+#
+# The judge is a model call that does NOT go through carbon's ``Agent``, so none of
+# carbon's retry policy reaches it: ``judged_equivalent`` calls ``chat()`` directly
+# and every provider fault was terminal for its pair. This is the same defect class
+# carbon fixed in its compaction summarizer (the one unretried model call in a turn),
+# and it cost the same way — measured 2026-08-21 on the pinned OpenRouter/Novita
+# base, a live re-validation of the 635-pair corpus lost 58 pairs to HTTP 429 and
+# scored 0.899 agreement against a 0.95 threshold. Delivered-only agreement was
+# 0.9896 with zero false approvals: the judge was sound, the delivery was not.
+#
+# The policy below is carbon's, restated: same transient classes, same exponential
+# backoff, same "max_attempts bounds TOTAL tries, not retries". It is a COPY, not an
+# import, on purpose — refinery grades carbon, and a grader that took its own
+# transport correctness from the graded harness would be silently retuned by a new
+# pinned base (or, in principle, by an accepted candidate). The copy's drift alarm is
+# ``tests/test_judge.py``, which compares this classifier against carbon's own on a
+# shared probe list.
+
+# Transient status codes matched as standalone numbers, never substrings: carbon's
+# own regression — "requested 15020 tokens" contains "502", and substring matching
+# classified a context-overflow message as a transient gateway fault, spending the
+# whole retry budget on a payload that could never fit.
+_TRANSIENT_STATUS = re.compile(r"\b(?:429|502|503|504)\b")
+
+_TRANSIENT_MARKERS = (
+    "rate limit",
+    "timeout",
+    "timed out",
+    "temporarily unavailable",
+    "connection reset",
+    "connection refused",
+)
+
+
+@dataclass(frozen=True)
+class RetryPolicy:
+    """Bounded recovery for transient provider failures on the judge call.
+
+    ``max_attempts`` bounds TOTAL tries, not retries — 5 means four waits (2s, 4s,
+    8s, 16s at the shipped base) and then a give-up, which is carbon's reading of the
+    same field name. ``max_delay_s`` caps a single wait; carbon has no such cap
+    because its computed backoff never reaches one, and neither does this one (16 <
+    30). It exists for the server-supplied ``Retry-After``, which is not ours to
+    bound by construction: an endpoint asking for an hour must not stall the run.
+    """
+
+    max_attempts: int = 5
+    base_delay_ms: int = 2000
+    max_delay_s: float = 30.0
+
+
+# Refinery's own values, deliberately equal to the ones carbon ships today
+# (harness_config.json: backoff, 5, 2000). They are NOT read from carbon's config:
+# that file is the editable surface this repo's loop rewrites, and a candidate edit
+# must never be able to reach into the grader's transport.
+JUDGE_RETRY = RetryPolicy()
+
+# The wait, injectable. Tests replace this so an offline suite never spends a real
+# 2/4/8/16-second backoff (``tests/conftest.py``), and so a test can assert on the
+# delays the policy asked for rather than on wall-clock time.
+_sleep = time.sleep
+
+
+def transient_fault(exc: Exception) -> bool:
+    """Is ``exc`` a serving fault worth trying again? Carbon's rule, restated.
+
+    Public because ``tests/test_judge.py`` pins it against carbon's
+    ``Agent._transient_error`` — the drift alarm the copy above needs.
+    """
+    text = str(exc).lower()
+    if any(marker in text for marker in _TRANSIENT_MARKERS):
+        return True
+    # Status codes go through the word-boundary pattern, not ``in`` — see
+    # ``_TRANSIENT_STATUS`` for the token-count false match that prevents.
+    return _TRANSIENT_STATUS.search(text) is not None
+
+
+def fault_class(exc: Exception) -> str:
+    """A short, groupable label for one delivery fault, for the artifact's record.
+
+    Only the KNOWN transient statuses are read out of the message, by the same
+    word-boundary pattern the classifier uses; anything else is labelled by exception
+    type. A loose three-digit scrape would have relabelled "you requested 15020
+    tokens" as an HTTP 502 in the very diagnostics a human reads to find the cause.
+    """
+    status = _TRANSIENT_STATUS.search(str(exc))
+    if status:
+        return f"http_{status.group(0)}"
+    lowered = str(exc).lower()
+    for marker in _TRANSIENT_MARKERS:
+        if marker in lowered:
+            return marker.replace(" ", "_")
+    return type(exc).__name__
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
+    """The server's own ``Retry-After``, in seconds, when the exception carries one.
+
+    Duck-typed through ``exc.response.headers`` rather than typed against httpx: the
+    provider seam is carbon's, refinery does not depend on its HTTP client, and a
+    provider that raises something else simply has no header to offer. The delta-
+    seconds form is honored; the HTTP-date form returns None and the computed backoff
+    stands, because parsing a date against a possibly-skewed local clock to decide a
+    2-vs-4-second wait buys nothing.
+
+    A 429 that names its own window is the one authoritative number in this whole
+    policy — ours are guesses about an undocumented ceiling, and continuing to guess
+    over an explicit instruction is how a client keeps hammering a closed window.
+    """
+    headers = getattr(getattr(exc, "response", None), "headers", None)
+    if headers is None:
+        return None
+    try:
+        raw = headers.get("retry-after")
+    except (AttributeError, TypeError):
+        return None
+    if raw is None:  # a response that carries headers but not this one
+        return None
+    try:
+        seconds = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds >= 0 else None
+
+
+def _next_delay(attempt: int, exc: Exception, policy: RetryPolicy) -> float | None:
+    """Seconds to wait before the NEXT try, or None when there is no next try.
+
+    ``attempt`` is 1-indexed and already incremented, so ``max_attempts`` bounds
+    total tries: at max_attempts=5 a delay is offered after tries 1-4 and refused
+    after try 5.
+    """
+    if attempt >= policy.max_attempts or not transient_fault(exc):
+        return None
+    server_hint = _retry_after_seconds(exc)
+    if server_hint is not None:
+        return min(server_hint, policy.max_delay_s)
+    return min(policy.base_delay_ms * (2 ** (attempt - 1)) / 1000, policy.max_delay_s)
 
 
 # The validation artifact (contract §4) and, with it, the judge's ACTIVATION
@@ -202,6 +345,14 @@ class Judgment:
     Both fail closed to ``verdict=False``, but a verifier that recorded the
     second kind as a task failure would be blaming the strategy under test for
     a judge outage — ``ran`` is what lets it refuse (outcome ``error``) instead.
+
+    ``attempts`` and ``faults`` are the DELIVERY record: how many tries this one
+    judgment took, and a label per fault that cost a try (``fault_class``). Both
+    describe the transport and neither can move a verdict — ``attempts`` is 1 and
+    ``faults`` empty on every call that succeeded first time, which is nearly all of
+    them. They exist so a validation run can state what the transport did instead of
+    leaving a human to re-derive it from hundreds of raw error strings, which is
+    exactly how the 2026-08-21 throttling was diagnosed.
     """
 
     verdict: bool
@@ -209,6 +360,8 @@ class Judgment:
     raw: str
     ran: bool = True
     tokens: int = 0
+    attempts: int = 1
+    faults: tuple[str, ...] = ()
 
 
 def _usage_tokens(usage: dict) -> int:
@@ -319,7 +472,9 @@ def _parse_judgment(raw: str, answer: str) -> Judgment:
     return Judgment(True, quote, raw)
 
 
-def judged_equivalent(expected: str, answer: str, provider) -> Judgment:
+def judged_equivalent(
+    expected: str, answer: str, provider, *, retry: RetryPolicy = JUDGE_RETRY
+) -> Judgment:
     """Ask the judge whether ``answer`` means the same thing as ``expected``.
 
     ``provider`` is the same seam every refinery task uses
@@ -338,6 +493,22 @@ def judged_equivalent(expected: str, answer: str, provider) -> Judgment:
     pair rather than crashing the validation or passing a task. The runner's own
     catch-all remains the outer net.
 
+    A TRANSIENT provider fault is now tried again first, under ``retry`` (see
+    ``RetryPolicy``): 429/502/503/504 and the timeout/rate-limit/connection markers,
+    with exponential backoff and the server's own ``Retry-After`` when it sends one.
+    The bound is hard, and exhausting it changes nothing about the outcome — a
+    persistent fault still returns ``ran=False`` with the last error in ``raw``, so a
+    throttled judge degrades the pair exactly as before rather than quietly becoming
+    a verdict.
+
+    What is NOT retried is the line this fix must not cross: a reply that ARRIVED and
+    did not parse returns immediately. That is a fact about the judge's behavior, not
+    about the transport, and re-rolling it would hand a free-forming judge extra
+    chances at the pinned format — changing what the validation artifact measures.
+    Only a call that produced no output at all is repeated, so the same raw output
+    still parses and scores identically; the retry can turn a NON-verdict into a
+    verdict, never one verdict into another.
+
     ``answer`` therefore reaches the parser as well as the payload. It is the same
     string in both places, by construction: there is one ``answer`` in this
     function, and nothing between here and the parse can substitute another.
@@ -349,10 +520,28 @@ def judged_equivalent(expected: str, answer: str, provider) -> Judgment:
         {"role": "system", "content": JUDGE_PROMPT},
         {"role": "user", "content": payload},
     ]
-    try:
-        response = chat(messages, provider=provider, temperature=0.0, max_tokens=512)
-        judgment = _parse_judgment(response.content or "", answer)
-        return replace(judgment, tokens=_usage_tokens(response.usage))
-    except Exception as exc:
-        error_msg = f"<provider error: {exc}>"
-        return Judgment(False, "", error_msg, ran=False)
+    faults: list[str] = []
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            # The guarded region is the whole original one — call, parse, and usage —
+            # so nothing that used to fail closed now escapes into the caller.
+            response = chat(messages, provider=provider, temperature=0.0, max_tokens=512)
+            judgment = _parse_judgment(response.content or "", answer)
+            return replace(
+                judgment,
+                tokens=_usage_tokens(response.usage),
+                attempts=attempt,
+                faults=tuple(faults),
+            )
+        except Exception as exc:
+            faults.append(fault_class(exc))
+            delay = _next_delay(attempt, exc, retry)
+            if delay is None:
+                error_msg = f"<provider error: {exc}>"
+                return Judgment(
+                    False, "", error_msg, ran=False, attempts=attempt, faults=tuple(faults)
+                )
+            if delay:
+                _sleep(delay)
