@@ -319,6 +319,73 @@ def test_c1_controls_refuse_like_c0(ch):
     guard.assert_recorded_base_url_clean("https://host.example/v1", "x")
 
 
+class _DecodingBase:
+    """Not a str, but urllib's ``_coerce_args`` accepts ANY object carrying
+    ``.decode()``: it decodes, parses the decoded text, then re-encodes, so
+    ``urlsplit`` hands back a BYTES-flavoured SplitResult (hostname
+    ``b'localhost'``). Iterable of clean characters, so the whitespace scan
+    cannot stop it; truthy, so the normalizer's falsey early return cannot
+    either. This is the shape that reached ``urlsplit`` itself."""
+
+    def decode(self, encoding="ascii", errors="strict"):
+        return "http://localhost:1234/v1"
+
+    def __iter__(self):
+        return iter("http://localhost:1234/v1")
+
+    def __bool__(self):
+        return True
+
+
+class _StrBase(str):
+    """A str SUBCLASS: it IS a string, so the type rule must let it through —
+    isinstance, never ``type(x) is str``."""
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        False,  # falsey non-strings were returned UNCHANGED by the normalizer...
+        0,
+        b"",
+        b"http://localhost:1234/v1",  # ...and truthy bytes crashed the scan (TypeError)
+        _DecodingBase(),  # ...while this one reached urlsplit and decoded to bytes
+    ],
+)
+def test_non_string_base_url_refuses_at_normalizer_and_classifier(bad):
+    """The type rule is one predicate at the shared parse path, not three
+    scattered checks. Pre-fix, ``normalize_base_url`` returned every FALSEY
+    non-string unchanged before any validation ran — with a directly built
+    pinned provider, False/0/b"" were retained into the fingerprint and folded
+    into the behavior key — while truthy non-strings crashed
+    (TypeError/AttributeError) instead of refusing, and a decoding-protocol
+    object reached urlsplit and parsed to a bytes SplitResult, which the
+    normalizer would have formatted into a b'http'-shaped identity. Now: a
+    non-string refuses at the normalizer with the fail-closed contract message,
+    and reads unparseable (hence remote) at the classifier. Not reachable from
+    Provider.from_env, which reads os.environ and always yields str — this
+    closes the class."""
+    with pytest.raises(guard.MalformedBaseUrl, match="not a string"):
+        guard.normalize_base_url(bad)
+    assert guard.is_local_base_url(bad) is False  # unparseable reads remote: fail closed
+    with pytest.raises(guard.MalformedBaseUrl):  # the record gate, already guarded
+        guard.assert_recorded_base_url_clean(bad, "the baseline results file")
+
+
+def test_none_passes_and_a_str_subclass_is_treated_as_a_string():
+    """The two deliberate non-refusals, pinned so the type rule cannot swallow
+    them: None is a real recorded state (an unset base — carbon_fingerprint
+    normalizes it every run), and a str subclass is a string, so it normalizes
+    and classifies exactly like its plain-str twin."""
+    assert guard.normalize_base_url(None) is None
+    assert guard.normalize_base_url("") == ""  # empty str: still a string, still passes
+    sub = _StrBase("http://LocalHost:1234/v1/")
+    assert guard.normalize_base_url(sub) == guard.normalize_base_url(str(sub))
+    assert guard.normalize_base_url(sub) == "http://localhost:1234/v1"
+    assert guard.is_local_base_url(sub) is True
+    guard.assert_recorded_base_url_clean(sub, "x")
+
+
 @pytest.mark.parametrize("bad", [123, True, 4.2, {"base_url": "x"}])
 def test_recorded_base_url_gate_refuses_non_strings_gracefully(bad):
     """urlsplit(123) raises AttributeError — not the caught ValueError/TypeError —

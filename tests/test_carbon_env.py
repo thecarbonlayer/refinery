@@ -299,6 +299,31 @@ def test_every_provider_field_is_fingerprinted_or_named_excluded(monkeypatch):
         assert reason.strip(), f"exclusion of {field!r} states no reason"
 
 
+def test_fingerprint_refuses_a_non_string_base_url(monkeypatch):
+    """The fingerprint boundary for the type rule. Provider.from_env reads
+    os.environ and always yields a str, so this needs a DIRECTLY constructed
+    provider — and with one, a falsey non-string sailed through
+    normalize_base_url unchanged (its early return preceded every check), was
+    pinned enough to satisfy assert_serving_pinned, and was RECORDED: base_url
+    False folded into the behavior key. A base URL that is not a string cannot
+    be scanned, parsed, or honestly recorded — it refuses here."""
+    from runner import guard
+
+    _patch(
+        monkeypatch,
+        _CLEAN,
+        provider=SimpleNamespace(
+            model="test-model",
+            base_url=False,
+            reasoning_effort=None,
+            provider_order="one-provider",  # pinned: the pin gate would have passed it
+            quantization="fp8",
+        ),
+    )
+    with pytest.raises(guard.MalformedBaseUrl, match="not a string"):
+        ge.carbon_fingerprint(ROOT)
+
+
 def test_fingerprint_records_no_responder_as_none(monkeypatch):
     """The env-built provider carries no responder; None is its truthful record."""
     _patch(monkeypatch, _CLEAN)

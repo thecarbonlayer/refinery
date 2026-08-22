@@ -168,6 +168,29 @@ def assert_resumable(prior_fingerprint: dict, current_fingerprint: dict) -> None
 _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
+def _is_non_string(base_url) -> bool:
+    """The type rule, in one place: a base URL that is not a ``str`` cannot be
+    scanned, parsed, or honestly recorded.
+
+    Every site that would otherwise hand a value to ``urlsplit`` or to a
+    raw-string scan asks this FIRST — the same shape the character rule ended
+    up in (``_has_control_or_whitespace``), because scattered checks are how
+    the gap appeared: ``_describe_base`` and the record gate were guarded while
+    the shared parse path was not, so ``urlsplit`` stayed reachable. It accepts
+    anything with a ``.decode()`` method (its ``_coerce_args`` decodes, parses,
+    and re-encodes), which returns a BYTES-flavoured SplitResult — a hostname
+    ``b'localhost'`` that matches no local host and a scheme that formats into
+    a ``b'http'``-shaped identity. Falsey non-strings (``False``, ``0``,
+    ``b""``) were worse: the normalizer returned them unchanged before any
+    check ran, so a directly built pinned provider recorded one into the
+    behavior key.
+
+    ``isinstance``, not ``type(...) is str``: a str subclass IS a string and
+    keeps working. None is not filtered here — callers decide, and for the
+    normalizer and the record gate an unset base is a real recorded state."""
+    return not isinstance(base_url, str)
+
+
 def _has_control_or_whitespace(base_url: str) -> bool:
     """Any whitespace or control character, anywhere in the URL — nothing is
     stripped, leading and trailing included. ``urlsplit`` deletes tab/newline/CR
@@ -217,9 +240,12 @@ def _split_base_url(base_url):
     can never record unpinned. A URL carrying whitespace or control characters is
     unparseable BY RULE: urlsplit would silently strip tab/newline and parse an
     authority the raw string does not have, which once classified
-    ``https:/<TAB>/user:...@localhost`` as local."""
+    ``https:/<TAB>/user:...@localhost`` as local. A NON-STRING is unparseable by
+    the same rule, checked here at the shared entry so no caller can reach
+    ``urlsplit`` around it: urlsplit accepts any object with ``.decode()`` and
+    answers in bytes, an identity nothing here could match or record."""
     try:
-        if _has_control_or_whitespace(base_url):
+        if _is_non_string(base_url) or _has_control_or_whitespace(base_url):
             return None
         parts = urlsplit(base_url)
         host = parts.hostname
@@ -252,7 +278,7 @@ def _describe_base(base_url) -> str:
     and this function runs INSIDE refusal messages, so a describer that can
     crash turns a host-safe refusal into a naked traceback (a recorded
     ``"base_url": 123`` did exactly that at the record gate)."""
-    if not isinstance(base_url, str):
+    if _is_non_string(base_url):
         return "an unparseable base URL"
     try:
         host = urlsplit(base_url).hostname
@@ -292,7 +318,27 @@ def normalize_base_url(base_url: str) -> str:
     A URL that does not parse, or has no host or no parseable port, passes
     through verbatim ONCE it is known to carry no forbidden part: what cannot
     be parsed cannot be quietly rewritten, and the shared classification above
-    reads it as remote (fail closed), so it can never record unpinned."""
+    reads it as remote (fail closed), so it can never record unpinned.
+
+    None passes through unchanged — an unset base is a real recorded state, and
+    carbon_fingerprint normalizes one every run. Every OTHER non-string refuses
+    (``MalformedBaseUrl``): the falsey early return used to precede all
+    validation, so ``False``, ``0`` and ``b""`` were returned unchanged and,
+    from a directly built pinned provider, recorded into the behavior key —
+    while truthy non-strings crashed the scan instead of refusing. Nothing that
+    is not a string may leave here unchanged."""
+    if base_url is None:
+        return base_url
+    if _is_non_string(base_url):
+        raise MalformedBaseUrl(
+            f"refusing base URL ({_describe_base(base_url)}): it is not a string but a "
+            f"{type(base_url).__name__}. What cannot be scanned cannot be declared clean, "
+            f"and what cannot be parsed as text has no identity to record — urlsplit would "
+            f"answer in bytes for anything carrying .decode(). LLM_BASE_URL is read from "
+            f"the environment as text, so this reaches here only from a directly "
+            f"constructed provider: pass a scheme://host[:port]/path string, or None for "
+            f"an unset base."
+        )
     if not base_url:
         return base_url
     if _has_control_or_whitespace(base_url):
@@ -379,7 +425,7 @@ def assert_recorded_base_url_clean(base_url, origin: str) -> None:
     if base_url is None:
         return
     if (
-        not isinstance(base_url, str)
+        _is_non_string(base_url)
         or _has_control_or_whitespace(base_url)
         or _forbidden_parts(base_url)
     ):
