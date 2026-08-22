@@ -12,7 +12,9 @@ The axes, one task each (no axis doubled):
 
 - CTX-3 — position: middle, plus token economy. THE MINER.
 - CTX-4 — completeness across positions (head+middle+tail, all required).
-- CTX-5 — noise density (the needle among delivered near-duplicate decoys).
+- CTX-5 — noise density (the needle among delivered near-duplicate decoys); a
+  WEAK guard on an `uncertain` prior, see its docstring for why the reply-shape
+  conjunct keeps it there until a campaign measures it.
 - CTX-6 — small-file economy, the no-harm end.
 - CTX-7 — delivery mechanism, the bypass axis (CTX-3's shape WITH file tools).
 
@@ -445,14 +447,37 @@ def run_ctx4() -> Attempt:
 
 
 def run_ctx5() -> Attempt:
-    """Guard. Axis: noise density — the needle among delivered near-duplicates.
+    """Guard (weak — `uncertain` prior). Axis: noise density, the needle among
+    delivered near-duplicates.
 
     The approved token arrives in the baseline delivery ALONGSIDE rejected
     look-alike drafts (pinned offline), so at baseline the task is discrimination,
-    not retrieval: prior `pass`, and the guard can regress. The failure it exists
-    to catch is a region-picking strategy that hands the model a decoy-bearing
-    slice without the real token — the model then reports a decoy confidently,
-    and the oracle (real token present AND no decoy in the reply) goes red.
+    not retrieval. The failure it exists to catch is a region-picking strategy that
+    hands the model a decoy-bearing slice without the real token — the model then
+    reports a decoy confidently, and the oracle (real token present AND no decoy in
+    the reply) goes red.
+
+    PRIOR: `uncertain`, downgraded from an authored `pass` on 2026-08-22 review.
+    The evidence is this repo's own: the second conjunct is a reply-SHAPE
+    constraint, and CMP-5 measured what that shape costs — its pooled rate
+    decomposed to 29% form-compliance x 74% correctness (`run_cmp5`). A model
+    handed six labeled rejected drafts and asked which is approved may well
+    contrast them ("X, not Y") and be substantively right while this oracle scores
+    a failure. Nothing has measured that rate on any base, so a `pass` prior would
+    assert exactly what the closest precedent denies. `uncertain` is a weaker
+    guard than `pass` — knob_coverage says so in as many words — but it is the
+    true statement, and a prior is a claim, not a lever.
+
+    The oracle is deliberately NOT softened to rescue the prior. Loosening it to
+    "real token present, decoys ignored" would delete the confident-wrong-report
+    failure this task exists for, and a judge-based answer extraction is the
+    format-robustness rework already recorded as an open item on CMP-5/CMP-6 — a
+    decision for that rework, not one to make here, pre-gate, with no measurement.
+
+    FIRST CAMPAIGN REPORT MUST DECOMPOSE THIS RATE, the CMP-5 way: publish
+    "answered with the real token" and "answered with a decoy present" separately
+    (both are in `detail` and in the metrics below), so a low rate is attributable
+    to format rather than silently read as a delivery finding.
 
     LIVE PREMISE CHECK: injection fired (else `error`); at baseline
     `real_delivered` = 1.0 and `decoys_delivered` >= 1 on every attempt."""
@@ -502,10 +527,21 @@ def run_ctx6() -> Attempt:
     """Guard. Axis: small-file economy — the no-harm end of the strategy menu.
 
     An UNDER-budget file must arrive whole and be answered without ceremony.
-    Prior `pass`: the shipped door passes an under-budget block byte-identical.
     What it catches: a strategy that indexes, pages, or scaffolds files that never
     needed it — either the middle-of-file code stops arriving (recall fails) or
     the injected block balloons past `CTX6_MAX_INJECTED_CHARS` (economy fails).
+
+    PRIOR: `pass`, KEPT at the 2026-08-22 review that downgraded CTX-5. The two
+    are not alike, and the difference is measurable rather than argued. CTX-6's
+    economy conjunct CANNOT FIRE at baseline: the door passes the composed block
+    byte-identical (`tests/test_registry.py` proves `cut == composed`), which
+    leaves ~920-960 chars of margin under the ceiling across the whole range of
+    real mkdtemp path lengths — a number with no model influence in it at all. So
+    the authored 1000-char slack, though itself unvalidated as a THRESHOLD, puts
+    nothing at risk in the baseline arm; it only arms the conjunct against a future
+    strategy. What is left for the model to do is read one short code out of a
+    fully delivered small file and say it — A5's shape, and A5 measured 1.00 in
+    all six committed null arms. That is the evidence a `pass` prior needs.
     A candidate that legally LOWERS the budget below this fixture's size turns
     this red at measurement time; the offline suite stays green (authored clamp,
     never the live one).
@@ -637,11 +673,35 @@ def run_ctx7() -> Attempt:
 
 # Priors are claims about the suite AS AUTHORED, never a reading of a baseline:
 # CTX-3/CTX-4 `fail` because the middle is deterministically undeliverable at the
-# authored policy (proven offline); CTX-5/CTX-6 `pass` because their answers are in
-# the baseline delivery by construction; CTX-7 `uncertain` because its verdict
-# turns on live bypass behavior nothing has measured. Splits alternate at
+# authored policy (proven offline); CTX-6 `pass` because its answer is in the
+# baseline delivery by construction AND its economy conjunct is provably inert
+# there; CTX-5 and CTX-7 `uncertain` because each has a conjunct nothing has
+# measured (a reply-shape one and live bypass behavior). Splits alternate at
 # authoring, miner held-in (mining spends held-in evidence only — the G4 rule);
 # the final assignment is a gate input.
+#
+# WHAT A `pass` PRIOR NOW COSTS, so the next author weighs it deliberately. Since
+# the 2026-08-22 collapse-veto fix, `expected_baseline == "pass"` is one of the two
+# things that ESTABLISH full-pass status (the other is membership in a section's
+# calibrated covered set), and only an established full pass may VETO a candidate
+# on a 1.00 -> 0.00 fall. So an authored `pass` on a never-measured task can reject
+# a candidate that cleared every measured bound, on one noise flip. That is a
+# reason to state priors accurately — never a reason to state them low: each of
+# these was decided on its own evidence, and the pin in
+# `tests/test_registry.py::test_ctx_priors_state_only_what_evidence_supports`
+# carries the reasoning per task.
+#
+# What CTX-5's downgrade gives up, stated plainly rather than left implicit: under
+# a CALIBRATED decision the split means read only that section's supported set
+# (`loop.acceptance._supported_means`), so a CTX-5 collapse during a calibrated
+# COMPACTION judgment would now be recorded as context instead of vetoing. The loss
+# is small and bounded, for a reason specific to this task: CTX-5 is a single-turn
+# `@path` task that never compacts, so a compaction candidate cannot causally move
+# it — any collapse seen there is noise or an unrelated harness break, and the
+# unfiltered record still carries it. Where CTX-5's veto is genuinely load-bearing
+# is a `file_injection` judgment, and by then this suite's own null campaign has
+# run: membership in that calibration's covered set re-arms the veto by DATA, which
+# is the establishment source that should have been carrying it all along.
 SPECS = [
     TaskSpec(
         "CTX-3", "held_in", "A", "fail", primitive="context-delivery", alias=None, run=run_ctx3
@@ -650,7 +710,7 @@ SPECS = [
         "CTX-4", "held_out", "A", "fail", primitive="context-delivery", alias=None, run=run_ctx4
     ),
     TaskSpec(
-        "CTX-5", "held_in", "A", "pass", primitive="context-delivery", alias=None, run=run_ctx5
+        "CTX-5", "held_in", "A", "uncertain", primitive="context-delivery", alias=None, run=run_ctx5
     ),
     TaskSpec(
         "CTX-6", "held_out", "A", "pass", primitive="context-delivery", alias=None, run=run_ctx6

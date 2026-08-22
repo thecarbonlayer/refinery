@@ -68,6 +68,30 @@ def test_live_sentinels_are_both_non_empty():
     assert SENTINELS[LIVE_GUARDS], "no live task is expected to pass — guards vanish"
 
 
+def test_the_ctx_priors_land_where_their_evidence_puts_them_in_the_live_split():
+    """The live sentinels split on `_has_headroom`, i.e. on the PRIOR — so a prior
+    decision is silently also a decision about `system_prompt`/`temperature`
+    coverage. Pinned here so the two cannot be changed apart.
+
+    CTX-6 keeps its `pass` prior and therefore stays a declared GUARD for the two
+    suite-wide knobs. CTX-5 was downgraded to `uncertain` on evidence
+    (`tests/test_registry.py::test_ctx_priors_state_only_what_evidence_supports`)
+    and therefore moves to the MINERS side — the knob_coverage math this moves,
+    recorded rather than discovered later. Note what that does and does not mean:
+    the sentinel says the knob COULD turn CTX-5 green, not that tuning it there is
+    a good idea. CMP-5 sits in the same set for the same reason, and its docstring
+    says plainly that most of its available movement is format obedience.
+    """
+    assert PRIORS["CTX-6"] == "pass"
+    assert "CTX-6" in SENTINELS[LIVE_GUARDS] and "CTX-6" not in SENTINELS[LIVE_MINERS]
+    assert PRIORS["CTX-5"] == "uncertain"
+    assert "CTX-5" in SENTINELS[LIVE_MINERS] and "CTX-5" not in SENTINELS[LIVE_GUARDS]
+    # The guard side must not be emptied by the move — the property
+    # `test_live_sentinels_are_both_non_empty` protects, asserted at the point the
+    # membership actually changed.
+    assert len(SENTINELS[LIVE_GUARDS]) >= 9
+
+
 def test_live_expansion_excludes_scripted_provider_clusters():
     """The live sentinels claim "every task that sends a system prompt". Cluster H
     builds its agents with no `system=` argument, so it sends none. If that ever

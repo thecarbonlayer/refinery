@@ -3195,6 +3195,48 @@ def test_ctx_verdicts_apply_the_g2_non_answer_taxonomy():
     assert ctx7_verdict("wrong", 1, 0.05)[:2] == (False, "fail")
 
 
+def test_ctx_priors_state_only_what_evidence_supports():
+    """A prior is a CLAIM, and each CTX prior is pinned here with the evidence.
+
+    Reviewed 2026-08-22, after the cross-cutting collapse-veto fix
+    (program/onb-task-authoring) made an authored `pass` prior load-bearing in a
+    third place: `expected_baseline == "pass"` is one of the two things that
+    ESTABLISH full-pass status, so such a task can veto a calibrated candidate on
+    a single 1.00 -> 0.00 flip. The priors were re-decided on evidence, one task
+    at a time, and deliberately NOT as a block:
+
+    - CTX-3, CTX-4 — `fail`. The middle fact is deterministically undeliverable at
+      the authored policy; both premise tests prove it offline.
+    - CTX-5 — `uncertain`, DOWNGRADED from an authored `pass`. Its oracle carries a
+      reply-SHAPE conjunct (no decoy string anywhere in the reply), and this repo
+      has already measured what that shape costs: CMP-5's pooled rate decomposed
+      to 29% form-compliance x 74% correctness (`run_cmp5`). A model handed six
+      labeled rejected drafts and asked which is approved may contrast them and be
+      substantively right while this oracle scores it a failure. Nothing has
+      measured that rate, so `pass` would assert what the closest precedent denies.
+    - CTX-6 — `pass`, KEPT. Its second conjunct cannot fire at baseline: the door
+      passes the composed block byte-identical (proven offline), leaving ~920-960
+      chars of margin under the ceiling at realistic path lengths, with no model
+      influence on that number. What remains is reading one short code out of a
+      fully delivered small file — A5's shape, and A5 measured 1.00 in all six
+      committed null arms.
+    - CTX-7 — `uncertain`. Its verdict turns on live bypass behavior nothing has
+      measured; the brief labels that prediction non-computable.
+
+    Pinned by literal equality, the CONTRACT_PRIMITIVE_ALIAS discipline: a prior
+    that moves has to move HERE too, which is a deliberate act with a reason
+    rather than a data-line edit nobody reads.
+    """
+    priors = {t.name: t.expected_baseline for t in TASKS if t.name.startswith("CTX-")}
+    assert priors == {
+        "CTX-3": "fail",
+        "CTX-4": "fail",
+        "CTX-5": "uncertain",
+        "CTX-6": "pass",
+        "CTX-7": "uncertain",
+    }
+
+
 def test_ctx_delivery_observation_is_pinned_against_carbons_own_source():
     """The live premise checks read two of carbon's literals out of the transcript:
     the `Context file:` wrapper `Agent.run` puts around every delivered block, and
