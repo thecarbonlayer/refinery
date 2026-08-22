@@ -1,6 +1,12 @@
 # Carbon quality and evolution contract
 
-Updated July 27, 2026 for Carbon config v3 and Refinery's 23-task quality suite.
+Written July 27, 2026 for Carbon config v3 and the quality suite as it stood then;
+the stale claims were corrected against config v8 and the current registry on
+August 22, 2026. This document explains the CONTRACT — what Carbon fixes, what
+Refinery may evolve, and how the two tables are governed. It does not enumerate
+the suite: `runner/tasks/` is the registry, `loop surface` is the live editable
+menu, and both have grown since the review was written. Anything here that names
+a count or a value is a summary; the code is the authority.
 
 ## What Carbon now fixes directly
 
@@ -26,12 +32,17 @@ contains no executable hooks:
 
 | Field | Shape |
 |---|---|
-| `file_injection`, `tool_output` | bounded truncation policy: strategy, budget, tail fraction |
-| `compaction` | bounded strategy plus keep-head, keep-tail, trigger fraction, summary budget |
+| `file_injection` | bounded truncation policy: strategy, budget, tail fraction |
+| `tool_output` | the same, plus an `offload_to_file` strategy that hands back a retrievable path |
+| `compaction` | bounded strategy plus keep-head, keep-tail, trigger fraction, summary budget, token reserves, checkpoint fallback, prompt suffix |
+| `tool_exposure` | which tools the model is offered: `all`, an allowlist, or query-match top-k |
 | `compaction_prompt`, `system_prompt` | free text |
 | `retry` | bounded strategy plus max attempts, base delay |
 | `max_tokens`, `max_tool_steps`, `default_context_limit`, `verify_attempts` | positive int |
 | `temperature` | float |
+
+The strategy menus and parameter bounds move as Carbon ships seams. Run
+`loop surface` for the live version rather than trusting this table's shape.
 
 Current values are not repeated here — read them from
 `carbon/harness/harness_config.json`, or run `loop surface`. Nor is the
@@ -49,19 +60,25 @@ detect a regression. It lives in `loop/` rather than `runner/` on purpose:
 `runner_sha` stamps every recorded result, so governance metadata kept there
 would invalidate every baseline each time a row was corrected.
 
-Two exemptions are recorded explicitly rather than papered over, each with a
-rationale the tests require. `max_tokens`, `max_tool_steps`, `retry`,
-`tool_output`, and `default_context_limit` are **guard-only**: no observer fails
-*because of* them today, so the loop may defend them but has nothing to mine.
-`file_injection` is **unguarded**: `deliver()` applies it only on an `@path` send,
-A4 is the suite's only `@path` task, and A4 is the miner — guarding it needs a
-new task, not a table edit.
+Two exemption tables are recorded explicitly rather than papered over, each entry
+carrying a rationale the tests require. `GUARD_ONLY_KNOBS` holds `max_tokens`,
+`max_tool_steps`, `retry` and `default_context_limit`: no observer fails *because
+of* them today, so the loop may defend them but has nothing to mine.
+(`tool_output` was on that list and left it — it has miners now.)
+`UNGUARDED_KNOBS` — knobs whose only observers are their own miners, so nothing
+can guard them — is **EMPTY** as of 2026-08-15. `file_injection` was its sole
+entry, because A4 was the suite's only `@path` sender and A4 is the miner; A5 is
+the second `@path` task with a passing prior that closed it. An entry leaves that
+table only when someone writes the task.
 
 A third table, `CAPABILITY_GAPS`, records tasks that fail where *no* value of any
-setting can help, because the strategy they need is not on the menu. E1 is the
-current entry: both truncation strategies are positional, so neither reaches a
-fact in the middle of a large result, and the budget that would reach it floods
-the window. That is a Carbon feature request, not a candidate.
+setting can help, because the strategy they need is not on the menu. It is
+**EMPTY** today. E3 held the slot — it needed a `tool_output` strategy that
+preserves the middle of a large result and hands back a retrievable path — until
+Carbon shipped `offload_to_file`; E3 then moved to that knob's miners, with E4
+alongside it to prove path-recoverability specifically. A gap is a written
+request for a person, and it leaves when the person ships the strategy, never
+when the task is softened to stop asking.
 
 The `observers` claims are assertions about Carbon's internals and the tests
 cannot check them. An audit found six false at one point — a guard whose task is
@@ -86,20 +103,26 @@ The first pass closes the sharpest gaps:
 - Worker workspace binding.
 - Forced context-overflow compaction and bounded transient-provider retries.
 
-Layered nested instructions, richer file search tools, and side-channel
-full-output offload remain future Carbon work. They should land one seam at a
-time with a Refinery cluster, not as an unmeasured bundle.
+Side-channel full-output offload has since landed as the `offload_to_file`
+strategy on `tool_output`, with E3/E4 measuring it. Layered nested instructions
+and richer file search tools remain future Carbon work. They should land one seam
+at a time with a Refinery cluster, not as an unmeasured bundle.
 
 ## What candidate comparison records
 
-Promotion still requires:
+The rule quoted here when the review was written —
 
 ```text
 Δ_in >= 0 and Δ_ho >= 0 and max(Δ_in, Δ_ho) > 0
 ```
 
-A full-pass to zero-pass task collapse is an additional veto. Alongside
-per-task pass fractions, Refinery now reports mean:
+— is what `runner delta` reports, not what promotes. It was measured against six
+no-change runs and wrongly accepted 6 of 12 pairs, so `loop/acceptance.py` now
+decides with three outcomes (REJECT / CONFIRM / ACCEPT), where a gain earns
+CONFIRM and only a fresh paired confirmation can reach ACCEPT. See the README's
+"Deciding" section and that module's docstring. A full-pass to zero-pass task
+collapse is a veto under either. Alongside per-task pass fractions, Refinery
+reports mean:
 
 - tokens and estimated cost
 - model and tool calls
@@ -112,8 +135,11 @@ Those metrics expose tradeoffs but never override correctness.
 
 ## Run the new loop
 
-The runner and Carbon behavior both changed, so record a new baseline with LM
-Studio serving the model in `carbon/.env`:
+The runner and Carbon behavior both changed, so record a new baseline. Point
+`carbon/.env` at the serving base you mean to measure on first — the program's
+measurement base is OpenRouter with `LLM_PROVIDER_ORDER` and `LLM_QUANTIZATION`
+pinned, and recording against an unpinned remote base is refused outright. See
+the README's "Which serving base".
 
 ```bash
 uv sync

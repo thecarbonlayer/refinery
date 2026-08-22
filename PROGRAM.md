@@ -1,1 +1,9 @@
+# Program ledger
+
+Dated entries for incidents and decisions that changed how the program runs. It is
+append-only and deliberately thin; the measurement record itself lives in `results/`
+and `iterations/`.
+
+| when | entry |
+|---|---|
 | 2026-08-19 06:50 | Baseline-p1-r1 committed AFTER a scrub incident, owned plainly: one C3 row carried 'CWD: /private/var/folders' (clamp cut the path at the directory name; the partial-scrub regex required a trailing slash) AND the orchestrator committed before reading the grep gate — the exact masked-gate mistake the working notes warn about. Row repaired, commit amended (279b9c3), scrubber boundary case fixed with TDD (758cbc2). Consequence: runner hash moved again; Phase 2's baseline (p1-r2) will be recorded at the final hash and doubles as null-arm #1. |

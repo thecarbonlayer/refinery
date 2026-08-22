@@ -380,6 +380,21 @@ def pr_body(
         parts.append("denominator unknown for " + ", ".join(f"`{name}`" for name in unknown))
     drift = "; ".join(parts) or "none — every metric covers the same counts on both sides"
     bf, cf = record.baseline_fingerprint, record.candidate_fingerprint
+    # The serving base is part of the measured identity (it is folded into the
+    # behavior key), so this disclosure has to READ what served rather than name a
+    # fixed endpoint. It said "locally against LM Studio" from the days when that
+    # was the only base; the measurement base moved to a pinned remote router and
+    # the sentence quietly became a false statement published to a reviewer.
+    # The URL is never echoed — a recorded base_url can carry a credential, which
+    # is why runner/guard.py names bases by host only — so the two pin fields
+    # stand in for it: they are the serving identity a reader can act on.
+    if cf.get("provider_order") and cf.get("quantization"):
+        serving = (
+            f"against a pinned remote serving base (provider `{cf['provider_order']}`, "
+            f"quantization `{cf['quantization']}`)"
+        )
+    else:
+        serving = "against an unpinned local endpoint"
     confirmation_section = _confirmation_section(record)
     validation_section = (
         _calibrated_validation(record, rule, rule_raw, regressions)
@@ -443,7 +458,7 @@ Candidate fingerprint: `{cf.get("gemma_sha", "")[:12]}`{"+dirty" if cf.get("gemm
 working-tree edit (`dirty_sha` `{str(cf.get("dirty_sha"))[:12]}`) whose config content is \
 byte-identical to this PR's; rejected candidates never become commits.
 
-Known limitation (disclosed by design): these Δ numbers were computed locally against LM Studio; \
+Known limitation (disclosed by design): these Δ numbers were computed {serving}; \
 hosted CI cannot re-verify them.
 
 ## Security

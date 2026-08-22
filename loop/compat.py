@@ -1,10 +1,12 @@
 """Startup contract: is the sibling carbon checkout the base refinery expects?
 
 Refinery is built against the carbon base named in <repo>/carbon-base.json.
-A fresh clone of both default branches is NOT an operable pair today — carbon
-main lacks symbols the suite imports — and that used to surface as a bare
-ImportError mid-collection. This turns it into one loud, early, explanatory
-failure.
+Before the 2026-08-22 promotion (carbon PR #16) carbon main lacked symbols the
+suite imports, so a fresh clone of both default branches was NOT an operable
+pair, and it surfaced as a bare ImportError mid-collection. Main carries them
+now, but the pin stays on `self-improvement` — new carbon work lands there
+first — so a checkout can still be the wrong base, and this turns that into one
+loud, early, explanatory failure instead of an ImportError.
 
 Deliberately OUTSIDE runner/: runner's content hash versions every baseline,
 and this check must be able to evolve without invalidating measurements.

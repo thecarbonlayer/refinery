@@ -145,7 +145,22 @@ def test_pr_body_is_the_required_template():
     assert "Δ_in = +0.1250, Δ_ho = +0.2000" in body and "ACCEPTED" in body
     assert "| A2 | held_in | 0.0000 | 1.0000 | +1.0000 |" in body  # per-task, not aggregate
     assert "**Fable-proposed, task-suite-validated**" in body
-    assert "computed locally against LM Studio" in body  # disclosed limitation
+    # Disclosed limitation. It READS the recorded serving identity: CAND_FP carries no
+    # routing pins, which is the local case.
+    assert "computed against an unpinned local endpoint" in body
+
+
+def test_pr_body_discloses_the_serving_pin_it_was_measured_under():
+    """The limitation line used to hardcode "locally against LM Studio". The
+    measurement base moved to a pinned remote router, and a fixed sentence would
+    publish a false claim to a carbon reviewer. It reads the fingerprint now — and
+    still never echoes the base URL, which can carry a credential."""
+    pinned = dict(CAND_FP, provider_order="SomeProvider", quantization="bf16")
+    record = replace(RECORD, candidate_fingerprint=pinned)
+    body = pr_body(CANDIDATE, record, CLUSTER, BASELINE_RESULTS, CANDIDATE_RESULTS)
+    assert "provider `SomeProvider`" in body and "quantization `bf16`" in body
+    assert "LM Studio" not in body
+    assert "unpinned local endpoint" not in body
 
 
 def _rule(outcome, **extra):

@@ -9,25 +9,37 @@ suite (`runner/tasks/`) against a live Carbon agent driven by the
 [carbon](https://github.com/thecarbonlayer/carbon) harness, repeatedly per task
 (held-out gets more samples than held-in), aggregates pass fractions
 (averaged, never majority-voted), and computes Δ_in/Δ_ho between two harness
-states for the aggregate acceptance rule
-`Δ_in ≥ 0, Δ_ho ≥ 0, max(Δ_in, Δ_ho) > 0`.
+states. `runner delta` reports those Δs against the original Self-Harness rule
+`Δ_in ≥ 0, Δ_ho ≥ 0, max(Δ_in, Δ_ho) > 0`. That rule is a report, not the
+promotion decision: the loop measured it against six no-change runs and it
+wrongly accepted 6 of 12 pairs, so promotion now runs through the three-outcome
+rule in [Deciding](#deciding).
 
 ## Carbon base
 
 This repo is built against the carbon base named in
 [`carbon-base.json`](carbon-base.json) — today the `self-improvement`
-branch. Importing the `loop` package (`python -m loop.cli`, and any pytest
-run) checks the sibling checkout and fails with remediation if it is
-missing required symbols. The runner CLI (`python -m runner.cli`) is not
+branch at a pinned commit. Importing the `loop` package (`python -m loop.cli`,
+and any pytest run) checks the sibling checkout and fails with remediation if it
+is missing required symbols. The runner CLI (`python -m runner.cli`) is not
 guarded — `runner/` is frozen by the baseline content hash — so a wrong
-checkout there still fails at import, just without remediation. `main` +
-`main` becomes the documented pair when the prepared promotion lands.
+checkout there still fails at import, just without remediation.
 
-There is one additional promotion veto: a candidate that moves any task from a
-1.0 baseline pass fraction to 0.0 is rejected even if another task's gain hides
-the collapse inside the split average. Smaller per-task regressions remain
-visible as warnings rather than hard failures because three- and five-attempt
-fractions are noisy.
+The promotion of `self-improvement` into carbon `main` landed on 2026-08-22
+(carbon PR #16), so `main` now carries the symbols the suite imports and
+`main` + `main` is an operable pair. The pin stays on `self-improvement`
+deliberately: new carbon work lands there first, and following the promotion to
+`main` would pin the base a step behind whatever is being developed. A carbon
+HEAD that differs from the pinned COMMIT is a warning printed to stderr, not an
+error — iteration work legitimately moves the checkout, and baseline reuse is
+decided by the recorded behavior key, not the SHA.
+
+One veto sits on top of the Δ arithmetic wherever a decision is made: a
+candidate that moves any task from a 1.0 baseline pass fraction to 0.0 is
+rejected even if another task's gain hides the collapse inside the split
+average. Smaller per-task regressions remain visible as warnings rather than
+hard failures because three- and five-attempt fractions are noisy. It is not
+the only veto any more — see [Deciding](#deciding).
 
 **Why this is its own repo:** the task definitions, verifier code, pinned
 commands, and oracle hashes must never share a home with the editable surface
@@ -41,13 +53,38 @@ both assume that — change them together if you nest things differently.
 
 ## Running
 
-LM Studio must be serving the model named in `carbon/.env` (real models, no
-mocks). refinery has no `.env` of its own — it reads carbon's, so the suite
-and the harness under test always agree on the endpoint.
+A real model must be serving; there are no mocks. refinery has no `.env` of its
+own — it reads `carbon/.env` (via carbon's own loader, so real environment
+variables still win), and the suite and the harness under test therefore cannot
+disagree about what ran.
+
+**Which serving base.** Carbon's checked-in `.env` points at a local LM Studio
+endpoint. That is carbon's own dev and accept-gate default, and it still works
+for spot-checks. It is not the base this program MEASURES on: the arms recorded
+from 2026-08-22 onward (`results/p3-null-cmp-a.json` is the first) run against
+OpenRouter with the provider and the quantization pinned, because unpinned
+remote routing spreads one model label across providers
+at mixed quantization and puts a serving confound inside the experiment.
+`runner/guard.py` refuses outright to record against a remote base without both
+pins. To point refinery at that base, set these in `carbon/.env` or export them:
+
+    LLM_BASE_URL=https://openrouter.ai/api/v1
+    LLM_MODEL=<routed model id>
+    LLM_API_KEY=<OpenRouter key>
+    LLM_PROVIDER_ORDER=<exactly one provider name>
+    LLM_QUANTIZATION=<one quantization label>
+
+A local base needs no pins — one physical server is its own complete serving
+identity. The serving fields are folded into every result's `behavior_key`, so
+switching bases forces a re-baseline rather than silently pooling two
+populations. Do not copy values out of this paragraph: the most recent recorded
+arm is `results/p3-null-cmp-a.json` and its `fingerprint` block is the authority
+on what was actually served.
 
     uv sync
     uv run python -m runner.cli run --label baseline-main          # full suite, resumable
     uv run python -m runner.cli run --label x --only D1 --attempts 1   # spot-check
+    uv run python -m runner.cli check baseline-main                # does that baseline still resume? (no model run)
     uv run python -m runner.cli delta results/baseline-main.json results/candidate.json
 
 Results stream to results/<label>.jsonl per attempt (a killed run resumes,
@@ -55,8 +92,11 @@ skipping finished attempts; records are pinned to the carbon SHA + config
 version they measured, and a resume refuses records from a different harness
 state); aggregates land in results/<label>.json. Partial runs (--only) are
 stamped with a "filter" field and refuse to overwrite a full run's JSON.
-`delta` refuses filtered inputs, mismatched per-task attempt counts, and
-mismatched models by design — a Δ is only meaningful like-for-like.
+`delta` refuses filtered inputs, mismatched per-task attempt counts, mismatched
+models, and mismatched serving fields (base URL, provider order, quantization,
+reasoning effort, responder) by design — a Δ is only meaningful like-for-like.
+`--force` on `run` discards a label's prior records and bypasses the
+resume-guard; `runner check <label>` answers the same question read-only.
 Results are also stamped with `runner_sha` (the verifier's own version);
 deltas across different runner versions are refused, so re-measure the
 baseline after changing runner code. The harness-quality tasks added after the
@@ -80,11 +120,36 @@ and land as fixed JSON artifacts in `iterations/<iter>/` (`clusters.json`,
 `candidates.json`); only validation and the branch+PR step are code. A
 candidate is applied to the carbon WORKING TREE (never committed — a
 rejected candidate leaves no trace there), the suite runs in a fresh
-subprocess (config values bind at import), the edit is reverted, and the
-aggregate rule plus the catastrophic per-task regression veto decides.
+subprocess (config values bind at import), the edit is reverted, and a
+decision is recorded (see [Deciding](#deciding)).
 Accepted edits each get their own branch off `self-improvement` in carbon and a PR targeting it
 (explicit base — never `main`), with the evidence (cluster, knobs, per-task Δ,
 provenance) in the body. The pipeline never merges.
+
+### Deciding
+
+`loop/acceptance.py` is authoritative; this is the shape of it. Which path a
+candidate takes depends on which editable section its edit maps to
+(`loop/validate.py`):
+
+- **A section the three-outcome rule covers** (`tool_output` always;
+  `compaction` only while a fresh, fit calibration covers the measurements
+  being judged) is decided by `loop.acceptance.evaluate()`, which returns
+  REJECT or CONFIRM and *never* ACCEPT. CONFIRM means promising, not accepted.
+  The only road to ACCEPT is a fresh paired rerun — `loop.cli confirm` →
+  `loop.acceptance.confirmed()` — in which the original gain reappears and
+  nothing regresses.
+- **A calibration-required section with no fit calibration** (`compaction`
+  today) is REFUSED with the reason recorded. It does not fall back to the
+  Δ rule: two of this program's own no-change arms satisfy that rule outright,
+  so falling back is how a candidate that changed nothing reaches ACCEPTED.
+- **Everywhere else** the causal verdict decides: the Self-Harness Δ rule with
+  movements on tasks the edited knob cannot reach zeroed out first.
+
+Besides the collapse veto, a REJECT also follows from a rise in MECHANICAL
+security failures (the harness breaking its own storage contract — blocked
+unconditionally, never averaged away) and from a behavioral security rise that
+the confirmation's predeclared one-sided Fisher test confirms.
 
 Before proposing, inspect the live contract:
 
@@ -99,7 +164,9 @@ policy improvement is a `strategy_surface_gap`; a broken invariant is a
 `correctness_defect`. Neither should be disguised as a configuration edit.
 
     uv run python -m loop.cli dry-run  --iteration iter-02 --candidate output-policy --tasks E2 D1
-    uv run python -m loop.cli validate --iteration iter-02 [--candidate output-policy]
+    uv run python -m loop.cli validate --iteration iter-02 [--candidate output-policy] [--baseline results/<label>.json]
+    uv run python -m loop.cli confirm  --iteration iter-02 --candidate output-policy \
+        --baseline-label confirm-base --candidate-label confirm-cand --attempts 10
     uv run python -m loop.cli pr       --iteration iter-02 --candidate output-policy
 
 ## Layout
@@ -111,20 +178,53 @@ policy improvement is a `strategy_surface_gap`; a broken invariant is a
 - runner/{run,suite}.py — attempt/suite drivers; runner/delta.py — Δ + rule
 - runner/helpers.py — approve-and-log approver, environ guard,
   transcript/hash utilities
+- runner/guard.py — the behavior key, the resume gate, and the serving-pin
+  refusal that blocks recording against an unpinned remote base
 - results/ — committed measurement artifacts
 - loop/ — the validate→branch→PR pipeline (imports runner.suite / runner.delta)
+- loop/acceptance.py — the three-outcome rule and the security vetoes;
+  loop/calibrate.py — the measured null models the rule reads
+- loop/compat.py — the carbon-base check (`carbon-base.json`) run on `loop` import
 - loop/knob_coverage.py — which tasks can observe each editable knob, and in what
   role. Governance metadata, deliberately outside runner/ so correcting a row does
   not change runner_sha and invalidate every recorded baseline
 - iterations/ — per-iteration artifacts: mining notes, clusters, candidates,
   validation records (rejected candidates included — they are the honest bulk)
 
-The task clusters currently cover context loss, verification integrity,
+The lettered clusters A-H cover context loss, verification integrity,
 containment, tool use, large-item access, tool semantics and execution depth,
 response completeness, repeated compaction, and subagent workspace binding.
-See `docs/carbon-quality-review.md` for the failure each newer diagnostic is
-designed to isolate and the recommended Carbon implementation order.
+`docs/carbon-quality-review.md` describes the failure each of those diagnostics
+is designed to isolate; it was written for that generation of the suite and does
+not cover the candidate suites below.
+
+Four CANDIDATE suites were authored on 2026-08-21/22 ahead of their human gate.
+They are registered — they appear in `TASKS`, they run, their offline premise
+proofs are part of `pytest` — and they sit deliberately OUTSIDE every calibrated
+gate, confirmation-guard set, null-model coverage set and knob-coverage row until
+each runs its own null campaign. Their isolation is pinned by tests, not by
+convention (`tests/test_cluster_v.py`, `tests/test_sel_tasks.py`,
+`tests/test_registry.py`, `tests/test_calibrate.py`):
+
+- **CTX-3..CTX-7** (`runner/tasks/cluster_ctx.py`) — context delivery through the
+  `@path` injection door. Cluster id stays **A**, the mechanism family that owns
+  that door via A4/A5.
+- **ONB-1..ONB-5**, cluster **I** (`cluster_i.py`) — session onboarding and
+  loaded instructions.
+- **VER-4, LOOP-2..LOOP-6**, cluster **V** (`cluster_v.py`) — verification
+  integrity and loop discipline.
+- **SEL-2..SEL-5**, cluster **S** (`cluster_s.py`) — tool exposure. "S" for
+  Select, out of letter sequence on purpose so parallel authoring streams did not
+  all claim "I".
 
 ## Offline tests
 
     uv run pytest    # verifier helpers, Δ math, registry shape — no model calls
+
+Green means all pass and exactly one skips. The skip is `tests/test_round2_attack.py`'s
+calibrated sweep suspending ITSELF because `iterations/calibration-compaction/model-r2.json`
+records `fitness.fit=false`: the compaction null model does not pass its own goodness
+and stability checks, so it installs nothing and gates nothing, and a sweep built on it
+would be asserting against a model that refused. That is the fail-closed design working.
+It is restored by a fit artifact at this runner hash or a successor — not by unskipping
+the test. `iterations/calibration-compaction/README.md` has the measurement history.

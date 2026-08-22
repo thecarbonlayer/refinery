@@ -17,20 +17,19 @@ from runner.tasks import TASKS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# A set, not the string "ABCDEFGHI": `"EF" in "ABCDEFGHI"` is True, so a substring
-# test would accept a malformed multi-letter cluster id. "I" is the onboarding /
-# instructions section (ONB-1..ONB-5, 2026-08-21).
-# A set, not the string "ABCDEFGHIV": `"EF" in "ABCDEFGH"` is True, so a substring
-# test would accept a malformed multi-letter cluster id. "I" is the onboarding /
-# instructions candidate section (cluster_i.py) and "V" the verification /
-# loop-discipline one (cluster_v.py) — both registered, neither consumed by any
-# calibrated gate (their own isolation tests pin that). The Phase 4 context
-# candidates live in cluster "A", the mechanism family owning the @path door.
+# A set, not the string "ABCDEFGHISV": `"EF" in "ABCDEFGHISV"` is True, so a
+# substring test would accept a malformed multi-letter cluster id.
+#
+# Beyond the lettered A-H core, three candidate sections — all registered, none
+# consumed by any calibrated gate (their own isolation tests pin that):
+#   "I" — onboarding / instructions (ONB-1..ONB-5, cluster_i.py, 2026-08-21)
+#   "V" — verification / loop discipline (VER-4, LOOP-2..6, cluster_v.py)
+#   "S" — tool exposure ("S" for Select, cluster_s.py; out of letter sequence
+#         deliberately, so the parallel task-authoring streams of decision 20
+#         did not all claim "I")
+# The Phase 4 context candidates (CTX-3..CTX-7) add no letter: they live in
+# cluster "A", the mechanism family owning the @path door.
 CLUSTERS = frozenset("ABCDEFGHISV")
-# A set, not the string "ABCDEFGHS": `"EF" in "ABCDEFGHS"` is True, so a substring
-# test would accept a malformed multi-letter cluster id. "S" (Select) is the
-# tool-exposure section — out of letter sequence deliberately, so the parallel
-# task-authoring streams (decision 20) don't all claim "I".
 
 # Phase 1 measurement contract §6's vetted primitive vocabulary, copied verbatim
 # from the plan's Global Constraints list (exactly 12) — never re-derived from
@@ -157,28 +156,15 @@ def test_contract_primitive_alias_assignments_hold():
 def test_registry_shape():
     names = [t.name for t in TASKS]
     assert len(names) == len(set(names)), "duplicate task names"
-    # 28 through Phase 2b, 31 once the Phase 2c scenario guards landed, 47 with the
-    # Phase 4 candidate suites (CTX, ONB and cluster V, authored in parallel and
-    # merged together). A literal count is the one
-    # assertion that catches a task added to a cluster's SPECS and nowhere else — the
-    # membership set below would have to be edited to hide it, which is a deliberate
-    # act rather than an omission.
-    # onboarding candidate suite (ONB-1..ONB-5, 2026-08-21). A literal count is the
-    # one assertion that catches a task added to a cluster's SPECS and nowhere else —
-    # the membership set below would have to be edited to hide it, which is a
-    # deliberate act rather than an omission.
-    assert len(names) == 51
-    # 28 through Phase 2b, 31 once the Phase 2c scenario guards landed, 37 with
-    # the cluster-V verification/loop candidate suite. A literal count is the one
-    # assertion that catches a task added to a cluster's SPECS and nowhere else —
-    # the membership set below would have to be edited to hide it, which is a
-    # deliberate act rather than an omission.
-    assert len(names) == 51
-    # 28 through Phase 2b, 31 once the Phase 2c scenario guards landed, 35 with
-    # the tool-exposure section (SEL-2..5, program/sel-task-authoring). A literal
-    # count is the one assertion that catches a task added to a cluster's SPECS and
-    # nowhere else — the membership set below would have to be edited to hide it,
-    # which is a deliberate act rather than an omission.
+    # 28 through Phase 2b; 31 once the Phase 2c scenario guards (CMP-5/6/7) landed;
+    # 51 once the four Phase 4 candidate suites merged together — CTX-3..7 (+5),
+    # ONB-1..5 (+5), cluster V's VER-4 and LOOP-2..6 (+6), SEL-2..5 (+4). Those four
+    # streams were authored in parallel and each left its own copy of this assertion
+    # and its own count history behind; the three surviving stale copies (47, 37, 35)
+    # were merge residue, each describing a suite that never shipped alone.
+    # A literal count is the one assertion that catches a task added to a cluster's
+    # SPECS and nowhere else — the membership set below would have to be edited to
+    # hide it, which is a deliberate act rather than an omission.
     assert len(names) == 51
     for t in TASKS:
         assert t.split in ATTEMPTS

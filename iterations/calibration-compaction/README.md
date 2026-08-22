@@ -136,10 +136,37 @@ Raising the **held-in attempts** is what buys resolution. Nothing else does.
 
 **3. Re-measurement on a pinned provider and quantization.** The ten arms ran against
 local LM Studio, and six attempts died on `HTTP 400` from that endpoint (see
-`CORRECTION.md`). The planned round-3 measurement moves to OpenRouter with the provider
-AND the quantization pinned. Routing across providers with mixed quantization puts a
-serving confound inside the experiment: two arms that differ only in which backend
-served them are not a null pair, and nothing in the record would say so.
+`CORRECTION.md`). The round-3 measurement moves to OpenRouter with the provider AND the
+quantization pinned. Routing across providers with mixed quantization puts a serving
+confound inside the experiment: two arms that differ only in which backend served them
+are not a null pair, and nothing in the record would say so.
 
 Until a FIT artifact exists at the arms' own runner hash or a successor, compaction
 stays uncalibrated and the suspended sweeps stay suspended.
+
+## Round 3: one arm on the pinned base, and two things wrong with it
+
+`results/p3-null-cmp-a.json` is the first arm recorded on the pinned serving base:
+`https://openrouter.ai/api/v1`, model `google/gemma-4-26b-a4b-it`, provider `Novita`,
+quantization `bf16`, `--only A1 G2 G4 G5 CMP-5 CMP-6 CMP-7 --attempts 10`. Its result
+is unambiguous and worth stating before anything else about it:
+
+**All seven tasks passed 10 of 10. Zero variance, on every task.** A task that never
+fails has no null variation to model and no headroom to mine. Whatever else round 3
+turns into, this covered set does not discriminate on this base.
+
+Two provenance facts sit on that arm, and both are reasons not to build a pooling on it
+as it stands:
+
+- **Its `runner_sha` is not a committed state of `runner/`.** The arm records
+  `55485b74…`. Reproducing the hash over every distinct `runner/` tree reachable from
+  every ref in this repo (94 trees, 238 commits, 2026-08-22) matches all 15 other
+  recorded values and does NOT match this one. It was measured against an uncommitted
+  working tree. A later arm recorded from a clean checkout will carry a different hash,
+  and `_REQUIRED_PROVENANCE` refuses to pool across verifier versions — correctly.
+- **It ran against carbon `ea660003e`, not the pinned `c79da6546`.** `ea660003e` is an
+  ancestor of the pin, and `carbon-base.json` had already moved to `c79da6546` by the
+  time the arm was committed.
+
+Neither fact makes the 70/70 wrong. Both make the arm unpoolable at a committed
+identity, so round 3 starts from a clean checkout or it does not start.

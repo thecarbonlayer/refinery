@@ -32,10 +32,16 @@ Never move suite code into carbon. Never let carbon's config reach into `runner/
   patterns, and the prose beside it (`docs/**/*.md`, `iterations/**/*.md`) against the
   same patterns anchored on a following path segment. The grep is for catching it
   before the suite does. `iterations/` was in this instruction and outside the gate for
-  the whole of Phase 2; do not let a directory sit in that state again.
+  the whole of Phase 2; do not let a directory sit in that state again. The
+  repo-ROOT markdown (`README.md`, `AGENTS.md`, `PROGRAM.md`) is outside both globs
+  today — grep it by hand, and never put an absolute path in it.
 - **No private names.** Sibling consumers and internal projects get described by role.
   If you cannot say it on a stranger's screen, it does not go in.
 - **Tests green** — all of them, not "all but the known ones". `uv run pytest`.
+  Exactly one test skips, and it is not a "known one" to wave through: the
+  calibrated sweep in `tests/test_round2_attack.py` suspends ITSELF because the
+  compaction null model records `fitness.fit=false` and so installs nothing. Any
+  second skip is a real one — read it.
 - **Lint clean** — `uv run ruff check .` and `uv run ruff format --check .`.
 - **Every claim self-contained.** Do not cite a document that does not live in this
   repo; a dangling citation is worse than none.
@@ -64,23 +70,53 @@ Never move suite code into carbon. Never let carbon's config reach into `runner/
   carbon can turn this suite red on its own. Derive expectations from disk, never
   hardcode a value.
 - **No `.env` here, by design.** refinery reads carbon's, so the suite and the harness
-  under test cannot disagree about which model ran.
+  under test cannot disagree about which model ran. Carbon's checked-in `.env` points
+  at a LOCAL LM Studio endpoint — carbon's own dev default, not this program's
+  measurement base. Recorded arms since 2026-08-22 run on OpenRouter with
+  `LLM_PROVIDER_ORDER` and `LLM_QUANTIZATION` pinned; `runner/guard.py` refuses to
+  record against a remote base without both, because unpinned routing mixes
+  quantizations under one model label. The serving fields are part of the behavior
+  key, so switching bases forces a re-baseline instead of pooling two populations.
 - **Siblings on disk.** refinery and carbon sit under one root; the dependency path and
   the checkout constant both assume it. Change them together.
 - **Offline tests stay offline.** `uv run pytest` makes no model calls. Keep it that way.
 - **The sibling carbon must be the pinned base.** `carbon-base.json` names it;
   `loop/compat.py` enforces it loudly when the `loop` package is imported
   (pytest exits early with remediation). `runner/` is not guarded — a wrong
-  checkout there still fails at import, just without remediation. A fresh
-  clone of both `main`s is not an operable pair until the promotion lands.
+  checkout there still fails at import, just without remediation. The promotion
+  into carbon `main` landed 2026-08-22 (carbon PR #16), so `main` + `main` IS an
+  operable pair now; the pin stays on `self-improvement` because new carbon work
+  lands there first. A HEAD that differs from the pinned COMMIT is a warning, not
+  an error — baseline reuse is decided by the behavior key, not the SHA.
 
 ## The acceptance rule
 
+The Self-Harness rule —
+
     Δ_in ≥ 0  and  Δ_ho ≥ 0  and  max(Δ_in, Δ_ho) > 0
 
-No regression on either split, improvement on at least one. Rejected candidates stay
-committed alongside accepted ones — dropping them would make the loop look better than
-it is.
+— no regression on either split, improvement on at least one, is what `runner delta`
+REPORTS. It is no longer what promotes. Measured against six runs with nothing changed
+between them, it wrongly accepted 6 of the 12 pairs and showed a false regression on 3
+more. `loop/acceptance.py` replaced it with three outcomes:
+
+- **REJECT** — a split regressed past one attempt, a full-pass task collapsed to zero,
+  the MECHANICAL security count rose, a confirmation's predeclared Fisher test confirmed
+  a behavioral rise, or there is no gain past one attempt worth confirming.
+- **CONFIRM** — a real gain with nothing disqualifying it. Promising, NOT accepted:
+  the same six no-change runs produced this much movement from noise alone.
+- **ACCEPT** — only ever from `confirmed()`, a fresh PAIRED rerun in which the original
+  improvement reappears and nothing regresses. `evaluate()` never returns it.
+
+Which path a candidate takes is chosen per candidate by which editable section its edit
+maps to (`loop/validate.py`); a calibration-required section with no fit calibration is
+REFUSED rather than falling back to the Δ rule, because two of this program's own
+no-change arms satisfy that rule outright. `loop/acceptance.py` is authoritative; do not
+restate its thresholds here — they are derived from the runs being judged, never
+hard-coded.
+
+Rejected candidates stay committed alongside accepted ones — dropping them would make
+the loop look better than it is.
 
 ## What the loop does and does not do
 
