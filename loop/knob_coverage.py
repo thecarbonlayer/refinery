@@ -154,12 +154,23 @@ KNOB_COVERAGE: dict[str, dict[str, tuple[str, ...]]] = {
         "guards": (LIVE_GUARDS,),
     },
     # `deliver()` applies file_injection ONLY on an `@path` match in the user
-    # text. A4 is the suite's sole `@path` sender and has no tools, so the
-    # injected block is its only route to the answer — see UNGUARDED_KNOBS.
+    # text. A4 and A5 were the suite's only `@path` senders when this row was
+    # measured, and both have no tools, so the injected block is their only route
+    # to the answer — see UNGUARDED_KNOBS.
     # A4 mines (needle at the END, so `keep_head` loses it); A5 guards (needle in the
     # HEAD, so a legal `tail_fraction` near 1 loses it). The pair pins opposite ends of
     # the same interval, which is why one could not stand in for the other and why this
     # knob went unguarded until A5 was authored.
+    #
+    # Phase 4 (2026-08-21): CTX-3..CTX-7 (runner/tasks/cluster_ctx.py) are five NEW
+    # `@path` senders that mechanically observe this knob, and they are deliberately
+    # NOT on this row yet. A row entry is what the loop may mine or cite as a guard,
+    # and those tasks are uncalibrated candidates with no null campaign behind them
+    # (tests/test_calibrate.py pins them outside every calibrated set). They join
+    # this row at the phase's calibration-install step, with measured evidence, or
+    # not at all — never by padding the tuple at authoring time (the module
+    # docstring's warning). Until then `loop/observed_coverage.py` will rightly
+    # queue them as unlisted-with-activity once their first recorded runs exist.
     "file_injection": {"observers": ("A4", "A5"), "miners": ("A4",), "guards": ("A5",)},
     # The strategy menu, not the budget, is what this row now mines. E1 measures
     # retrieval ECONOMY, which the budget genuinely moves. E3's midpoint needle in

@@ -149,6 +149,35 @@ def compacted(messages: list[dict]) -> bool:
     return any(str(m.get("content", "")).startswith("[summary") for m in messages)
 
 
+# Two of carbon's inline literals, copied here because carbon exposes no constant for
+# either (the G2 truncation-marker situation exactly; both copies are pinned against
+# carbon's own module source by `tests/test_registry.py`):
+#
+# - `Agent.run` wraps every delivered `@path` block in a user message beginning with
+#   this prefix (harness/agent.py), which is the ONLY transcript evidence that the
+#   `file_injection` door fired at all;
+# - the door's marker for a block it cut (harness/limits.py `_door`), matched on its
+#   invariant prefix — the counted chars and strategy name that follow are per-cut.
+CONTEXT_BLOCK_PREFIX = "Context file:\n"
+TRUNCATION_MARK = "…[truncated "
+
+
+def injected_blocks(messages: list[dict]) -> list[str]:
+    """Every `@path` context block carbon injected, exactly as delivered.
+
+    The observation behind every `file_injection` live premise check (CTX-1..CTX-7):
+    whether injection fired is `bool(injected_blocks(...))`, whether the block was cut
+    is `TRUNCATION_MARK in block`, and whether a needle was delivered is a substring
+    check on the block. Read off the transcript AFTER a single-turn run — safe there
+    because nothing has compacted a one-turn conversation; multi-turn tasks must not
+    reuse this after filler turns (the G5 lesson: compaction rewrites history)."""
+    return [
+        str(m.get("content", ""))[len(CONTEXT_BLOCK_PREFIX) :]
+        for m in messages
+        if m.get("role") == "user" and str(m.get("content", "")).startswith(CONTEXT_BLOCK_PREFIX)
+    ]
+
+
 # Every carbon name this telemetry reads, in two groups because they fail the
 # same way for different reasons: each attribute read is a getattr with a zero
 # default, and each totals() read is a dict .get with a zero default. Either kind

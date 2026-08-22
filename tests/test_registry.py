@@ -44,9 +44,12 @@ PRIMITIVES = frozenset(
 
 ALIAS_RE = re.compile(r"^[A-Z]{3,4}-\d+$")
 
-# The 31 fixed (primitive, alias) assignments: the 28 from the Phase 1 measurement
+# The 36 fixed (primitive, alias) assignments: the 28 from the Phase 1 measurement
 # contract's §6 table, plus the three Phase 2c scenario guards (CMP-5/6/7, frozen
-# in contracts/phase2c-guards-contract.md §1-§3).
+# in contracts/phase2c-guards-contract.md §1-§3), plus the five Phase 4 context-
+# delivery candidates (CTX-3..CTX-7, authored from the 2026-08-21 phase-4 brief §3
+# ahead of its gate — they are registry members and UNCALIBRATED candidates, see
+# cluster_ctx.py and test_calibrate.py's isolation pin).
 # A2/A3 were originally delegated to the implementer reading cluster_a.py; the
 # 2026-08-19 audit-finding-4 amendment resolved both explicitly (A2's original
 # assignment was itself wrong — its oracle measures tool_output truncation
@@ -90,6 +93,14 @@ CONTRACT_PRIMITIVE_ALIAS = {
     "CMP-5": ("compaction", None),
     "CMP-6": ("compaction", None),
     "CMP-7": ("compaction", None),
+    # Phase 4 CTX candidates. `alias=None` for the CMP-5/6/7 reason: the NAME is
+    # already the mnemonic. CTX-1 and CTX-2 are not new rows — they are A5 and A4,
+    # whose aliases above have carried those names since the §6 table was frozen.
+    "CTX-3": ("context-delivery", None),
+    "CTX-4": ("context-delivery", None),
+    "CTX-5": ("context-delivery", None),
+    "CTX-6": ("context-delivery", None),
+    "CTX-7": ("context-delivery", None),
 }
 
 
@@ -119,11 +130,12 @@ def test_contract_primitive_alias_assignments_hold():
 def test_registry_shape():
     names = [t.name for t in TASKS]
     assert len(names) == len(set(names)), "duplicate task names"
-    # 28 through Phase 2b, 31 once the Phase 2c scenario guards landed. A literal
-    # count is the one assertion that catches a task added to a cluster's SPECS and
-    # nowhere else — the membership set below would have to be edited to hide it,
-    # which is a deliberate act rather than an omission.
-    assert len(names) == 31
+    # 28 through Phase 2b, 31 once the Phase 2c scenario guards landed, 36 with the
+    # Phase 4 context-delivery candidates (CTX-3..CTX-7). A literal count is the one
+    # assertion that catches a task added to a cluster's SPECS and nowhere else — the
+    # membership set below would have to be edited to hide it, which is a deliberate
+    # act rather than an omission.
+    assert len(names) == 36
     for t in TASKS:
         assert t.split in ATTEMPTS
         assert t.cluster in CLUSTERS
@@ -164,9 +176,16 @@ def test_registry_membership():
         "CMP-5",
         "CMP-6",
         "CMP-7",
+        "CTX-3",
+        "CTX-4",
+        "CTX-5",
+        "CTX-6",
+        "CTX-7",
     }
     held_in = {t.name for t in TASKS if t.split == "held_in"}
     held_out = {t.name for t in TASKS if t.split == "held_out"}
+    # CTX splits ALTERNATE at authoring (phase-4 brief §3); the final assignment is a
+    # gate input, so a gate decision moving one is a legitimate edit here.
     assert held_in == {
         "A1",
         "A2",
@@ -188,8 +207,25 @@ def test_registry_membership():
         "H3",
         "CMP-5",
         "CMP-7",
+        "CTX-3",
+        "CTX-5",
+        "CTX-7",
     }
-    assert held_out == {"A3", "A4", "B3", "C3", "D3", "E2", "E4", "F2", "G2", "H2", "CMP-6"}
+    assert held_out == {
+        "A3",
+        "A4",
+        "B3",
+        "C3",
+        "D3",
+        "E2",
+        "E4",
+        "F2",
+        "G2",
+        "H2",
+        "CMP-6",
+        "CTX-4",
+        "CTX-6",
+    }
 
 
 def test_e_fixtures_are_hidden_by_carbons_own_truncation():
@@ -824,6 +860,7 @@ _TASK_CLUSTER_MODULES = (
     "cluster_a",
     "cluster_b",
     "cluster_c",
+    "cluster_ctx",
     "cluster_d",
     "cluster_e",
     "cluster_f",
@@ -3447,3 +3484,388 @@ def test_cmp5_and_cmp6_record_the_judges_delivery():
         assert "judge_delivery(verdict.judgments)" in source, run.__name__
         assert "metrics.update(" in source, run.__name__
         assert source.index("judge_delivery") < source.index("reply={reply[:240]!r}"), run.__name__
+# --- Phase 4: the CTX context-delivery cluster's offline premise checks ------------
+#
+# Every CTX oracle is an exact sentinel plus deterministic counts, so every premise
+# below is checkable OFFLINE by running carbon's own `truncate()` on the task's own
+# fixture bytes — no model call anywhere (phase-4 brief §3; decision 12).
+#
+# The probe discipline is cluster E's, for cluster E's reasons: policies are NAMED
+# (the authored strategy/budget/tail_fraction, or budgets derived from the fixture's
+# own size), NEVER read off carbon's live config. `run_harness_gates` runs this suite
+# while a legal candidate sits applied to carbon's working tree, and a premise test
+# that read the live knob would veto exactly the candidates the suite exists to
+# measure (the E1/E3 history, and cluster_a's AUTHORED_CLAMP note).
+#
+# Presence and absence probe DIFFERENT texts, deliberately. `deliver()` composes
+# `--- <path> ---\n<body>` before cutting, and the path's length varies per run
+# (mkdtemp), shifting the head window's reach into the body by that many chars.
+# So "delivered at baseline" is asserted on a composed block with a LONGER prefix
+# than any real tmp path (the worst case for a head-window needle), and "absent at
+# baseline" is asserted on the raw body (no prefix = the head reaches DEEPEST into
+# the body — the worst case for an absence claim; the tail window is a suffix and
+# never moves with the prefix).
+
+# Longer than any real `--- <mkdtemp path>/<name> ---\n` prefix this suite composes.
+_CTX_WORST_CASE_PREFIX = "--- " + "p" * 110 + " ---\n"
+
+
+def _ctx_authored_policy():
+    """The policy the fixtures were sized against, pinned at AUTHORING time.
+
+    The same numbers cluster_ctx pins (AUTHORED_CLAMP=4000 via cluster_a, head_tail,
+    tail_fraction 0.5 — carbon's shipped `file_injection` from config v1 through v8).
+    Built from the task module's own constants so a fixture resize and its premise
+    probes cannot drift apart.
+    """
+    from harness.harness_config import TruncationPolicy
+
+    from runner.tasks.cluster_a import AUTHORED_CLAMP
+    from runner.tasks.cluster_ctx import AUTHORED_STRATEGY, AUTHORED_TAIL_FRACTION
+
+    return TruncationPolicy(AUTHORED_STRATEGY, AUTHORED_CLAMP, AUTHORED_TAIL_FRACTION)
+
+
+def _ctx_legal_probes(budget: int):
+    """The E3/E4 probe grid: both shipped strategies, tail_fraction across the legal
+    OPEN interval's near-extremes and middle. `keep_head` ignores tail_fraction, but
+    the field must still be legal — carbon validates at construction."""
+    from harness.harness_config import TruncationPolicy
+
+    for strategy, tail_fraction in (
+        ("head_tail", 0.001),
+        ("head_tail", 0.5),
+        ("head_tail", 0.9),
+        ("head_tail", 0.999),
+        ("keep_head", 0.5),
+    ):
+        yield TruncationPolicy(strategy, budget, tail_fraction)
+
+
+def test_ctx_sentinels_are_distinct_across_the_whole_injection_door():
+    """Every sentinel that can travel through the `file_injection` door must be
+    unambiguous: the five CTX needles, CTX-4's three per-position facts, CTX-5's
+    real token and its six decoys, and A4/A5's needles (CTX-2/CTX-1 — same door).
+    None may equal or CONTAIN another, or a reply carrying one could satisfy a
+    substring check for a different task's or a decoy's value."""
+    from runner.tasks.cluster_a import A4_SENTINEL, A5_SENTINEL
+    from runner.tasks.cluster_ctx import (
+        CTX3_SENTINEL,
+        CTX4_FACTS,
+        CTX5_DECOYS,
+        CTX5_REAL,
+        CTX6_SENTINEL,
+        CTX7_SENTINEL,
+    )
+
+    values = [
+        A4_SENTINEL,
+        A5_SENTINEL,
+        CTX3_SENTINEL,
+        *CTX4_FACTS.values(),
+        CTX5_REAL,
+        *CTX5_DECOYS,
+        CTX6_SENTINEL,
+        CTX7_SENTINEL,
+    ]
+    assert len(values) == len(set(values)), "duplicate sentinel across the injection door"
+    for a in values:
+        for b in values:
+            assert a == b or a not in b, f"{a!r} is a substring of {b!r}"
+
+
+def test_ctx3_needle_is_unreachable_by_every_shipped_strategy():
+    """CTX-3 is THE MINER, and its premise is the brief's prespecified prediction:
+    0/N under the shipped strategy at the shipped budget. That claim is computable
+    with no model call, so a miss here is an AUTHORING BUG, never noise — exactly
+    E3's discipline, moved to the `file_injection` door.
+
+    Two layers, both fixed-policy: the authored baseline policy on the raw body
+    (the deepest the head can reach), and the full legal grid at a budget of a
+    THIRD of the fixture — deliberately generous, so this fails when the needle is
+    merely hard to reach rather than genuinely out of reach of every inline cut."""
+    from harness.limits import truncate
+
+    from runner.tasks.cluster_ctx import CTX3_SENTINEL, ctx3_body
+
+    body = ctx3_body()
+    assert body.count(CTX3_SENTINEL) == 1, "the fixture must contain its needle exactly once"
+    offset = body.index(CTX3_SENTINEL)
+    # Astride the midpoint, with thousands of chars of margin on both sides — a
+    # varying path prefix (tens of chars) cannot move it into either window.
+    assert abs(offset - len(body) // 2) < len(body) // 10, "needle drifted off the midpoint"
+    assert CTX3_SENTINEL not in truncate(body, _ctx_authored_policy()), (
+        "CTX-3's needle survives the authored baseline policy — the miner premise is gone"
+    )
+    for policy in _ctx_legal_probes(len(body) // 3):
+        assert CTX3_SENTINEL not in truncate(body, policy), (
+            f"CTX-3's midpoint needle survives {policy.strategy} at "
+            f"tail_fraction={policy.tail_fraction} and a third of the fixture"
+        )
+
+
+def test_ctx4_fixture_discriminates_across_all_three_positions():
+    """CTX-4's axis is completeness: three facts, one per position, ALL required.
+
+    Three claims make the fixture able to catch a positional trade instead of just
+    restating CTX-3: at the authored baseline the head and tail facts arrive and
+    the middle does not (so the task is red at baseline for exactly the middle);
+    a legal tail-heavy cut loses the HEAD fact (the buy-the-middle-by-selling-the-
+    head shape); and `keep_head` loses the TAIL fact. Presence claims probe the
+    worst-case long prefix; absence claims probe the raw body."""
+    from dataclasses import replace
+
+    from harness.limits import truncate
+
+    from runner.tasks.cluster_ctx import CTX4_FACTS, ctx4_body
+
+    body = ctx4_body()
+    for fact in CTX4_FACTS.values():
+        assert body.count(fact) == 1
+    authored = _ctx_authored_policy()
+    composed = truncate(_CTX_WORST_CASE_PREFIX + body, authored)
+    assert CTX4_FACTS["head"] in composed, "the head fact left the delivered head window"
+    assert CTX4_FACTS["tail"] in composed, "the tail fact left the delivered tail window"
+    assert CTX4_FACTS["middle"] not in truncate(body, authored), (
+        "the middle fact is deliverable at baseline — CTX-4 no longer requires a "
+        "middle-preserving strategy to go green"
+    )
+    third = len(body) // 3
+    tail_heavy = replace(authored, budget=third, tail_fraction=0.999)
+    assert CTX4_FACTS["head"] not in truncate(body, tail_heavy), (
+        "a tail-heavy legal cut keeps the head fact — CTX-4 cannot catch a strategy "
+        "that sells the head"
+    )
+    head_only = replace(authored, strategy="keep_head", budget=third)
+    assert CTX4_FACTS["tail"] not in truncate(body, head_only), (
+        "keep_head keeps the tail fact — CTX-4 cannot catch a strategy that sells the tail"
+    )
+
+
+def test_ctx5_baseline_delivery_holds_the_real_token_among_decoys():
+    """CTX-5's axis is noise density, and its premise has two halves.
+
+    At the authored baseline the delivered bytes must carry the REAL token AND at
+    least one decoy — so the model's verdict at baseline is a discrimination among
+    delivered lookalikes, not a retrieval question. And there must exist a LEGAL
+    wrong-region cut that delivers decoys WITHOUT the real token — the shape under
+    which a region-picking strategy reports a decoy confidently, which is the
+    failure this guard exists to catch."""
+    from dataclasses import replace
+
+    from harness.limits import truncate
+
+    from runner.tasks.cluster_ctx import CTX5_DECOYS, CTX5_REAL, ctx5_body
+
+    body = ctx5_body()
+    assert body.count(CTX5_REAL) == 1
+    for decoy in CTX5_DECOYS:
+        assert body.count(decoy) == 1
+    delivered = truncate(_CTX_WORST_CASE_PREFIX + body, _ctx_authored_policy())
+    assert CTX5_REAL in delivered, "the real token left the delivered window"
+    assert any(d in delivered for d in CTX5_DECOYS), (
+        "no decoy is delivered at baseline — the task stops measuring discrimination "
+        "under noise and becomes a plain recall task"
+    )
+    wrong_region = replace(_ctx_authored_policy(), budget=len(body) // 3, tail_fraction=0.999)
+    cut = truncate(body, wrong_region)
+    assert CTX5_REAL not in cut and any(d in cut for d in CTX5_DECOYS), (
+        "no legal cut delivers decoys without the real token — a wrong-region strategy "
+        "could never be caught reporting a decoy"
+    )
+
+
+def test_ctx6_fixture_arrives_whole_under_the_authored_clamp():
+    """CTX-6 is the no-harm end: an under-budget file must arrive WHOLE, even
+    composed with a worst-case path prefix. The margin is asserted against the
+    AUTHORED clamp, never the live budget — a candidate that legally lowers the
+    budget below this fixture's size SHOULD turn CTX-6 red at measurement time
+    (that regression is what the guard is for), without reddening this suite."""
+    from harness.limits import truncate
+
+    from runner.tasks.cluster_a import AUTHORED_CLAMP
+    from runner.tasks.cluster_ctx import CTX6_SENTINEL, ctx6_body
+
+    body = ctx6_body()
+    composed = _CTX_WORST_CASE_PREFIX + body
+    assert len(composed) < AUTHORED_CLAMP, "the fixture no longer fits under the clamp"
+    assert body.count(CTX6_SENTINEL) == 1
+    # Mid-file, not head or tail: a strategy that fragments or indexes even small
+    # files loses the middle first, and the sentinel must sit where that shows.
+    assert 1000 < body.index(CTX6_SENTINEL) < len(body) - 200
+    cut = truncate(composed, _ctx_authored_policy())
+    assert cut == composed, "an under-budget block must pass the door byte-identical"
+
+
+def test_ctx7_needle_is_unreachable_inline_and_findable_by_search():
+    """CTX-7 is the bypass axis: CTX-3's shape WITH file tools. Its inline premise
+    is CTX-3's (no legal inline cut delivers the middle needle), and its fixture
+    must be honestly searchable — the needle's own line carries the tag the ask
+    names, so `search_text` and ranged `read_file` are a real route and a bypass
+    is a finding about the knob's reach rather than a fixture artifact."""
+    from harness.limits import truncate
+
+    from runner.tasks.cluster_ctx import CTX7_SEARCH_TAG, CTX7_SENTINEL, ctx7_body
+
+    body = ctx7_body()
+    assert body.count(CTX7_SENTINEL) == 1
+    offset = body.index(CTX7_SENTINEL)
+    assert abs(offset - len(body) // 2) < len(body) // 10, "needle drifted off the midpoint"
+    needle_line = next(line for line in body.splitlines() if CTX7_SENTINEL in line)
+    assert CTX7_SEARCH_TAG in needle_line, "the needle's line lost its searchable tag"
+    assert sum(CTX7_SEARCH_TAG in line for line in body.splitlines()) == 1, (
+        "the searchable tag must single out the needle's line"
+    )
+    assert CTX7_SENTINEL not in truncate(body, _ctx_authored_policy())
+    for policy in _ctx_legal_probes(len(body) // 3):
+        assert CTX7_SENTINEL not in truncate(body, policy), (
+            f"CTX-7's midpoint needle survives {policy.strategy} at "
+            f"tail_fraction={policy.tail_fraction} inline"
+        )
+
+
+def test_ctx_verdicts_apply_the_g2_non_answer_taxonomy():
+    """Contract §5's decomposition, carried into every reply-shaped CTX oracle: a
+    reply that never attempted the answer (carbon's truncation marker and nothing
+    else, or a tool-syntax leak) is `not_attempted`, never a delivery failure —
+    and never a pass. An ANSWERED-but-wrong reply, an economy violation with the
+    right sentinel, and a decoy-bearing reply all stay plain `fail`: each is a
+    real verdict about the strategy, not a non-answer."""
+    from runner.tasks.cluster_ctx import (
+        CTX3_MAX_INJECTED_SHARE,
+        CTX3_SENTINEL,
+        CTX4_FACTS,
+        CTX5_DECOYS,
+        CTX5_REAL,
+        CTX6_SENTINEL,
+        CTX7_MAX_DELIVERED_SHARE,
+        CTX7_MAX_FOLLOW_UP_READS,
+        CTX7_SENTINEL,
+        ctx3_verdict,
+        ctx4_verdict,
+        ctx5_verdict,
+        ctx6_verdict,
+        ctx7_verdict,
+    )
+    from runner.tasks.cluster_g import G2_TRUNCATION_MARKER
+
+    marker_only = f"  {G2_TRUNCATION_MARKER}"
+    leak = "<|tool_call|>read_file"
+
+    ok, outcome, non_answer = ctx3_verdict(f"The code is {CTX3_SENTINEL}.", 0.1)
+    assert (ok, outcome, non_answer) == (True, "pass", None)
+    # Economy is part of CTX-3's verdict: the sentinel bought by flooding is a FAIL.
+    ok, outcome, _ = ctx3_verdict(CTX3_SENTINEL, CTX3_MAX_INJECTED_SHARE + 0.01)
+    assert (ok, outcome) == (False, "fail")
+    assert ctx3_verdict(marker_only, 0.1)[1] == "not_attempted"
+    assert ctx3_verdict(leak, 0.1)[1] == "not_attempted"
+    assert ctx3_verdict("no idea", 0.1)[:2] == (False, "fail")
+
+    all_three = " ".join(CTX4_FACTS.values())
+    ok, outcome, recalled, non_answer = ctx4_verdict(all_three)
+    assert (ok, outcome, non_answer) == (True, "pass", None)
+    assert recalled == {"head": True, "middle": True, "tail": True}
+    ok, outcome, recalled, _ = ctx4_verdict(f"{CTX4_FACTS['head']} {CTX4_FACTS['tail']}")
+    assert (ok, outcome) == (False, "fail"), "a partial recall is a real failure"
+    # The baseline shape exactly: head and tail carried, the middle lost.
+    assert recalled == {"head": True, "middle": False, "tail": True}
+    assert ctx4_verdict(marker_only)[1] == "not_attempted"
+    # A reply that recalled ANY position attempted the answer, whatever else it holds.
+    assert ctx4_verdict(f"{CTX4_FACTS['head']} {leak}")[1] == "fail"
+
+    ok, outcome, decoys, non_answer = ctx5_verdict(f"approved: {CTX5_REAL}")
+    assert (ok, outcome, decoys, non_answer) == (True, "pass", (), None)
+    ok, outcome, decoys, _ = ctx5_verdict(CTX5_DECOYS[0])
+    assert (ok, outcome, decoys) == (False, "fail", (CTX5_DECOYS[0],)), (
+        "a confidently reported decoy is the failure this guard exists for"
+    )
+    ok, outcome, decoys, _ = ctx5_verdict(f"{CTX5_REAL} not {CTX5_DECOYS[1]}")
+    assert (ok, outcome, decoys) == (False, "fail", (CTX5_DECOYS[1],)), (
+        "the real token beside a decoy is not a clean answer"
+    )
+    assert ctx5_verdict(marker_only)[1] == "not_attempted"
+
+    assert ctx6_verdict(CTX6_SENTINEL, 3000)[:2] == (True, "pass")
+    assert ctx6_verdict(CTX6_SENTINEL, 10_000_000)[:2] == (False, "fail"), (
+        "a ballooned injected block is CTX-6's economy failure"
+    )
+    assert ctx6_verdict(marker_only, 3000)[1] == "not_attempted"
+
+    ok, outcome, non_answer = ctx7_verdict(
+        CTX7_SENTINEL, CTX7_MAX_FOLLOW_UP_READS, CTX7_MAX_DELIVERED_SHARE
+    )
+    assert (ok, outcome, non_answer) == (True, "pass", None)
+    assert ctx7_verdict(CTX7_SENTINEL, CTX7_MAX_FOLLOW_UP_READS + 1, 0.05)[:2] == (False, "fail")
+    assert ctx7_verdict(CTX7_SENTINEL, 1, CTX7_MAX_DELIVERED_SHARE + 0.01)[:2] == (False, "fail")
+    assert ctx7_verdict(marker_only, 0, 0.0)[1] == "not_attempted"
+    assert ctx7_verdict("wrong", 1, 0.05)[:2] == (False, "fail")
+
+
+def test_ctx_priors_state_only_what_evidence_supports():
+    """A prior is a CLAIM, and each CTX prior is pinned here with the evidence.
+
+    Reviewed 2026-08-22, after the cross-cutting collapse-veto fix
+    (program/onb-task-authoring) made an authored `pass` prior load-bearing in a
+    third place: `expected_baseline == "pass"` is one of the two things that
+    ESTABLISH full-pass status, so such a task can veto a calibrated candidate on
+    a single 1.00 -> 0.00 flip. The priors were re-decided on evidence, one task
+    at a time, and deliberately NOT as a block:
+
+    - CTX-3, CTX-4 — `fail`. The middle fact is deterministically undeliverable at
+      the authored policy; both premise tests prove it offline.
+    - CTX-5 — `uncertain`, DOWNGRADED from an authored `pass`. Its oracle carries a
+      reply-SHAPE conjunct (no decoy string anywhere in the reply), and this repo
+      has already measured what that shape costs: CMP-5's pooled rate decomposed
+      to 29% form-compliance x 74% correctness (`run_cmp5`). A model handed six
+      labeled rejected drafts and asked which is approved may contrast them and be
+      substantively right while this oracle scores it a failure. Nothing has
+      measured that rate, so `pass` would assert what the closest precedent denies.
+    - CTX-6 — `pass`, KEPT. Its second conjunct cannot fire at baseline: the door
+      passes the composed block byte-identical (proven offline), leaving ~920-960
+      chars of margin under the ceiling at realistic path lengths, with no model
+      influence on that number. What remains is reading one short code out of a
+      fully delivered small file — A5's shape, and A5 measured 1.00 in all six
+      committed null arms.
+    - CTX-7 — `uncertain`. Its verdict turns on live bypass behavior nothing has
+      measured; the brief labels that prediction non-computable.
+
+    Pinned by literal equality, the CONTRACT_PRIMITIVE_ALIAS discipline: a prior
+    that moves has to move HERE too, which is a deliberate act with a reason
+    rather than a data-line edit nobody reads.
+    """
+    priors = {t.name: t.expected_baseline for t in TASKS if t.name.startswith("CTX-")}
+    assert priors == {
+        "CTX-3": "fail",
+        "CTX-4": "fail",
+        "CTX-5": "uncertain",
+        "CTX-6": "pass",
+        "CTX-7": "uncertain",
+    }
+
+
+def test_ctx_delivery_observation_is_pinned_against_carbons_own_source():
+    """The live premise checks read two of carbon's literals out of the transcript:
+    the `Context file:` wrapper `Agent.run` puts around every delivered block, and
+    the `…[truncated ` marker the door writes into a cut one. carbon exposes no
+    constant for either (the G2 marker's situation exactly), so the copies in
+    `runner/helpers.py` are pinned here against carbon's own module source — a
+    reword on carbon's side turns this red instead of silently blinding every
+    injection observation at once."""
+    import inspect
+
+    import harness.agent as carbon_agent
+    import harness.limits as carbon_limits
+
+    from runner.helpers import CONTEXT_BLOCK_PREFIX, TRUNCATION_MARK
+
+    assert CONTEXT_BLOCK_PREFIX == "Context file:\n"
+    # The literal as it sits in agent.py's source: an f-string wrapping the block.
+    assert 'f"Context file:\\n{block}"' in inspect.getsource(carbon_agent), (
+        "carbon no longer wraps delivered @path blocks in this exact prefix; "
+        "injected-block observation has stopped matching anything"
+    )
+    assert TRUNCATION_MARK == "…[truncated "
+    assert TRUNCATION_MARK in inspect.getsource(carbon_limits), (
+        "carbon's door no longer writes this truncation marker; the "
+        "injection_truncated observation has stopped matching anything"
+    )
