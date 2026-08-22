@@ -14,6 +14,7 @@ from runner.tasks import (
     cluster_g,
     cluster_h,
     cluster_i,
+    cluster_v,
 )
 
 TASKS: list[TaskSpec] = [
@@ -30,4 +31,8 @@ TASKS: list[TaskSpec] = [
     # comparable across the boundary.
     *cluster_ctx.SPECS,
     *cluster_i.SPECS,
+    # cluster V is the verification/loop-discipline CANDIDATE suite: runnable,
+    # but outside every calibrated gate and campaign set until its human gate
+    # (tests/test_cluster_v.py pins the isolation).
+    *cluster_v.SPECS,
 ]

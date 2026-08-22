@@ -20,7 +20,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # A set, not the string "ABCDEFGHI": `"EF" in "ABCDEFGHI"` is True, so a substring
 # test would accept a malformed multi-letter cluster id. "I" is the onboarding /
 # instructions section (ONB-1..ONB-5, 2026-08-21).
-CLUSTERS = frozenset("ABCDEFGHI")
+# A set, not the string "ABCDEFGHIV": `"EF" in "ABCDEFGH"` is True, so a substring
+# test would accept a malformed multi-letter cluster id. "I" is the onboarding /
+# instructions candidate section (cluster_i.py) and "V" the verification /
+# loop-discipline one (cluster_v.py) — both registered, neither consumed by any
+# calibrated gate (their own isolation tests pin that). The Phase 4 context
+# candidates live in cluster "A", the mechanism family owning the @path door.
+CLUSTERS = frozenset("ABCDEFGHIV")
 
 # Phase 1 measurement contract §6's vetted primitive vocabulary, copied verbatim
 # from the plan's Global Constraints list (exactly 12) — never re-derived from
@@ -109,6 +115,15 @@ CONTRACT_PRIMITIVE_ALIAS = {
     "ONB-3": ("instructions", None),
     "ONB-4": ("instructions", None),
     "ONB-5": ("instructions", None),
+    # The cluster-V candidate suite (2026-08-21, authored for the Phase 4+ human
+    # gate; not activated). Names continue the contract's own VER-*/LOOP-* alias
+    # families, so `alias=None` for the CMP-5/6/7 reason: the name IS the mnemonic.
+    "VER-4": ("verification", None),
+    "LOOP-2": ("loop-control", None),
+    "LOOP-3": ("loop-control", None),
+    "LOOP-4": ("loop-control", None),
+    "LOOP-5": ("loop-control", None),
+    "LOOP-6": ("loop-control", None),
 }
 
 
@@ -138,8 +153,8 @@ def test_contract_primitive_alias_assignments_hold():
 def test_registry_shape():
     names = [t.name for t in TASKS]
     assert len(names) == len(set(names)), "duplicate task names"
-    # 28 through Phase 2b, 31 once the Phase 2c scenario guards landed, 41 with the
-    # Phase 4 candidate suites (CTX-3..CTX-7 and ONB-1..ONB-5, authored in parallel and
+    # 28 through Phase 2b, 31 once the Phase 2c scenario guards landed, 47 with the
+    # Phase 4 candidate suites (CTX, ONB and cluster V, authored in parallel and
     # merged together). A literal count is the one
     # assertion that catches a task added to a cluster's SPECS and nowhere else — the
     # membership set below would have to be edited to hide it, which is a deliberate
@@ -148,7 +163,13 @@ def test_registry_shape():
     # one assertion that catches a task added to a cluster's SPECS and nowhere else —
     # the membership set below would have to be edited to hide it, which is a
     # deliberate act rather than an omission.
-    assert len(names) == 41
+    assert len(names) == 47
+    # 28 through Phase 2b, 31 once the Phase 2c scenario guards landed, 37 with
+    # the cluster-V verification/loop candidate suite. A literal count is the one
+    # assertion that catches a task added to a cluster's SPECS and nowhere else —
+    # the membership set below would have to be edited to hide it, which is a
+    # deliberate act rather than an omission.
+    assert len(names) == 47
     for t in TASKS:
         assert t.split in ATTEMPTS
         assert t.cluster in CLUSTERS
@@ -199,6 +220,12 @@ def test_registry_membership():
         "ONB-3",
         "ONB-4",
         "ONB-5",
+        "VER-4",
+        "LOOP-2",
+        "LOOP-3",
+        "LOOP-4",
+        "LOOP-5",
+        "LOOP-6",
     }
     held_in = {t.name for t in TASKS if t.split == "held_in"}
     held_out = {t.name for t in TASKS if t.split == "held_out"}
@@ -232,7 +259,14 @@ def test_registry_membership():
         "ONB-1",
         "ONB-3",
         "ONB-5",
+        "VER-4",
+        "LOOP-2",
+        "LOOP-4",
     }
+    # V splits are 3/3 by design at authoring (LOOP-2 held_in per the miner-analog
+    # precedent, the LOOP-3/LOOP-4 twins split across — see cluster_v.SPECS); the
+    # FINAL assignment is a phase-gate input (decision 14's complements), so a
+    # reassignment edits this pin deliberately.
     assert held_out == {
         "A3",
         "A4",
@@ -249,6 +283,9 @@ def test_registry_membership():
         "CTX-6",
         "ONB-2",
         "ONB-4",
+        "LOOP-3",
+        "LOOP-5",
+        "LOOP-6",
     }
 
 
@@ -637,7 +674,7 @@ def test_workspace_bound_tasks_anchor_carbon_at_the_workspace(monkeypatch):
     """
     from types import SimpleNamespace
 
-    from runner.tasks import cluster_d, cluster_e, cluster_f
+    from runner.tasks import cluster_d, cluster_e, cluster_f, cluster_v
 
     seen: list[dict] = []
 
@@ -672,6 +709,12 @@ def test_workspace_bound_tasks_anchor_carbon_at_the_workspace(monkeypatch):
         (cluster_e.run_e4, cluster_e.E4_SCRIPT),
         (cluster_d.run_d3, "tasks.txt"),
         (cluster_f.run_f1, "timeouts.py"),
+        # V rides along: run_loop3's fallback file is its whole answer route, so
+        # a wiring anchored on the neutral dir would grade this file instead of
+        # the model's strategy switch. The stand-in returns an empty transcript,
+        # so the runner exits on its own premise guard — the wiring is what this
+        # test reads, not the verdict.
+        (cluster_v.run_loop3, cluster_v.LOOP3_FILE),
     ):
         seen.clear()
         run()
@@ -797,7 +840,7 @@ def test_every_bash_tool_sandbox_carries_scratch_dir():
 
 # --- structural AST helpers for the close()-lifecycle guards below ---------------
 #
-# The constructor names task-8's sweep actually uses, across all eight cluster
+# The constructor names task-8's sweep actually uses, across the task cluster
 # modules — a closed, enumerated set in this file's own established style
 # (compare AGENT_METRIC_ATTRS in test_helpers.py, _E4_DERIVE_MARKS in
 # cluster_e.py): every one is called by BARE name (never `module.Agent(...)` or
@@ -814,6 +857,7 @@ _AGENT_CONSTRUCTORS = frozenset(
         "_build_c_agent",
         "_agent",
         "_fault_agent",
+        "_v_agent",
     }
 )
 
@@ -891,6 +935,7 @@ _TASK_CLUSTER_MODULES = (
     "cluster_g",
     "cluster_h",
     "cluster_i",
+    "cluster_v",
 )
 
 
