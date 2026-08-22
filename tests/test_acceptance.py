@@ -19,11 +19,16 @@ from loop.acceptance import (
 )
 
 
-def _run(counts, *, filtered=False, outcomes=None, security_classes=None):
+def _run(counts, *, filtered=False, outcomes=None, security_classes=None, priors=None):
     """counts: name -> (passes, attempts, split). outcomes overrides per task.
     security_classes: name -> list aligned with that task's outcomes, mirroring the
     runner's real `security_classes` summary field (Task 6). A task left out of the
-    mapping stays unclassified, same as a legacy pre-Task-6 result row."""
+    mapping stays unclassified, same as a legacy pre-Task-6 result row.
+    priors: name -> expected_baseline, mirroring the runner's real per-task
+    `expected_baseline` field (runner/suite.py). A task left out carries NO prior at
+    all, which is what every pre-2026-08-22 record looks like — the default this file
+    was written under, and the one the collapse veto must keep treating as
+    established."""
     r = {
         "fingerprint": {"runner_sha": "x", "model": "m", "config_version": 1, "dirty_sha": None},
         "tasks": {},
@@ -41,6 +46,8 @@ def _run(counts, *, filtered=False, outcomes=None, security_classes=None):
         }
         if security_classes and n in security_classes:
             task["security_classes"] = security_classes[n]
+        if priors and n in priors:
+            task["expected_baseline"] = priors[n]
         r["tasks"][n] = task
     return r
 
@@ -1874,3 +1881,131 @@ def test_null_rates_cannot_be_mutated_after_construction(tmp_path):
     with pytest.raises(TypeError):
         del cal.null_rates["A1"]
     assert cal.null_rates["A1"] == Fraction(27, 49), "unchanged"
+
+
+# --- the collapse veto reads ESTABLISHED full-pass status, not one lucky baseline -----
+#
+# Found by review of the onboarding suite (2026-08-22), but the defect is CROSS-CUTTING
+# and predates it: `_collapses` inferred "full-pass task" from a SINGLE baseline
+# observation. Every new suite added to the default registry — ONB, and CTX/SEL/V
+# authored alongside it — is measured by every candidate validation, because the suite
+# runs unfiltered and `_collapses` reads the whole result set even under a calibration
+# whose split means read only the supported set. So a brand-new task with an
+# `uncertain` prior that happened to score 1.0 in the baseline and 0.0 in the candidate
+# — the definition of an unestablished rate, and ~1.6% likely per pair at a true rate
+# near 0.5 — vetoed a calibrated decision it was never calibrated to judge.
+#
+# The rule now: a collapse vetoes only where full-pass status is ESTABLISHED — by a
+# recorded `pass` prior, or by membership in the calibration's covered set (which has a
+# measured null distribution). Everywhere else the collapse is still OBSERVED and
+# RECORDED as context; it just does not decide. Narrowing what a rule VETOES on must
+# never narrow what it REPORTS, which is the same principle `unreachable_probable`
+# already follows.
+
+
+def test_a_collapse_on_a_pass_prior_task_outside_the_calibration_still_vetoes(tmp_path):
+    """DIRECTION 1, the protection that must survive: a genuine regression outside the
+    measured set. X2 carries a recorded `pass` prior — the registry's standing claim
+    that it holds — and it is nowhere near compaction's covered set. Collapsing it must
+    still REJECT, exactly as before, or the fix has traded a false veto for a blind
+    spot."""
+    cal = _null_model_calibration(tmp_path)
+    base = _cmp_run({"X2": 4}, priors={"X2": "pass"})
+    cand = _cmp_run({"G2": 38, "X2": 0}, priors={"X2": "pass"})
+    d = evaluate(base, cand, calibration=cal)
+    assert d.outcome == REJECT
+    assert any("full-pass task collapsed to zero: X2" in r for r in d.reasons), d.reasons
+
+
+def test_a_collapse_on_an_uncertain_prior_task_is_recorded_and_never_vetoes(tmp_path):
+    """DIRECTION 2, the false veto that must go: the same collapse on the same task,
+    differing only in that the record says its prior is `uncertain` — no established
+    full-pass status, so one baseline 1.0 is one sample and this flip is what
+    `uncertain` predicts.
+
+    The candidate keeps its calibrated gain and still CONFIRMs. And the collapse is not
+    swept away: it appears verbatim in the decision's reasons as a recorded
+    OBSERVATION, so a human reading the record sees exactly what a reader of the old
+    REJECT would have seen — minus the verdict it was not entitled to make.
+    """
+    cal = _null_model_calibration(tmp_path)
+    base = _cmp_run({"X2": 4}, priors={"X2": "uncertain"})
+    cand = _cmp_run({"G2": 38, "X2": 0}, priors={"X2": "uncertain"})
+    d = evaluate(base, cand, calibration=cal)
+    assert d.outcome == CONFIRM, d.reasons
+    assert not any("full-pass task collapsed to zero" in r for r in d.reasons), d.reasons
+    recorded = [r for r in d.reasons if "X2" in r and "collapsed" in r]
+    assert recorded, f"the collapse must still be REPORTED, not silently dropped: {d.reasons}"
+    assert any("not established" in r for r in recorded), recorded
+
+
+def test_a_collapse_inside_the_covered_set_vetoes_despite_an_uncertain_prior(tmp_path):
+    """The second source of established status, and the one that keeps the real suite
+    protected: CMP-7's authored prior is `uncertain` (nothing had measured it when it
+    was written), but it is IN compaction's covered set, so the campaign measured a
+    null distribution for it. Measured status is established status — A1, G2 and G5 sit
+    in exactly this position, and a prior-only rule would have quietly unguarded all
+    four."""
+    cal = _null_model_calibration(tmp_path)
+    assert "CMP-7" in cal.covered
+    base = _cmp_run({"CMP-7": 50}, priors={"CMP-7": "uncertain"})
+    cand = _cmp_run({"G2": 38, "CMP-7": 0}, priors={"CMP-7": "uncertain"})
+    d = evaluate(base, cand, calibration=cal)
+    assert d.outcome == REJECT
+    assert any("full-pass task collapsed to zero: CMP-7" in r for r in d.reasons), d.reasons
+
+
+def test_a_record_with_no_prior_at_all_keeps_the_collapse_veto(tmp_path):
+    """The default, chosen in the conservative direction. A record written before this
+    field existed says nothing about establishment — which is not the same as saying
+    the status is unestablished. Treating silence as "unestablished" would silently
+    drop the veto on every historical baseline at once, so only an EXPLICIT
+    `uncertain`/`fail` prior narrows it.
+
+    This is also why every pre-existing test in this file still passes untouched:
+    `_run` stamps no prior unless asked.
+    """
+    cal = _null_model_calibration(tmp_path)
+    base = _cmp_run({"X2": 4})  # no priors= at all: the legacy record shape
+    cand = _cmp_run({"G2": 38, "X2": 0})
+    assert "expected_baseline" not in base["tasks"]["X2"]
+    d = evaluate(base, cand, calibration=cal)
+    assert d.outcome == REJECT
+    assert any("full-pass task collapsed to zero: X2" in r for r in d.reasons), d.reasons
+
+
+def test_the_confirmation_applies_the_same_established_only_collapse_rule(tmp_path):
+    """`confirmed()` is the ONLY road to ACCEPT, so both directions must hold there too
+    — a protection that runs on one measurement and not the other is a protection with
+    a door in it (`_collapses`' own docstring). Both stages read the SAME helper with
+    the same two inputs (the recorded prior and the calibration), so they cannot drift:
+    neither takes a task list the other lacks.
+    """
+    cal = _null_model_calibration(tmp_path)
+    # X2 moves in the first decision, which is what carries it into `confirm_tasks` —
+    # the moved-task path the whole finding turns on.
+    first = evaluate(_cmp_run(), _cmp_run({"G2": 38, "X2": 3}), calibration=cal)
+    assert first.outcome == CONFIRM
+    assert "X2" in first.confirm_tasks, "it moved, so it rides into the confirmation"
+
+    base_counts = _confirm_counts(extra={"X2": (4, 4, "held_out")})
+    collapses = _confirm_counts({"G2": 38}, extra={"X2": (0, 4, "held_out")})
+
+    # DIRECTION 1: a `pass`-prior task collapsing inside the confirmation still blocks.
+    blocked = confirmed(
+        first,
+        *_confirm_pair(first, base_counts, collapses, priors={"X2": "pass"}),
+        calibration=cal,
+    )
+    assert blocked.outcome == REJECT
+    assert "full-pass task collapsed to zero: X2" in blocked.reasons
+
+    # DIRECTION 2: the identical collapse on an `uncertain`-prior task does not block,
+    # and ACCEPT is reachable again — while the observation is still on the record.
+    allowed = confirmed(
+        first,
+        *_confirm_pair(first, base_counts, collapses, priors={"X2": "uncertain"}),
+        calibration=cal,
+    )
+    assert allowed.outcome == ACCEPT, allowed.reasons
+    assert any("X2" in r and "collapsed" in r for r in allowed.reasons), allowed.reasons

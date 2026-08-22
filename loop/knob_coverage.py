@@ -129,10 +129,17 @@ MEASURED_BREAK_BUDGETS: dict[str, int] = {
     "D1": 8,  # the answer itself, read back out of the tool result by `tool_texts`
     "D2": 6,  # same shape as D1
     "F1": 113,  # already listed before this pass
-    # Measured 2026-08-21 from the ONB fixtures' own bytes (`read_file` with no range
-    # returns the raw body, so the number is the largest seeded file's length);
-    # `tests/test_registry.py` derives both from the fixtures so a resize cannot
-    # drift past this table.
+    # Measured 2026-08-22 by running carbon's own `truncate_tool_result` over the
+    # ORACLE-RELEVANT read — the file each verdict needs, not whichever seeded file
+    # happens to be largest. Same convention as the entries above: the budget below
+    # which that read stops arriving INTACT, i.e. its own length.
+    # The verdict-level threshold is lower and is measured too, because `head_tail`
+    # keeps spanning the sentinel for a while below the intact point: ONB-1 loses its
+    # token at 263 and below, ONB-4 its stale copy at 159 and below. So each number
+    # here is an UPPER bound on where this knob starts perturbing the task — sufficient
+    # for the observer/guard classification, and not a claim the verdict flips there.
+    # `tests/test_registry.py` pins both thresholds through the real door, so neither a
+    # fixture resize nor a strategy change can drift past this table.
     "ONB-1": 340,  # docs/release.md, the pointer target the oracle needs read whole
     "ONB-4": 262,  # README.md, the stale copy whose read is the live premise
 }

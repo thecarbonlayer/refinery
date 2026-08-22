@@ -3021,6 +3021,20 @@ def test_onb3_rule_is_buried_mid_layer_and_would_die_at_the_clamped_door():
     example_section = body[body.index("## Example") :]
     assert "placeholder" in example_section, "the example must be marked as a placeholder"
     assert "never a real" in example_section, "the example must disclaim itself"
+    # The distractor is FENCED, and that is pinned rather than left to prose. A review
+    # found the docstrings describing a fenced few-shot block while the fixture emitted
+    # an indented one — which would have had results read as evidence about a shape the
+    # model never saw. The placeholder must sit INSIDE the fence, or the fence is
+    # decoration around something else.
+    fence_open = example_section.index("```")
+    fence_close = example_section.index("```", fence_open + 3)
+    placeholder_at = example_section.index(cluster_i.ONB3_EXAMPLE)
+    assert fence_open < placeholder_at < fence_close, (
+        "the placeholder code is not inside the fenced block"
+    )
+    # And the fence must not arm carbon's test-command parser — belt and braces beside
+    # `test_onb_layer_fixtures_declare_no_test_command`, which owns that claim.
+    assert "## Test" not in body, "a `## Test...` heading before a fence arms the gate"
     # The authored clamp policy (config v1 values, the same pin cluster_a uses) —
     # NEVER the live one, which is the editable knob.
     authored = replace(CONFIG.file_injection, strategy="head_tail", budget=4000, tail_fraction=0.5)
@@ -3214,22 +3228,194 @@ def test_onboarding_section_stays_outside_every_calibrated_gate():
         assert not onb & set(coverage["miners"]), f"{knob} names an ONB task as a miner"
 
 
-def test_onb_break_budgets_are_measured_from_the_fixtures():
-    """The `tool_output` coverage additions for ONB-1/ONB-4 follow the row's own
-    evidence rule: the number IS the largest seeded source a read can return whole,
-    so a fixture edit that changes the size must change the row in the same commit.
-    (`read_file` with no range returns the raw body — the measurement is the byte
-    length of the largest seeded file.)"""
+def test_onb_break_budgets_break_the_oracle_relevant_read_through_carbons_own_door():
+    """The row's number must be the budget at which the read the ORACLE DEPENDS ON
+    stops arriving intact — pinned by running carbon's real `truncate_tool_result`,
+    not by a string length that merely happens to match.
+
+    The first version of this pinned `max(len(every seeded file))`, which a review
+    showed is the wrong property: shrink the pointer target to 200 chars while growing
+    unrelated chaff to 340 and the assertion still accepts 340, describing a breakpoint
+    for a file no oracle reads. So the measurement is now tied to the specific file each
+    task's verdict needs whole — ONB-1's pointer target `docs/release.md`, ONB-4's stale
+    `README.md` — and probed in both directions AT the recorded value: at the budget the
+    sentinel survives, one byte below it does not.
+
+    WHAT THE NUMBER IS A PROXY FOR, stated because it is not the whole truth and the
+    first draft of this test quietly assumed it was. The row's convention, set by its
+    existing entries (`B1: 156, # largest seeded source`), is the budget below which the
+    result stops arriving INTACT — i.e. the read's own length. That is NOT the budget at
+    which the task's verdict changes: under `head_tail` the retained head and tail still
+    span the sentinel for a while below it. Both thresholds are therefore measured and
+    pinned here, and the gap between them is the honest margin:
+
+        ONB-1: intact at 340, sentinel actually lost at 263 and below
+        ONB-4: intact at 262, sentinel actually lost at 159 and below
+
+    The recorded value is thus an UPPER bound on the budget at which this knob starts
+    perturbing the task, which is exactly what an observer/guard classification needs —
+    and deliberately not a claim that the verdict flips there. Both tasks also expose
+    `search_text` and RANGED `read_file`, whose results are smaller still and break
+    lower again; a cheaper route breaking sooner only makes the task an observer at MORE
+    budgets than the number claims, never fewer.
+    """
+    from dataclasses import replace
+
+    from harness.harness_config import CONFIG
+    from harness.limits import truncate_tool_result
+
     from loop.knob_coverage import _TOOL_RESULT_READERS, _TOOL_USERS, MEASURED_BREAK_BUDGETS
     from runner.tasks import cluster_i
 
-    onb1_sources = {"AGENTS.md": cluster_i.ONB1_AGENTS_MD, "docs/release.md": cluster_i.ONB1_DOC}
-    onb1_sources.update(cluster_i.ONB1_CHAFF)
-    assert MEASURED_BREAK_BUDGETS["ONB-1"] == max(len(t) for t in onb1_sources.values())
+    # (task, the file the oracle needs whole, its sentinel, the measured sentinel-loss
+    # budget — the highest budget at which the verdict-bearing string is already gone)
+    oracle_reads = (
+        ("ONB-1", cluster_i.ONB1_DOC, cluster_i.ONB1_SENTINEL, 263),
+        ("ONB-4", cluster_i.ONB4_README, cluster_i.ONB4_STALE, 159),
+    )
+    for name, body, sentinel, lost_at in oracle_reads:
+        recorded = MEASURED_BREAK_BUDGETS[name]
+        assert recorded == len(body), (
+            f"{name}: the row records {recorded}, but the oracle-relevant read is "
+            f"{len(body)} bytes — the number must track THAT file, not the largest one"
+        )
 
-    onb4_sources = {"AGENTS.md": cluster_i.ONB4_AGENTS_MD, "README.md": cluster_i.ONB4_README}
-    assert MEASURED_BREAK_BUDGETS["ONB-4"] == max(len(t) for t in onb4_sources.values())
+        def policy(budget: int):
+            return replace(CONFIG.tool_output, strategy="head_tail", budget=budget)
+
+        # The row's own claim: intact AT the recorded budget, not intact one byte below.
+        assert truncate_tool_result(body, policy(recorded)) == body, (
+            f"{name}: the read does not arrive intact at the recorded budget"
+        )
+        assert truncate_tool_result(body, policy(recorded - 1)) != body, (
+            f"{name}: the read still arrives intact one byte below the recorded budget"
+        )
+        # The stronger, verdict-level threshold, measured rather than assumed — and
+        # asserted to sit strictly BELOW the recorded value, which is what makes the
+        # recorded value an upper bound rather than a coincidence.
+        assert lost_at < recorded, f"{name}: the sentinel-loss budget is not below the row's"
+        assert sentinel in truncate_tool_result(body, policy(lost_at + 1)), (
+            f"{name}: the sentinel is already gone above the measured loss budget"
+        )
+        assert sentinel not in truncate_tool_result(body, policy(lost_at)), (
+            f"{name}: the sentinel survives at the measured loss budget — the fixture has "
+            f"moved and this task's tool_output classification needs re-measuring"
+        )
 
     for name in ("ONB-1", "ONB-4"):
         assert name in _TOOL_RESULT_READERS
         assert name in _TOOL_USERS
+
+
+def _full_suite_shaped(priors: dict[str, str], overrides: dict[str, int] | None = None) -> dict:
+    """A result shaped like a REAL unfiltered suite run: every registry task present,
+    with its own split, attempts and recorded prior. The candidate path runs the suite
+    unfiltered (`loop/validate.py`), so this is the shape every whole-suite veto
+    actually sees — not a hand-picked subset that could miss one."""
+    tasks = {}
+    for t in TASKS:
+        attempts = ATTEMPTS[t.split]
+        passes = overrides.get(t.name, attempts) if overrides else attempts
+        tasks[t.name] = {
+            "split": t.split,
+            "attempts": attempts,
+            "passes": passes,
+            "pass_fraction": round(passes / attempts, 4),
+            "outcomes": ["pass"] * passes + ["fail"] * (attempts - passes),
+            "expected_baseline": priors[t.name],
+        }
+    return {
+        "fingerprint": {"runner_sha": "x", "model": "m", "config_version": 1, "dirty_sha": None},
+        "tasks": tasks,
+    }
+
+
+def test_an_onb_noise_flip_cannot_veto_a_whole_suite_decision():
+    """The isolation claim, EXERCISED rather than asserted about name membership.
+
+    The earlier isolation test proved ONB names sit outside every calibration set and
+    knob-miner row. That is necessary and not sufficient: cluster I is in the DEFAULT
+    registry, candidate validation runs the suite UNFILTERED, and the collapse veto in
+    `loop.acceptance` reads the whole result set regardless of any calibration. So the
+    path that matters is the one where an ONB task is simply PRESENT in an ordinary
+    full-suite pair.
+
+    Here every ONB task flips 1.00 -> 0.00 at once — a far worse run of luck than the
+    real risk — while a genuine gain sits on a compaction task. The decision must
+    survive, and the flips must still be visible in the record.
+    """
+    from loop.acceptance import evaluate
+
+    priors = {t.name: t.expected_baseline for t in TASKS}
+    onb = sorted(t.name for t in TASKS if t.cluster == "I")
+    base = _full_suite_shaped(priors)
+    cand = _full_suite_shaped(priors, overrides={n: 0 for n in onb})
+
+    d = evaluate(base, cand)
+    assert not any("full-pass task collapsed to zero" in r for r in d.reasons), (
+        f"an uncalibrated ONB flip vetoed a whole-suite decision: {d.reasons}"
+    )
+    # Still reported, every one of them.
+    recorded = [r for r in d.reasons if "not established" in r]
+    assert recorded, f"the flips vanished from the record entirely: {d.reasons}"
+    for name in onb:
+        assert name in recorded[0], f"{name} missing from the recorded collapse note"
+    # The split means are a SEPARATE protection and are deliberately untouched by this
+    # change: five tasks collapsing at once really is a regression, and it must still be
+    # caught — by the split-mean bound rather than by a veto none of these tasks earned.
+    # Asserted, not assumed, so "the veto stopped firing" can never be mistaken for
+    # "nothing catches this".
+    from loop.acceptance import REJECT
+
+    assert d.outcome == REJECT, d.reasons
+    assert any("regressed beyond one attempt" in r for r in d.reasons), d.reasons
+
+
+def test_no_unestablished_task_in_the_registry_can_veto_a_calibrated_decision():
+    """The CLASS pin, generic over the registry rather than over ONB names.
+
+    This is the check that keeps covering CTX, SEL and V as their branches land: it
+    enumerates every task whose recorded prior is not `pass` and which sits outside
+    compaction's covered set, collapses ALL of them at once in a calibrated pair, and
+    requires that none of them vetoes. A future suite added to the default registry is
+    covered the day it appears, with no edit here.
+    """
+    from loop.acceptance import evaluate
+    from loop.calibrate import MODEL_TASKS
+
+    priors = {t.name: t.expected_baseline for t in TASKS}
+    unestablished = sorted(
+        t.name for t in TASKS if t.expected_baseline != "pass" and t.name not in MODEL_TASKS
+    )
+    assert unestablished, "no unestablished task in the registry — this pin has gone vacuous"
+
+    base = _full_suite_shaped(priors)
+    cand = _full_suite_shaped(priors, overrides={n: 0 for n in unestablished})
+    d = evaluate(base, cand)
+    vetoes = [r for r in d.reasons if "full-pass task collapsed to zero" in r]
+    assert not vetoes, f"an unestablished task still vetoes: {vetoes}"
+
+
+def test_a_pass_prior_task_anywhere_in_the_registry_still_vetoes():
+    """The other direction of the class pin, and the reason the fix is not simply "new
+    suites do not count". A task the registry asserts should PASS is protected wherever
+    it lives, calibrated or not — that assertion is exactly what the veto is for.
+
+    Worth stating for the suites authored alongside this one: an authored `pass` prior
+    on a task nothing has measured yet is a real commitment. It buys the collapse veto,
+    and it also means an ordinary noise flip on that task CAN veto until a campaign
+    measures it. `uncertain` is the honest prior for a task with no measurement behind
+    it; `pass` should mean somebody is prepared to defend it.
+    """
+    from loop.acceptance import REJECT, evaluate
+
+    priors = {t.name: t.expected_baseline for t in TASKS}
+    pass_prior = sorted(t.name for t in TASKS if t.expected_baseline == "pass")
+    assert pass_prior, "no pass-prior task in the registry — this pin has gone vacuous"
+
+    victim = pass_prior[0]
+    base = _full_suite_shaped(priors)
+    cand = _full_suite_shaped(priors, overrides={victim: 0})
+    d = evaluate(base, cand)
+    assert d.outcome == REJECT
+    assert any(f"full-pass task collapsed to zero: {victim}" in r for r in d.reasons), d.reasons
