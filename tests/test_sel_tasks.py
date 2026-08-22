@@ -124,6 +124,25 @@ def test_sel_tasks_stay_outside_the_gate_machinery_calibrated_sets():
         "calibration install AFTER the SEL null campaign, not to task authoring"
     )
     assert "tool_exposure" not in RULE_SECTIONS | CALIBRATION_REQUIRED
+    # The BEHAVIOR the table above is supposed to produce, not just the table:
+    # now that the editor can actually apply this knob (loop/config_edit.py's
+    # insert path), a tool_exposure candidate really does reach the rule — and
+    # must land as 'unmapped', which is what keeps the calibrated three-outcome
+    # rule off an uncalibrated section.
+    from loop.artifacts import Candidate
+    from loop.validate import candidate_section
+
+    probe = Candidate(
+        id="sel-isolation-probe",
+        cluster_id="CL-0",
+        proposer="test",
+        proposer_detail="isolation pin",
+        fields={"tool_exposure": {"old": None, "new": {"strategy": "query_match", "k": 8}}},
+        rationale="r",
+        expected_effect="e",
+        regression_risk="g",
+    )
+    assert candidate_section(probe) is None
 
 
 def test_sel_tasks_are_not_in_the_compaction_supported_set():
@@ -338,6 +357,44 @@ def test_sel_verdicts_apply_the_g2_non_answer_taxonomy():
     assert sel5_verdict("no idea", True)[:2] == (False, "fail")
     assert sel5_verdict(marker_only, False)[1] == "not_attempted"
     assert sel5_verdict(leak, False)[1] == "not_attempted"
+
+
+def test_sel5_stated_answer_refuses_explicit_non_answers_and_negations():
+    """The D3 last-int anchor alone reads POSITION, not meaning.
+
+    A review probe found two replies that satisfied it while saying the opposite
+    of an answer — ``"Unable to answer; diagnostic code 4127"`` and ``"The stock
+    is 9999, not 4127"``. Both had the count in a tool result, so the second
+    conjunct held too, and both scored as PASSES: the guard was crediting the
+    exposure policy for replies that refused or denied the count.
+
+    The tightening stays deterministic (decision 12, no judge): an explicit
+    refusal marker anywhere in the reply, or a negation immediately before the
+    count, cannot satisfy the stated answer. These are ``fail``, not
+    ``not_attempted`` — a model that was OFFERED the tools and then said it could
+    not answer is making a statement about tool selection, which is precisely
+    what this suite measures, unlike a truncated generation (a harness defect G1
+    owns) or a tool-syntax leak."""
+    from runner.tasks.cluster_s import SEL5_COUNT, sel5_verdict
+
+    # The shapes that must still pass: the bare number, and a plain sentence.
+    assert sel5_verdict(SEL5_COUNT, True)[:2] == (True, "pass")
+    assert sel5_verdict(f"The Basel depot holds {SEL5_COUNT} units.", True)[:2] == (True, "pass")
+    # A correction that ENDS on the count is still an answer: the negation has to
+    # sit against the count itself, not merely somewhere in the reply.
+    assert sel5_verdict(f"Basel does not stock 9999; it holds {SEL5_COUNT}", True)[:2] == (
+        True,
+        "pass",
+    )
+    for spoof in (
+        f"Unable to answer; diagnostic code {SEL5_COUNT}",
+        f"The stock is 9999, not {SEL5_COUNT}",
+        f"I cannot determine the count. Reference: {SEL5_COUNT}",
+        f"No tool provides this; see code {SEL5_COUNT}",
+        f"The figure is 5000 rather than {SEL5_COUNT}",
+    ):
+        ok, outcome, _ = sel5_verdict(spoof, True)
+        assert (ok, outcome) == (False, "fail"), f"spoof scored {outcome!r}: {spoof!r}"
 
 
 # --- cross-task hygiene -------------------------------------------------------

@@ -155,6 +155,150 @@ def test_permission_boundary_field_is_not_editable(fake_carbon):
         )
 
 
+# --- optional knobs the config file omits -------------------------------------
+#
+# carbon lands a knob whose default changes nothing by leaving it OUT of the
+# shipped JSON: the file keeps its `config_version`, every external baseline
+# pinned to that version stays valid, and the loaded default is today's
+# behavior. `tool_exposure` is the live example, and `compaction.prompt_suffix`
+# on a sibling carbon branch is the next one. The editor discovers such a knob
+# through `known_knobs()` (carbon's manifest) but used to refuse to APPLY it,
+# because the file has no line to replace — so the loop could propose a value it
+# could never run. These tests pin both shapes of that insert.
+
+
+def _drop_key(fake_root: Path, field: str) -> dict:
+    """Remove a top-level field from the fixture's config, returning the rest.
+
+    Surgical on the TEXT, so the rest of the file keeps its exact formatting —
+    the fixture has to look like a real config that never carried the field."""
+    path = config_path(fake_root)
+    text = path.read_text()
+    raw = json.loads(text)
+    body = json.dumps(raw[field])
+    middle = f'  "{field}": {body},\n'  # any field but the last
+    last = f',\n  "{field}": {body}\n'  # the last field carries no trailing comma
+    if text.count(middle) == 1:
+        text = text.replace(middle, "")
+    elif text.count(last) == 1:
+        text = text.replace(last, "\n")
+    else:
+        raise AssertionError(f"{field} is not a single plain line in the fixture")
+    path.write_text(text)
+    del raw[field]
+    return raw
+
+
+def test_carbon_advertises_tool_exposure_as_an_optional_knob_the_file_omits():
+    """The premise the insert path rests on, read from carbon rather than assumed:
+    the manifest advertises the knob AND marks it optional, and the shipped config
+    really does omit it. If carbon ever writes the field into the file, the insert
+    path stops being exercised by the test below and this says so."""
+    knob = known_knobs()["tool_exposure"]
+    assert knob["optional"] is True
+    assert "tool_exposure" not in json.loads(REAL_CONFIG.read_text())
+
+
+def test_apply_inserts_an_optional_top_level_field_the_file_omits(fake_carbon):
+    """THE fix: a candidate may SET a manifest-advertised field the JSON omits.
+
+    `old: None` is how a candidate says "absent from the file" — the stale guard
+    still applies, in the only form it can take when there is no current value."""
+    before = config_path(fake_carbon).read_text()
+    value = {"strategy": "query_match", "k": 8}
+    new = apply_candidate(
+        fake_carbon,
+        make_candidate({"tool_exposure": {"old": None, "new": value}}),
+    )
+    assert new["tool_exposure"] == value
+    assert new["version"] == _bumped()
+    on_disk = json.loads(config_path(fake_carbon).read_text())
+    assert on_disk == new
+    # Exactly one line added, and the diff stays the one-knob story this module
+    # exists to produce: the inserted line, the version bump, and (because the
+    # anchor was the file's last field) the comma the anchor line had to gain.
+    after = config_path(fake_carbon).read_text()
+    assert len(after.splitlines()) == len(before.splitlines()) + 1
+    inserted = [ln for ln in after.splitlines() if ln.lstrip().startswith('"tool_exposure":')]
+    assert len(inserted) == 1
+    assert inserted[0] == f'  "tool_exposure": {json.dumps(value)}'
+
+
+def test_inserted_field_lands_in_carbons_own_serialization_order(fake_carbon):
+    """Where the line goes is not cosmetic: the file is read by people reviewing a
+    one-line PR diff, and a knob appearing in a random position reads as noise.
+    The insert follows carbon's own schema order, so the file stays in the order
+    the surface publishes."""
+    from carbon import config_schema
+
+    apply_candidate(
+        fake_carbon,
+        make_candidate({"tool_exposure": {"old": None, "new": {"strategy": "all"}}}),
+    )
+    order = [f["name"] for f in config_schema()]
+    on_disk = [k for k in json.loads(config_path(fake_carbon).read_text()) if k in order]
+    assert on_disk == [name for name in order if name in on_disk]
+
+
+def test_insert_refuses_a_candidate_that_claims_the_field_already_had_a_value(fake_carbon):
+    """The stale guard, in its absent-field form: a candidate whose `old` names a
+    value is a candidate written against a different file than this one."""
+    before = config_path(fake_carbon).read_text()
+    with pytest.raises(ValueError, match="stale"):
+        apply_candidate(
+            fake_carbon,
+            make_candidate(
+                {"tool_exposure": {"old": {"strategy": "all"}, "new": {"strategy": "all", "k": 3}}}
+            ),
+        )
+    assert config_path(fake_carbon).read_text() == before
+
+
+def test_insert_is_refused_for_a_field_carbon_does_not_call_optional(fake_carbon):
+    """Absence is only an insert opportunity when carbon says the field may be
+    absent. A REQUIRED field missing from the file is a corrupt config, and
+    quietly writing it back would repair — and hide — that corruption."""
+    rest = _drop_key(fake_carbon, "max_tokens")
+    assert "max_tokens" not in rest
+    assert known_knobs()["max_tokens"].get("optional") is not True
+    before = config_path(fake_carbon).read_text()
+    with pytest.raises(ValueError, match="no field 'max_tokens'"):
+        apply_candidate(fake_carbon, make_candidate({"max_tokens": {"old": None, "new": 8192}}))
+    assert config_path(fake_carbon).read_text() == before
+
+
+def test_apply_adds_an_optional_key_nested_inside_an_object_knob(fake_carbon):
+    """The NESTED shape, proven rather than assumed — `compaction.prompt_suffix`'s
+    shape on the sibling carbon branch: an optional parameter, absent from the
+    serialized object, legal to the loader when present.
+
+    The established candidate contract (every committed candidate in iter-02..06)
+    addresses an object knob WHOLE: `old` and `new` are the full object, and the
+    file line is replaced in one piece. The stand-in here is
+    `compaction.checkpoint_fallback` — optional, defaulted, and accepted by
+    carbon's real door — with the fixture edited to omit it, which is exactly the
+    state `prompt_suffix` is in on that branch. Nothing here touches that branch;
+    the shape is what is under test."""
+    path = config_path(fake_carbon)
+    raw = json.loads(path.read_text())
+    without = {k: v for k, v in raw["compaction"].items() if k != "checkpoint_fallback"}
+    assert "checkpoint_fallback" in raw["compaction"], "fixture premise: the key ships present"
+    path.write_text(path.read_text().replace(json.dumps(raw["compaction"]), json.dumps(without)))
+    current = json.loads(path.read_text())["compaction"]
+    assert "checkpoint_fallback" not in current
+
+    gained = {**current, "checkpoint_fallback": "keep_head"}
+    new = apply_candidate(
+        fake_carbon, make_candidate({"compaction": {"old": current, "new": gained}})
+    )
+    assert new["compaction"]["checkpoint_fallback"] == "keep_head"
+    # Written, parsed back, and accepted by carbon's own load_config (apply_candidate
+    # runs that door before writing), with the object still on one line.
+    on_disk = config_path(fake_carbon).read_text()
+    assert json.loads(on_disk)["compaction"] == gained
+    assert len([ln for ln in on_disk.splitlines() if ln.lstrip().startswith('"compaction":')]) == 1
+
+
 def test_invalid_new_value_rejected_by_carbon_door(fake_carbon):
     """A non-positive count must be caught by carbon's own load_config before
     the file is written — the pipeline can never leave a config the harness

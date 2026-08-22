@@ -402,10 +402,46 @@ def _sel3_decoy_clean(reply: str) -> bool:
     return SEL3_SUBTOTAL_CODE not in reply and "17250" not in squeezed
 
 
+# An explicit refusal ANYWHERE in the reply, and a negation sitting immediately
+# against the count. Both were found by a review probe scoring as passes: the
+# last-int anchor reads position, not meaning, so "Unable to answer; diagnostic
+# code 4127" and "The stock is 9999, not 4127" both satisfied it.
+#
+# Blocklists are incomplete BY CONSTRUCTION and this one is no exception — it
+# refuses the phrasings a real refusal actually uses, not every phrasing one
+# could. The alternative (a judge) is refused by decision 12 for a fact that is
+# an exact string, and a stricter mechanical rule — "the count must be the only
+# integer in the final sentence" — fails legitimate answers like
+# "4127 units (as of 2026)". So: a deterministic tightening against demonstrated
+# spoof shapes, not a proof that no non-answer can score.
+_SEL5_REFUSAL_RE = re.compile(
+    r"\b(?:unable|cannot|can'?t|could\s?n[o']t|do(?:es)?\s?n[o']t know|not able|"
+    r"no (?:tool|data|record|records|information|result|results|match|matches))\b",
+    re.I,
+)
+# Window of 12 characters, deliberately short: it catches "not 4127" and
+# "rather than 4127" while leaving "does not stock 9999; it holds 4127" — a
+# correction that ENDS on the right answer — scoring as the answer it is.
+_SEL5_NEGATED_RE = re.compile(
+    rf"\b(?:not|isn'?t|aren'?t|rather than|instead of|no longer|never)\b.{{0,12}}?"
+    rf"{re.escape(SEL5_COUNT)}",
+    re.I,
+)
+
+
 def _sel5_stated(reply: str) -> bool:
-    """Did the reply STATE the count as its final answer (the D3 anchor, not a
-    substring scan)?"""
-    return _last_int(reply) == SEL5_COUNT
+    """Did the reply STATE the count as its final answer?
+
+    The D3 anchor (last integer) plus two deterministic exclusions: an explicit
+    refusal marker, and a negation immediately before the count. Without them the
+    anchor credits any reply whose final integer happens to be the count,
+    including one that refuses to answer and one that names the count to deny
+    it."""
+    if _last_int(reply) != SEL5_COUNT:
+        return False
+    if _SEL5_REFUSAL_RE.search(reply) or _SEL5_NEGATED_RE.search(reply):
+        return False
+    return True
 
 
 def sel2_verdict(reply: str, code_in_tool: bool) -> tuple[bool, str, str | None]:
