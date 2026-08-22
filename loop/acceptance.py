@@ -92,7 +92,12 @@ from functools import cache
 from math import comb
 from types import MappingProxyType
 
-from loop.calibrate import SERVING_PROVENANCE_FIELDS, null_gain_quantile, null_task_quantile
+from loop.calibrate import (
+    SERVING_PROVENANCE_FIELDS,
+    base_url_refusal,
+    null_gain_quantile,
+    null_task_quantile,
+)
 
 REJECT = "REJECT"
 CONFIRM = "CONFIRM"
@@ -592,12 +597,29 @@ def _parity(baseline: dict, candidate: dict) -> None:
             f"not the edit"
         )
     for serving_field in SERVING_PROVENANCE_FIELDS:
-        if bf.get(serving_field) != cf.get(serving_field):
+        # Presence participates, not the value alone: an ABSENT key and an explicitly
+        # recorded None mean different things (unstated versus the positive record of
+        # a network provider / unpinned local routing), and `.get` renders them
+        # identically. Two arms carrying the same current `runner_sha` can still differ
+        # in shape, so the verifier gate above does not cover this.
+        if (serving_field in bf, bf.get(serving_field)) != (
+            serving_field in cf,
+            cf.get(serving_field),
+        ):
+            b_state = repr(bf.get(serving_field)) if serving_field in bf else "<unstated>"
+            c_state = repr(cf.get(serving_field)) if serving_field in cf else "<unstated>"
             raise ValueError(
-                f"serving mismatch on {serving_field}: baseline {bf.get(serving_field)!r} "
-                f"vs candidate {cf.get(serving_field)!r} — a comparison across serving "
-                f"bases measures the serving swap, not the edit"
+                f"serving mismatch on {serving_field}: baseline {b_state} vs candidate "
+                f"{c_state} — a comparison across serving bases measures the serving "
+                f"swap, not the edit; an unstated field is not a match for a recorded one"
             )
+    # A stated base_url that names no endpoint, on either arm. Not a comparison: two
+    # arms stripped the same way AGREE, each having lost the field that told their
+    # endpoints apart.
+    for fp, who in ((bf, "baseline"), (cf, "candidate")):
+        refusal = base_url_refusal(fp, who)
+        if refusal:
+            raise ValueError(refusal)
 
 
 def _split_deltas(

@@ -1681,3 +1681,110 @@ def test_a_mixed_era_pool_refuses_on_runner_sha_before_any_serving_field(tmp_pat
         calibrate_model(["full-a", "full-b"], tmp_path, frozenset({"A1"}))
     assert "runner_sha" in str(exc.value)
     assert "provider_order" not in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# Absent-versus-null, the class this program already paid for once with
+# `dirty_sha` (Codex review of 6c84282, Medium 1), and the one serving field
+# that is never legitimately null (Medium 2).
+# ---------------------------------------------------------------------------
+
+
+def test_an_unstated_serving_field_does_not_pool_with_an_explicitly_recorded_none(tmp_path):
+    """`.get` reading an ABSENT key as None makes an arm that never stated a
+    serving field compare equal to an arm that stated it as None — and the two
+    mean different things: unstated is unknown, `"responder": null` is the
+    positive record of a network provider. The runner_sha argument does not
+    reach this case: both arms here carry the SAME current verifier hash, so
+    nothing upstream refuses them, exactly as `dirty_sha` needed its own gate.
+    """
+    unstated = {k: v for k, v in _SERVING_FP.items() if k != "responder"}
+    _write(tmp_path, "full-a", _arm("full-a", {"A1": (2, 3, "held_in")}, fingerprint=unstated))
+    _write(tmp_path, "full-b", _arm("full-b", {"A1": (1, 3, "held_in")}, fingerprint=_SERVING_FP))
+    with pytest.raises(ValueError, match="responder"):
+        calibrate_model(["full-a", "full-b"], tmp_path, frozenset({"A1"}))
+
+
+def test_the_mismatch_message_distinguishes_unstated_from_a_recorded_none(tmp_path):
+    """And it must SAY which is which. `arm-a=None, arm-b=None` reads as a bug in
+    the checker; the refusal has to show that one arm never stated the field."""
+    unstated = {k: v for k, v in _SERVING_FP.items() if k != "quantization"}
+    _write(tmp_path, "full-a", _arm("full-a", {"A1": (2, 3, "held_in")}, fingerprint=unstated))
+    _write(tmp_path, "full-b", _arm("full-b", {"A1": (1, 3, "held_in")}, fingerprint=_SERVING_FP))
+    with pytest.raises(ValueError) as exc:
+        calibrate_model(["full-a", "full-b"], tmp_path, frozenset({"A1"}))
+    assert "unstated" in str(exc.value)
+    assert "'bf16'" in str(exc.value), "and the other arm's real recorded value"
+
+
+def test_two_arms_that_both_never_stated_a_serving_field_still_pool(tmp_path):
+    """The no-back-fill property, held while presence starts participating: the
+    committed pre-serving arms share an absent shape, and an absent shape
+    matching an absent shape is homogeneous. Only a MIXED shape refuses."""
+    unstated = {k: v for k, v in _SERVING_FP.items() if k != "responder"}
+    _write(tmp_path, "full-a", _arm("full-a", {"A1": (2, 3, "held_in")}, fingerprint=unstated))
+    _write(tmp_path, "full-b", _arm("full-b", {"A1": (1, 3, "held_in")}, fingerprint=unstated))
+
+    result = calibrate_model(["full-a", "full-b"], tmp_path, frozenset({"A1"}))
+
+    for row in result["provenance"]:
+        assert "responder" not in row, "unstated stays unstated in the record"
+        assert row["quantization"] == "bf16", "the fields it DID state are recorded"
+
+
+@pytest.mark.parametrize("bad", [None, ""])
+def test_a_recorded_base_url_that_names_no_endpoint_is_refused(tmp_path, bad):
+    """`base_url` is the one serving field that is never legitimately null.
+    carbon's `Provider.base_url` is a required `str` with no default and
+    `from_env` always supplies one (env var or the default), so the runner
+    cannot record a null here — a null one is a postprocessed or truncated
+    record, and it is the field that DISTINGUISHES two local endpoints. Two
+    records nulled that way (one LM Studio, one Ollama) would pool as one
+    serving base with the distinguishing field gone. Local-unpinned means a
+    recorded local URL with null ROUTING pins, never a null URL.
+    """
+    fp = {**_SERVING_FP, "base_url": bad, "provider_order": None, "quantization": None}
+    _write(tmp_path, "full-a", _arm("full-a", {"A1": (2, 3, "held_in")}, fingerprint=fp))
+    _write(tmp_path, "full-b", _arm("full-b", {"A1": (1, 3, "held_in")}, fingerprint=fp))
+    with pytest.raises(ValueError, match="base_url"):
+        calibrate_model(["full-a", "full-b"], tmp_path, frozenset({"A1"}))
+
+
+def test_a_real_local_serving_identity_pools(tmp_path):
+    """The shape the null URL was standing in for: a recorded local endpoint with
+    null routing pins. That IS legitimate — LM Studio serves without provider
+    routing — and it must pool, so the base_url rule refuses the impossible shape
+    without refusing the real one."""
+    local = {
+        **_SERVING_FP,
+        "base_url": "http://localhost:1234/v1",
+        "provider_order": None,
+        "quantization": None,
+    }
+    _write(tmp_path, "full-a", _arm("full-a", {"A1": (2, 3, "held_in")}, fingerprint=local))
+    _write(tmp_path, "full-b", _arm("full-b", {"A1": (1, 3, "held_in")}, fingerprint=local))
+
+    result = calibrate_model(["full-a", "full-b"], tmp_path, frozenset({"A1"}))
+
+    for row in result["provenance"]:
+        assert row["base_url"] == "http://localhost:1234/v1"
+        assert row["provider_order"] is None and row["quantization"] is None
+
+
+def test_pre_serving_arms_are_not_asked_for_a_base_url(tmp_path):
+    """The base_url rule keys on the field being STATED, so it cannot fire on the
+    committed pre-serving arms — they state no serving identity at all, and stay
+    gated by `runner_sha` as the no-back-fill decision requires."""
+    old_fp = {
+        "runner_sha": "rsha-pre-serving",
+        "config_version": 7,
+        "model": "carbon-model",
+        "gemma_sha": "aaaa",
+        "dirty_sha": None,
+    }
+    _write(tmp_path, "full-a", _arm("full-a", {"A1": (2, 3, "held_in")}, fingerprint=old_fp))
+    _write(tmp_path, "full-b", _arm("full-b", {"A1": (1, 3, "held_in")}, fingerprint=old_fp))
+
+    result = calibrate_model(["full-a", "full-b"], tmp_path, frozenset({"A1"}))  # must not raise
+
+    assert [row["label"] for row in result["provenance"]] == ["full-a", "full-b"]

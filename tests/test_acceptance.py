@@ -1982,12 +1982,10 @@ def test_evaluate_shares_the_same_model_and_serving_gates():
         evaluate(base, cand)
 
 
-def test_a_shared_unpinned_local_serving_identity_passes_parity():
-    """None on both sides of every serving field is the local-serving case — a
-    genuine match, never 'could not check'. The pair must reach a verdict."""
-    local = {**_PAIR_FP, "base_url": None, "provider_order": None, "quantization": None}
+def _moved_pair(fp, base_passes=5, cand_passes=9):
+    """A confirmation pair that MOVES, so a verdict is reached rather than refused."""
 
-    def res(fp, passes):
+    def res(passes):
         return {
             "fingerprint": dict(fp),
             "tasks": {
@@ -2001,5 +1999,61 @@ def test_a_shared_unpinned_local_serving_identity_passes_parity():
             },
         }
 
-    d = confirmed(_first_for_c3(), res(local, 5), res(local, 9))
+    return res(base_passes), res(cand_passes)
+
+
+# The real local-serving shape: a RECORDED local endpoint with null ROUTING pins.
+# The earlier version of this fixture nulled `base_url` too, which taught the wrong
+# thing — carbon's `Provider.base_url` is a required `str` with no default, so the
+# runner cannot produce that shape, and it is the field that tells two local endpoints
+# apart.
+_LOCAL_PAIR_FP = {
+    **_PAIR_FP,
+    "base_url": "http://localhost:1234/v1",
+    "provider_order": None,
+    "quantization": None,
+}
+
+
+def test_a_shared_unpinned_local_serving_identity_passes_parity():
+    """Null ROUTING pins on both sides is the local-serving case (LM Studio, no
+    provider routing) — a genuine match, never 'could not check'. The pair must reach
+    a verdict."""
+    base, cand = _moved_pair(_LOCAL_PAIR_FP)
+    d = confirmed(_first_for_c3(), base, cand)
+    assert d.outcome in (ACCEPT, REJECT), "judged, not refused"
+
+
+@pytest.mark.parametrize("field", ["responder", "quantization"])
+def test_a_pair_split_on_whether_a_serving_field_was_STATED_refuses(field):
+    """Absent-versus-null in the confirmation pair. Both arms carry the SAME
+    `runner_sha`, so the verifier gate cannot catch it: a baseline that never stated
+    the field reads as equal to a candidate that positively recorded null, because
+    `.get` renders both as None. Unstated is unknown, not a match."""
+    stated = _PAIR_FP if field == "responder" else {**_PAIR_FP, "quantization": None}
+    unstated = {k: v for k, v in stated.items() if k != field}
+    base, cand = _moved_pair(stated)
+    base["fingerprint"] = dict(unstated)
+    with pytest.raises(ValueError, match=field):
+        confirmed(_first_for_c3(), base, cand)
+
+
+@pytest.mark.parametrize("bad", [None, ""])
+def test_a_pair_recording_a_base_url_that_names_no_endpoint_refuses(bad):
+    """A recorded null `base_url` is a postprocessed record with the
+    endpoint-distinguishing field removed. Two of them — one LM Studio, one Ollama —
+    would pass every other gate (same model, same SHA, same null pins) and be judged
+    as one serving base."""
+    base, cand = _moved_pair({**_LOCAL_PAIR_FP, "base_url": bad})
+    with pytest.raises(ValueError, match="base_url"):
+        confirmed(_first_for_c3(), base, cand)
+
+
+def test_a_pair_that_never_stated_any_serving_field_is_judged_not_refused():
+    """The pre-serving pair — no serving keys at all — is untouched by both rules: it
+    states no serving identity to be null, and its two arms share an absent shape. It
+    stays gated by `runner_sha` alone, which is the no-back-fill default."""
+    old = {"runner_sha": "x", "model": "m", "config_version": 1, "dirty_sha": None}
+    base, cand = _moved_pair(old)
+    d = confirmed(_first_for_c3(), base, cand)
     assert d.outcome in (ACCEPT, REJECT), "judged, not refused"
