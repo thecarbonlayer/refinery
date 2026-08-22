@@ -138,7 +138,10 @@ Rule outcome: **{rule.get("outcome", "?")}**
 {reasons}
 
 Per-task regression warnings: {regressions}. A full-pass -> zero-pass movement is a
-promotion veto even when the aggregate split rule passes."""
+promotion veto at the confirmation even when the aggregate split rule passes. In the
+FIRST decision it vetoes only where full-pass status is established (a recorded `pass`
+prior, or membership in the calibration's covered set); elsewhere it is recorded and
+carried forward, because one screening sample cannot tell a regression from variance."""
 
 
 def _confirmation_section(record: ValidationRecord) -> str:
@@ -386,7 +389,10 @@ def pr_body(
 **Δ_in = {record.delta_in:+.4f}, Δ_ho = {record.delta_ho:+.4f} -> {record.disposition}**
 
 Per-task regression warnings: {regressions}. A full-pass -> zero-pass movement is a
-promotion veto even when the aggregate split rule passes."""
+promotion veto at the confirmation even when the aggregate split rule passes. In the
+FIRST decision it vetoes only where full-pass status is established (a recorded `pass`
+prior, or membership in the calibration's covered set); elsewhere it is recorded and
+carried forward, because one screening sample cannot tell a regression from variance."""
     )
     return f"""## Failure cluster targeted
 

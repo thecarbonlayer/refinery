@@ -1974,12 +1974,33 @@ def test_a_record_with_no_prior_at_all_keeps_the_collapse_veto(tmp_path):
     assert any("full-pass task collapsed to zero: X2" in r for r in d.reasons), d.reasons
 
 
-def test_the_confirmation_applies_the_same_established_only_collapse_rule(tmp_path):
-    """`confirmed()` is the ONLY road to ACCEPT, so both directions must hold there too
-    — a protection that runs on one measurement and not the other is a protection with
-    a door in it (`_collapses`' own docstring). Both stages read the SAME helper with
-    the same two inputs (the recorded prior and the calibration), so they cannot drift:
-    neither takes a task list the other lacks.
+def test_the_confirmation_vetoes_every_collapse_established_or_not(tmp_path):
+    """THE WRONG-ACCEPT PATH, closed. The suppression is STAGE 1 ONLY.
+
+    A review of the first version of this fix asked the question directly: could the
+    narrowing ever cause a wrong ACCEPT? It could, and this is where. A genuinely
+    regressing task with an `uncertain` prior, outside the governing calibration's
+    covered set, with no independent security failure, has ZERO mechanical safety
+    margin under a calibration — its delta is outside the supported means, it has no
+    carrier or guard quantile, and the veto was suppressed at both stages. Moving it
+    forced a confirmation rerun but never became a gate.
+
+    So the rule is asymmetric by STAGE, not uniform, and the asymmetry is quantitative
+    rather than a matter of taste. Both arms are fresh at each stage, so the chance a
+    collapse is pure noise is P(full pass) x P(zero) at that stage's attempt counts,
+    worst case over the true rate:
+
+        stage 1, n=3   ->  1.6e-02 per task  (~21% across ~15 unestablished tasks)
+        stage 1, n=5   ->  9.8e-04 per task
+        confirmation   ->  9.5e-07 per task  (~1.4e-05 across the same 15)
+
+    Suppressing at stage 1 removes a one-in-five false REJECT. Suppressing at the
+    confirmation would buy a one-in-seventy-thousand improvement in false rejections
+    and pay for it with the only wrong-ACCEPT path this rule has. The costs are not
+    symmetric either: a false REJECT at the confirmation costs one rerun, a wrong
+    ACCEPT ships a regression, which is the failure this program exists to prevent.
+
+    So: no veto at stage 1, veto at the confirmation, whatever the prior.
     """
     cal = _null_model_calibration(tmp_path)
     # X2 moves in the first decision, which is what carries it into `confirm_tasks` —
@@ -2000,12 +2021,48 @@ def test_the_confirmation_applies_the_same_established_only_collapse_rule(tmp_pa
     assert blocked.outcome == REJECT
     assert "full-pass task collapsed to zero: X2" in blocked.reasons
 
-    # DIRECTION 2: the identical collapse on an `uncertain`-prior task does not block,
-    # and ACCEPT is reachable again — while the observation is still on the record.
-    allowed = confirmed(
+    # DIRECTION 2: the identical collapse on an `uncertain`-prior task ALSO blocks here
+    # — this is the ACCEPT gate, and it is the assertion that closes the wrong ACCEPT.
+    unestablished = confirmed(
         first,
         *_confirm_pair(first, base_counts, collapses, priors={"X2": "uncertain"}),
         calibration=cal,
     )
-    assert allowed.outcome == ACCEPT, allowed.reasons
-    assert any("X2" in r and "collapsed" in r for r in allowed.reasons), allowed.reasons
+    assert unestablished.outcome == REJECT, unestablished.reasons
+    assert any("X2" in r and "collapsed to zero" in r for r in unestablished.reasons), (
+        unestablished.reasons
+    )
+    # And it says WHY it vetoed here after passing at stage 1, so the record explains
+    # its own asymmetry rather than looking like two rules disagreeing.
+    assert any("confirmation" in r for r in unestablished.reasons), unestablished.reasons
+
+
+def test_stage_one_still_tolerates_the_noise_the_confirmation_gate_catches(tmp_path):
+    """The other half of the asymmetry, pinned so a future edit cannot quietly make the
+    confirmation's strictness leak back into the screening stage. Same task, same
+    collapse, same calibration — CONFIRM at stage 1, recorded and not vetoed."""
+    cal = _null_model_calibration(tmp_path)
+    base = _cmp_run({"X2": 4}, priors={"X2": "uncertain"})
+    cand = _cmp_run({"G2": 38, "X2": 0}, priors={"X2": "uncertain"})
+    d = evaluate(base, cand, calibration=cal)
+    assert d.outcome == CONFIRM, d.reasons
+    assert not any("full-pass task collapsed to zero" in r for r in d.reasons), d.reasons
+    assert any("not established" in r for r in d.reasons), d.reasons
+
+
+def test_an_unestablished_collapse_survives_alongside_unreachable_probable(tmp_path):
+    """The context channel is APPENDED, never replaced.
+
+    The first version of this fix appended the collapse note and then let the
+    `unreachable_probable` branch REBIND the whole tuple, so the two notes were
+    mutually exclusive — and production passes `unreachable_probable` on exactly the
+    calibrated path where the collapse note matters most (`loop/validate.py`). The
+    combination left an unestablished collapse with no trace in the record at all,
+    which made "the observation survives" false in the one case nobody would check.
+    """
+    cal = _null_model_calibration(tmp_path)
+    base = _cmp_run({"X2": 4}, priors={"X2": "uncertain"})
+    cand = _cmp_run({"G2": 38, "X2": 0, "X1": 0}, priors={"X2": "uncertain"})
+    d = evaluate(base, cand, calibration=cal, unreachable_probable={"X1"})
+    assert any("not established" in r and "X2" in r for r in d.reasons), d.reasons
+    assert any("unreachable_probable" in r for r in d.reasons), d.reasons

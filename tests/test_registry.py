@@ -3330,21 +3330,25 @@ def _full_suite_shaped(priors: dict[str, str], overrides: dict[str, int] | None 
     }
 
 
-def test_an_onb_noise_flip_cannot_veto_a_whole_suite_decision():
+def test_an_onb_noise_flip_does_not_trip_the_collapse_veto_on_the_UNCALIBRATED_path():
     """The isolation claim, EXERCISED rather than asserted about name membership.
 
-    The earlier isolation test proved ONB names sit outside every calibration set and
-    knob-miner row. That is necessary and not sufficient: cluster I is in the DEFAULT
-    registry, candidate validation runs the suite UNFILTERED, and the collapse veto in
-    `loop.acceptance` reads the whole result set regardless of any calibration. So the
-    path that matters is the one where an ONB task is simply PRESENT in an ordinary
-    full-suite pair.
+    SCOPE, stated precisely because an earlier version of this test overclaimed it.
+    This exercises `evaluate()` with NO calibration — the uncalibrated first-decision
+    path. It demonstrates exactly two things: the ONB flips do not trip the collapse
+    veto, and they remain in the record. It does NOT demonstrate anything about what a
+    CALIBRATED decision retains; the calibrated behaviour lives in
+    `tests/test_acceptance.py`, where the null-model fixture is, and where the wrong
+    ACCEPT this rule could otherwise permit is pinned shut at the confirmation stage.
 
-    Here every ONB task flips 1.00 -> 0.00 at once — a far worse run of luck than the
-    real risk — while a genuine gain sits on a compaction task. The decision must
-    survive, and the flips must still be visible in the record.
+    What the uncalibrated split mean does catch is worth being exact about too, since
+    it is the only remaining catch on this path: five held-in/held-out tasks falling to
+    zero moves the split means far past the one-attempt allowance, so this pair REJECTS
+    — just not via the collapse veto. Under a CALIBRATION the split means read only the
+    supported set and would not see this at all, which is precisely why the confirmation
+    stage vetoes every collapse regardless of prior.
     """
-    from loop.acceptance import evaluate
+    from loop.acceptance import REJECT, evaluate
 
     priors = {t.name: t.expected_baseline for t in TASKS}
     onb = sorted(t.name for t in TASKS if t.cluster == "I")
@@ -3360,25 +3364,27 @@ def test_an_onb_noise_flip_cannot_veto_a_whole_suite_decision():
     assert recorded, f"the flips vanished from the record entirely: {d.reasons}"
     for name in onb:
         assert name in recorded[0], f"{name} missing from the recorded collapse note"
-    # The split means are a SEPARATE protection and are deliberately untouched by this
-    # change: five tasks collapsing at once really is a regression, and it must still be
-    # caught — by the split-mean bound rather than by a veto none of these tasks earned.
     # Asserted, not assumed, so "the veto stopped firing" can never be mistaken for
-    # "nothing catches this".
-    from loop.acceptance import REJECT
-
+    # "nothing catches this" ON THIS PATH.
     assert d.outcome == REJECT, d.reasons
     assert any("regressed beyond one attempt" in r for r in d.reasons), d.reasons
 
 
-def test_no_unestablished_task_in_the_registry_can_veto_a_calibrated_decision():
+def test_no_unestablished_task_in_the_registry_trips_the_first_decision_veto():
     """The CLASS pin, generic over the registry rather than over ONB names.
 
     This is the check that keeps covering CTX, SEL and V as their branches land: it
     enumerates every task whose recorded prior is not `pass` and which sits outside
-    compaction's covered set, collapses ALL of them at once in a calibrated pair, and
-    requires that none of them vetoes. A future suite added to the default registry is
+    compaction's covered set, collapses ALL of them at once, and requires that none of
+    them trips the FIRST-DECISION veto. A future suite added to the default registry is
     covered the day it appears, with no edit here.
+
+    Uncalibrated, and named accordingly — the earlier name said "calibrated" while the
+    body passed no calibration, which is the kind of mislabel that makes a green test
+    read as evidence for something it never ran. The calibrated first decision suppresses
+    the same way (the prior is read from the record identically on both paths, and the
+    covered set can only ADD establishment), and the confirmation stage vetoes every
+    collapse regardless — both pinned in `tests/test_acceptance.py`.
     """
     from loop.acceptance import evaluate
     from loop.calibrate import MODEL_TASKS
@@ -3398,8 +3404,9 @@ def test_no_unestablished_task_in_the_registry_can_veto_a_calibrated_decision():
 
 def test_a_pass_prior_task_anywhere_in_the_registry_still_vetoes():
     """The other direction of the class pin, and the reason the fix is not simply "new
-    suites do not count". A task the registry asserts should PASS is protected wherever
-    it lives, calibrated or not — that assertion is exactly what the veto is for.
+    suites do not count". A task the registry asserts should PASS trips the veto even in
+    the first decision, wherever it lives — that assertion is exactly what the veto is
+    for. (Uncalibrated path, like its sibling above.)
 
     Worth stating for the suites authored alongside this one: an authored `pass` prior
     on a task nothing has measured yet is a real commitment. It buys the collapse veto,
