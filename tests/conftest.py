@@ -68,6 +68,31 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def slept():
+    """Every retry/pacing delay this suite asks for, in seconds — recorded, never waited.
+
+    The judge's transport now sleeps: bounded backoff between tries of one call
+    (``runner.judge``) and a fixed pace between the calls of a validation run
+    (``loop.judge_validate``). Both go through a module-level ``_sleep`` seam, and
+    this fixture replaces both for the whole suite. Autouse, not opt-in: an offline
+    test that forgot to ask would sit through a real 2/4/8/16-second backoff, and
+    ``uv run pytest`` making no model call has always also meant making no wall-clock
+    wait. Tests that care about the delays request ``slept`` by name and read the list.
+    """
+    from loop import judge_validate
+    from runner import judge
+
+    recorded: list[float] = []
+    mp = pytest.MonkeyPatch()
+    mp.setattr(judge, "_sleep", recorded.append)
+    mp.setattr(judge_validate, "_sleep", recorded.append)
+    try:
+        yield recorded
+    finally:
+        mp.undo()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _isolated_scratch_root():
     import harness.session_env as session_env_mod
