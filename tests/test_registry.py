@@ -2242,7 +2242,12 @@ def test_cmp5_a_delivered_no_decides_even_beside_an_undelivered_call():
     both claims carried, so one refused claim settles the attempt regardless of
     what happened to the other call. Error remains only where NO delivered verdict
     decides — a lone YES (the undelivered half could still swing it) or no delivery
-    at all. All five mixed rows, pinned."""
+    at all.
+
+    The whole judged-lane truth table is pinned, the ordinary both-delivered rows
+    included (round-3 review: NY and NN were decided correctly but never asserted,
+    so an order-specific NY regression or an NN-to-error regression would have
+    slipped through green)."""
     from runner.judge import Judgment
     from runner.tasks.cluster_g import (
         CMP5_APPROVED_FACT,
@@ -2264,11 +2269,18 @@ def test_cmp5_a_delivered_no_decides_even_beside_an_undelivered_call():
         return judge
 
     rows = [
+        # Mixed delivery: a delivered NO decides; a lone YES or nothing does not.
         (no, undelivered, "fail", CMP5_ROLES_NOT_PRESERVED),
         (undelivered, no, "fail", CMP5_ROLES_NOT_PRESERVED),
         (undelivered, undelivered, "error", JUDGE_UNAVAILABLE),
         (yes, undelivered, "error", JUDGE_UNAVAILABLE),
         (undelivered, yes, "error", JUDGE_UNAVAILABLE),
+        # Both delivered, at least one NO: ordinary judged failures, in both
+        # orders — NY guards against an order-specific conjunction regression,
+        # NN against a refused-pair drifting into `error`.
+        (no, yes, "fail", CMP5_ROLES_NOT_PRESERVED),
+        (yes, no, "fail", CMP5_ROLES_NOT_PRESERVED),
+        (no, no, "fail", CMP5_ROLES_NOT_PRESERVED),
     ]
     for approved_j, retired_j, outcome, classification in rows:
         v = cmp5_outcome(prose, judge_with(approved_j, retired_j))
@@ -2277,6 +2289,42 @@ def test_cmp5_a_delivered_no_decides_even_beside_an_undelivered_call():
             (retired_j.ran, retired_j.verdict),
             (v.outcome, v.classification),
         )
+
+
+def test_cmp5_taxonomy_precedes_a_delivered_no_in_the_judged_lane():
+    """The precedence the judged lane promises, asserted so an inversion goes red:
+    when the reply itself is a classified non-answer (a tool-syntax leak or a
+    truncation with a code caught inside), that deterministic label stands even
+    though a delivered NO sits right there to decide `fail` — the NO measured the
+    leak, and `not_attempted` is what the record must say. The mixed-delivery and
+    outage variants of this precedence are pinned elsewhere; these are the
+    delivered-NO rows."""
+    from runner.judge import Judgment
+    from runner.tasks.cluster_g import (
+        CMP5_CURRENT,
+        G2_TRUNCATION_MARKER,
+        NON_ANSWER_TOOL_SYNTAX,
+        NON_ANSWER_TRUNCATED,
+        cmp5_outcome,
+    )
+
+    def judge_no(expected, answer):
+        return Judgment(False, "q", "VERDICT: NO\nQUOTE: q")
+
+    leak = f"<|tool_call>call:bash {{command: 'grep {CMP5_CURRENT}'}}<tool_call|>"
+    truncated = f"{G2_TRUNCATION_MARKER} partial notes mentioning {CMP5_CURRENT}"
+    for reply, label in (
+        (leak, NON_ANSWER_TOOL_SYNTAX),
+        (truncated, NON_ANSWER_TRUNCATED),
+    ):
+        v = cmp5_outcome(reply, judge_no)
+        assert (v.passed, v.outcome, v.classification) == (False, "not_attempted", label), (
+            reply[:60],
+            (v.outcome, v.classification),
+        )
+        # The judge calls were made (the reply carries a code, so the lane ran) —
+        # their cost is recorded even though the taxonomy decided.
+        assert len(v.judgments) == 2
 
 
 def test_cmp5_publishes_its_classification_and_keeps_the_reply_last():

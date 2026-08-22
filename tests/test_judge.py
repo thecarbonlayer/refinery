@@ -690,11 +690,14 @@ def test_run_validation_computes_agreement_and_disagreements():
     assert result["disagree_count"] == 1
     assert result["disagreements"][0]["expected"] == "E"
     assert result["judge_prompt_sha"] == JUDGE_PROMPT_SHA
-    # The artifact records the (prompt, parser) pair it measured — the activation
-    # gate refuses it the moment either half moves.
-    from runner.judge import JUDGE_PARSER_VERSION
+    # The artifact records the (prompt, parser, scoring) identity it measured —
+    # the activation gate refuses it the moment any of the three moves. The
+    # scoring stamp matters doubly: if the WRITER dropped it, every fresh
+    # artifact would refuse at the gate while this suite stayed green.
+    from runner.judge import JUDGE_PARSER_VERSION, VALIDATION_COMPUTATION_VERSION
 
     assert result["judge_parser_version"] == JUDGE_PARSER_VERSION
+    assert result["validation_computation_version"] == VALIDATION_COMPUTATION_VERSION
     assert result["model"] == provider.model
 
 
@@ -783,9 +786,10 @@ def test_main_writes_agreement_artifact(tmp_path):
     on_disk = json.loads(output_path.read_text())
     assert on_disk == result
     assert on_disk["judge_prompt_sha"] == JUDGE_PROMPT_SHA
-    from runner.judge import JUDGE_PARSER_VERSION
+    from runner.judge import JUDGE_PARSER_VERSION, VALIDATION_COMPUTATION_VERSION
 
     assert on_disk["judge_parser_version"] == JUDGE_PARSER_VERSION
+    assert on_disk["validation_computation_version"] == VALIDATION_COMPUTATION_VERSION
     assert on_disk["model"] == provider.model
     assert on_disk["total_pairs"] == len(judge_validate.build_corpus())
 
