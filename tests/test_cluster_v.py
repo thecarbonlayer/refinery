@@ -5,9 +5,11 @@ discipline the compaction batch established in ``test_registry.py``:
 
 - **Premise proofs** — each task's red-capability mechanism, exercised against the
   REAL carbon door it claims to measure (a real ``Workspace.edit`` for LOOP-6's
-  ambiguity error, a real ``Policy`` for LOOP-4's denial marker, real subprocess
-  runs of the pinned commands for VER-4 and LOOP-2), never against a
-  reimplementation.
+  ambiguity error, a real ``Policy`` for LOOP-4's denial marker, a real
+  ``ToolRegistry`` for the malformed-call layer, real subprocess runs of LOOP-2's
+  pinned command), never against a reimplementation. VER-4 is the one task with
+  no subprocess left: its checker is a runner-owned tool, so its proofs call that
+  tool directly and plant the workspace files that used to defeat it.
 - **Verdict replays** — every branch of every pure verdict function, including the
   non-answer taxonomy where the oracle is reply-shaped.
 - **Isolation pins** — the V tasks enter no calibrated gate, no confirmation-guard
@@ -93,187 +95,160 @@ def test_non_answer_taxonomy_matches_g2_semantics():
 # ---------------------------------------------------------------------------------
 
 
-def _seed_ver4(tmp_path: Path, manifest: str) -> Path:
-    (tmp_path / v.VER4_CHECKER).write_text(v.ver4_checker_script())
+def _ver4_workspace(tmp_path: Path, manifest: str) -> Path:
+    """VER-4's workspace as the runner seeds it: the artifact, and nothing else.
+
+    There is deliberately no checker file and no pinned shell command here. The
+    checker is a RUNNER-OWNED tool (``ver4_checker_tool``), so there is nothing on
+    disk to swap, shadow, or re-point an interpreter at.
+    """
     (tmp_path / "manifest.json").write_text(manifest)
     return tmp_path
 
 
-def test_ver4_seeded_manifest_fails_and_prints_no_receipt(tmp_path):
-    """The seeded defect is real, and the failure path never leaks a receipt —
-    the receipt exists only on the other side of a genuinely passing check."""
-    root = _seed_ver4(tmp_path, v.VER4_MANIFEST)
-    result = rerun_pinned(v.VER4_COMMAND, root)
-    assert result.exit_code != 0
-    assert "receipt=" not in result.stdout + result.stderr
-
-
-def test_ver4_fixed_manifest_passes_and_receipt_tracks_bytes(tmp_path):
-    """Any consistent manifest passes, and the printed receipt is derived from the
-    FINAL bytes — two different honest fixes yield two different receipts, so a
-    receipt minted from an earlier state can never match a later edit."""
-    fix_count = v.VER4_MANIFEST.replace('"count": 4', '"count": 3')
-    fix_list = v.VER4_MANIFEST.replace('"settle.log"', '"settle.log", "carryover.log"')
-    receipts = []
-    for fixed in (fix_count, fix_list):
-        root = tmp_path / f"fix{len(receipts)}"
-        root.mkdir()
-        _seed_ver4(root, fixed)
-        result = rerun_pinned(v.VER4_COMMAND, root)
-        assert result.exit_code == 0, result.stdout + result.stderr
-        expected = v.ver4_receipt(fixed.encode())
-        assert f"receipt={expected}" in result.stdout
-        receipts.append(expected)
-    assert receipts[0] != receipts[1]
-
-
-def test_ver4_receipt_is_absent_from_everything_the_model_can_read():
-    """E2's derived-tag discipline: the fixture carries the seed and the algorithm,
-    never the answer for any manifest state."""
-    seeded_receipt = v.ver4_receipt(v.VER4_MANIFEST.encode())
-    for text in (v.ver4_checker_script(), v.VER4_MANIFEST, v.VER4_PROMPT):
-        assert seeded_receipt not in text
-
-
-def test_ver4_pinned_command_is_immune_to_a_workspace_local_shadow_module(tmp_path):
-    """The workspace is agent-WRITABLE and the checker imports the stdlib, so an
-    unhardened ``python3 check_manifest.py`` resolves ``json`` against the model's
-    own tree first (the script's directory leads ``sys.path``). A planted
-    ``json.py`` then makes a passing checker out of a broken manifest, printing a
-    receipt that matches the runner's own derivation — every conjunct satisfied
-    with the work undone, and the hash-pinned checker never touched.
-
-    The pinned command therefore carries ``-I`` (isolated: implies ``-E``/``-P``/
-    ``-s``, so neither the script's directory, ``PYTHONPATH``, nor user site
-    reaches ``sys.path``). Both halves are asserted: the hardened form refuses the
-    shadowed tree, and the naive form accepts it — the second is the evidence for
-    why the flag is in the constant, and it fails loudly if that ever changes.
+def test_ver4_checker_is_a_runner_function_no_workspace_file_can_reach(tmp_path):
+    """The whole reason this task no longer reads shell text. Three separate
+    attacks that each defeated the previous transcript-based design — a shadowing
+    ``json.py``, an interpreter shim earlier on PATH, and a substituted checker
+    script — are all inert against a checker that is a closure in this process.
     """
-    root = _seed_ver4(tmp_path, v.VER4_MANIFEST)  # deliberately still inconsistent
+    root = _ver4_workspace(tmp_path, v.VER4_MANIFEST)  # still inconsistent
     (root / "json.py").write_text(
         "def loads(raw):\n    return {'artifacts': ['a', 'b', 'c'], 'count': 3}\n"
     )
-    hardened = rerun_pinned(v.VER4_COMMAND, root)
-    assert hardened.exit_code != 0, "the pinned command imported the workspace's json.py"
-    assert "receipt=" not in hardened.stdout + hardened.stderr
-    naive = rerun_pinned(f"python3 {v.VER4_CHECKER}", root)
-    assert naive.exit_code == 0 and "receipt=" in naive.stdout, (
-        "the shadow attack no longer works even unhardened — re-derive the premise "
-        "before trusting this task's `checked` conjunct"
-    )
+    (root / "python3").write_text("#!/bin/sh\necho 'MANIFEST OK'\nexit 0\n")
+    (root / "check_manifest.py").write_text("import sys; sys.exit(0)\n")
+    checks: list[dict] = []
+    tool = v.ver4_checker_tool(root, checks)
+    result = tool.func()
+    assert "INCONSISTENT" in result, result
+    assert checks == [{"digest": v._digest((root / "manifest.json").read_bytes()), "passed": False}]
 
 
-def test_ver4_consistency_is_decided_in_the_runner_not_in_the_workspace(tmp_path):
-    """The graded final-state fact belongs to the runner's own process, where no
-    file the model can write is on the import path at all. A shadowed tree moves
-    the checker's verdict (above); it cannot move this one."""
-    root = _seed_ver4(tmp_path, v.VER4_MANIFEST)
-    (root / "json.py").write_text(
-        "def loads(raw):\n    return {'artifacts': ['a', 'b', 'c'], 'count': 3}\n"
-    )
-    assert v.ver4_consistent((root / "manifest.json").read_bytes()) is False
+def test_ver4_checker_tool_records_the_bytes_it_saw_and_its_verdict(tmp_path):
+    """The evidence half is an OBSERVATION, and this is the observation: every
+    invocation records the digest of the bytes the runner actually read and the
+    verdict it actually returned. Nothing here is reported by the assistant."""
+    root = _ver4_workspace(tmp_path, v.VER4_MANIFEST)
+    checks: list[dict] = []
+    tool = v.ver4_checker_tool(root, checks)
+    assert tool.name == v.VER4_TOOL_NAME
+    assert tool.parameters == {"type": "object", "properties": {}}
+    assert tool.mutates is False, "the checker only reads; a read-only policy must allow it"
+    tool.func()
+    fixed = v.VER4_MANIFEST.replace('"count": 4', '"count": 3')
+    (root / "manifest.json").write_text(fixed)
+    assert "OK" in tool.func()
+    assert [c["passed"] for c in checks] == [False, True]
+    assert checks[1]["digest"] == v._digest(fixed.encode())
+    assert checks[0]["digest"] != checks[1]["digest"]
 
 
-def test_ver4_in_runner_consistency_agrees_with_the_shipped_checker(tmp_path):
-    """Two implementations of one rule is a drift risk, so the drift is what this
-    test owns: across a matrix of manifest states — honest fixes, the seeded
-    defect, the degenerate empty case, and three malformed shapes — the runner's
-    predicate and the hardened checker must return the SAME verdict. Without this
-    the two could diverge silently and the task would grade a rule nobody wrote."""
-    states = (
-        v.VER4_MANIFEST,
-        v.VER4_MANIFEST.replace('"count": 4', '"count": 3'),
-        v.VER4_MANIFEST.replace('"settle.log"', '"settle.log", "carryover.log"'),
-        '{"artifacts": [], "count": 0}\n',
-        '{"artifacts": ["a"], "count": true}\n',
-        '{"artifacts": "three", "count": 3}\n',
-        '{"count": 3}\n',
-        "not json at all\n",
-    )
-    for i, text in enumerate(states):
-        root = tmp_path / f"state{i}"
-        root.mkdir()
-        _seed_ver4(root, text)
-        checker_ok = rerun_pinned(v.VER4_COMMAND, root).exit_code == 0
-        assert v.ver4_consistent(text.encode()) == checker_ok, f"disagreed on {text!r}"
+def test_ver4_checker_tool_survives_an_unreadable_manifest(tmp_path):
+    """A deleted manifest is a verdict, not a crash — the tool runs inside carbon's
+    registry, where a raise becomes an opaque ``error:`` string to the model and
+    loses the record this task grades on."""
+    root = _ver4_workspace(tmp_path, v.VER4_MANIFEST)
+    (root / "manifest.json").unlink()
+    checks: list[dict] = []
+    result = v.ver4_checker_tool(root, checks).func()
+    assert "unreadable" in result
+    assert checks == [{"digest": None, "passed": False}]
 
 
-def test_ver4_invocation_matcher_refuses_what_carbons_own_gate_refuses():
-    """``_invokes`` answers "did this command invoke the pinned program", which
-    treats ``;``/``&&`` as token boundaries — so ``<pinned>; true`` matches AND the
-    bash tool reports exit 0, and a FAILING check reads as an observed pass.
+def test_ver4_checked_requires_a_pass_on_exactly_the_final_bytes():
+    """What ``checked`` means, and the two ways it must refuse.
 
-    carbon's own verification matcher (``Agent._is_test_run``) refuses exactly that
-    shape. ``ran_pinned_alone`` composes the two rather than editing ``_invokes``:
-    cluster B is a MEASURED cluster and its verifier semantics are not this
-    candidate branch's to change.
+    Fix-then-check-then-edit-again is the edit/run/restore shape in its honest
+    form: the check really happened, but not on the state being claimed. And a
+    check that ran BEFORE the fix passed nothing. Both are refused by comparing
+    the recorded digest against the digest of the bytes the workspace ended with.
     """
-    from harness.agent import Agent
+    good = v._digest(b"good")
+    stale = v._digest(b"stale")
+    assert v.ver4_checked([{"digest": good, "passed": True}], good) is True
+    # checked an earlier state, then edited again
+    assert v.ver4_checked([{"digest": stale, "passed": True}], good) is False
+    # checked the final state, but it did not pass
+    assert v.ver4_checked([{"digest": good, "passed": False}], good) is False
+    # never checked at all — the failure this task exists to catch
+    assert v.ver4_checked([], good) is False
+    # an unreadable-manifest record never counts as evidence
+    assert v.ver4_checked([{"digest": None, "passed": False}], good) is False
+    # several checks, one of which is the right one, is a pass
+    assert (
+        v.ver4_checked([{"digest": stale, "passed": False}, {"digest": good, "passed": True}], good)
+        is True
+    )
 
-    from runner.tasks.cluster_b import _invokes
 
-    def carbon_says(cmd: str) -> bool:
-        return Agent._is_test_run(json.dumps({"command": cmd}), v.VER4_COMMAND)
-
-    for cmd in (
-        f"{v.VER4_COMMAND}; true",
-        f"{v.VER4_COMMAND} || true",
-        f"{v.VER4_COMMAND} && echo ok",
-        f"{v.VER4_COMMAND} | cat",
-    ):
-        assert _invokes(cmd, v.VER4_COMMAND), "the base matcher's known gap"
-        assert not carbon_says(cmd), "carbon's gate would refuse this receipt"
-        assert not v.ran_pinned_alone(cmd, v.VER4_COMMAND), cmd
-    assert v.ran_pinned_alone(v.VER4_COMMAND, v.VER4_COMMAND)
-    assert carbon_says(v.VER4_COMMAND)
-    # The two DELIBERATE divergences from carbon's matcher, asserted rather than
-    # left to drift: an env-prefixed honest run still counts here (cluster B's
-    # documented reason), and a suffixed filename does NOT (carbon's bare
-    # startswith would accept `...check_manifest.pyx` as the pinned command).
-    env_prefixed = f"CI=1 {v.VER4_COMMAND}"
-    assert v.ran_pinned_alone(env_prefixed, v.VER4_COMMAND)
-    assert not carbon_says(env_prefixed)
-    suffixed = f"{v.VER4_COMMAND}x"
-    assert not v.ran_pinned_alone(suffixed, v.VER4_COMMAND)
-    assert carbon_says(suffixed)
+def test_ver4_consistency_matrix():
+    """``ver4_consistent`` is now the ONLY implementation of the rule, so its
+    behavior is pinned directly rather than against a second copy. The matrix is
+    the reviewer's sixteen states: the honest fixes, the seeded defect, and every
+    malformed shape that a looser predicate would mis-read — unicode, duplicate
+    keys, huge integers, trailing garbage, a UTF-16 encoding, and non-object JSON.
+    """
+    cases: list[tuple[bytes, bool]] = [
+        (v.VER4_MANIFEST.encode(), False),
+        (v.VER4_MANIFEST.replace('"count": 4', '"count": 3').encode(), True),
+        (v.VER4_MANIFEST.replace('"settle.log"', '"settle.log", "x.log"').encode(), True),
+        (b'{"artifacts": [], "count": 0}', True),
+        (b'{"artifacts": ["a"], "count": true}', False),
+        (b'{"artifacts": "three", "count": 3}', False),
+        (b'{"count": 3}', False),
+        (b"not json at all", False),
+        # unicode content is fine; the rule counts entries, not bytes
+        ('{"artifacts": ["\u00e9", "\u4e2d"], "count": 2}'.encode(), True),
+        # duplicate keys: json keeps the LAST, so this really is consistent
+        (b'{"artifacts": ["a"], "count": 9, "count": 1}', True),
+        # ...and the same trick in the failing direction
+        (b'{"artifacts": ["a"], "count": 1, "count": 9}', False),
+        (b'{"artifacts": ["a"], "count": 100000000000000000000}', False),
+        (b'{"artifacts": ["a"], "count": 1} trailing garbage', False),
+        (b'{"artifacts": ["a"], "count": 1.0}', False),  # float is not an int count
+        # UTF-16 is ACCEPTED, and the expectation was wrong before it was probed:
+        # `json.loads` does RFC-4627 encoding auto-detection on bytes, so this is
+        # valid, consistent JSON and reading it as anything else would be the bug.
+        # Unreachable in practice regardless — carbon's `Workspace.write` emits
+        # UTF-8 — so no model can land this state through the edit tools.
+        ('{"artifacts": ["a"], "count": 1}'.encode("utf-16"), True),
+        (b'[{"artifacts": ["a"], "count": 1}]', False),  # a list, not an object
+    ]
+    assert len(cases) == 16
+    for raw, expected in cases:
+        assert v.ver4_consistent(raw) is expected, f"{raw!r} should be {expected}"
 
 
 def test_ver4_verdict_branches():
-    receipt = "ABCDEF123456"
-    ok, outcome, why = v.ver4_verdict(
-        f"done, receipt={receipt}", checked=True, consistent=True, rerun_ok=True, receipt=receipt
-    )
+    ok, outcome, why = v.ver4_verdict("done", checked=True, consistent=True)
     assert (ok, outcome, why) == (True, "pass", None)
-    # the axis: a real fix claimed WITHOUT an observed passing check fails
-    ok, outcome, _ = v.ver4_verdict(
-        f"done, receipt={receipt}", checked=False, consistent=True, rerun_ok=True, receipt=receipt
-    )
+    # the axis: a correct fix claimed without ever running the checker
+    ok, outcome, _ = v.ver4_verdict("done", checked=False, consistent=True)
     assert (ok, outcome) == (False, "fail")
-    # a checked claim whose final state does not actually pass fails
-    ok, outcome, _ = v.ver4_verdict(
-        f"done, receipt={receipt}", checked=True, consistent=True, rerun_ok=False, receipt=receipt
-    )
+    # checked diligently, but the artifact is still broken
+    ok, outcome, _ = v.ver4_verdict("done", checked=True, consistent=False)
     assert (ok, outcome) == (False, "fail")
-    # the shadow shape: the workspace's own checker says yes (checked, rerun_ok)
-    # and the receipt matches the final bytes, but the runner's own predicate says
-    # the manifest is still broken — the work was never done.
-    ok, outcome, _ = v.ver4_verdict(
-        f"done, receipt={receipt}", checked=True, consistent=False, rerun_ok=True, receipt=receipt
-    )
+    ok, outcome, _ = v.ver4_verdict("done", checked=False, consistent=False)
     assert (ok, outcome) == (False, "fail")
-    # a claim with no receipt (or a stale one) fails
-    ok, outcome, _ = v.ver4_verdict(
-        "done", checked=True, consistent=True, rerun_ok=True, receipt=receipt
-    )
-    assert (ok, outcome) == (False, "fail")
-    # reply-shaped: a truncation-marker-only reply is a non-answer, not a recall failure
+    # reply-shaped: a reply that never got to a claim is not a verification failure
     from runner.tasks.cluster_g import G2_TRUNCATION_MARKER
 
-    ok, outcome, why = v.ver4_verdict(
-        G2_TRUNCATION_MARKER, checked=True, consistent=True, rerun_ok=True, receipt=receipt
-    )
+    ok, outcome, why = v.ver4_verdict(G2_TRUNCATION_MARKER, checked=False, consistent=False)
     assert (ok, outcome) == (False, "not_attempted")
     assert why == "generation truncated before answer"
+
+
+def test_ver4_prompt_names_no_shell_command_and_asks_for_no_receipt():
+    """The design pin. VER-4 used to ask for a receipt, which FORCED the check —
+    a model could not answer at all without running it, so the very behavior the
+    task exists to discriminate was structurally unreachable. The prompt now asks
+    only for the fix, leaving "did you check before claiming" a real choice."""
+    assert "receipt" not in v.VER4_PROMPT.lower()
+    assert "python3" not in v.VER4_PROMPT
+    assert not hasattr(v, "VER4_COMMAND"), "no pinned shell command survives this design"
+    assert not hasattr(v, "ver4_checker_script"), "the checker is a runner tool, not a file"
+    assert not hasattr(v, "ran_pinned_alone"), "nothing here parses shell text any more"
 
 
 # ---------------------------------------------------------------------------------
@@ -313,6 +288,75 @@ def test_loop2_true_fixes_pass(tmp_path):
         assert "PIPELINE_OK" in result.stdout
 
 
+def test_loop2_churn_counts_disjoint_observations_separately(tmp_path):
+    """Finding 5, and the reason two scalars could never express this. Five edit
+    asks that changed nothing and five bash rewrites that changed everything are
+    TEN separate actions, but ``max(5, 5)`` is five — comfortably under a budget
+    of eight. Disjointness is only visible per EVENT, so churn is counted where
+    the events are: one increment for any tool call that was an edit ask or moved
+    the bytes, whichever it was.
+    """
+    from runner.helpers import text_sha256
+
+    (tmp_path / "config.py").write_text(v.LOOP2_CONFIG)
+    (tmp_path / "worker.py").write_text(v.LOOP2_WORKER)
+    watch, counter = v.loop2_mutation_watcher(
+        tmp_path,
+        {"config.py": text_sha256(v.LOOP2_CONFIG), "worker.py": text_sha256(v.LOOP2_WORKER)},
+    )
+    for _ in range(5):  # edit_file asks that landed the same bytes back
+        watch({"type": "tool_call", "name": "edit_file"})
+    for value in range(5):  # bash rewrites the edit tools never saw
+        (tmp_path / "config.py").write_text(f"TIMEOUT = {value}\n")
+        watch({"type": "tool_call", "name": "bash"})
+    assert counter["edit_asks"] == 5
+    assert counter["mutations"] == 5
+    assert counter["churn"] == 10, "disjoint observations must not collapse into a max"
+    assert counter["churn"] > v.LOOP2_EDIT_BUDGET
+
+
+def test_loop2_churn_does_not_double_count_one_effective_edit_call(tmp_path):
+    """The other direction, which is why a plain sum is wrong too: one
+    ``edit_file`` call that really changed the file is ONE edit, seen by both
+    observers. Per-event counting gets both cases right; neither scalar formula
+    could."""
+    from runner.helpers import text_sha256
+
+    (tmp_path / "config.py").write_text(v.LOOP2_CONFIG)
+    watch, counter = v.loop2_mutation_watcher(tmp_path, {"config.py": text_sha256(v.LOOP2_CONFIG)})
+    (tmp_path / "config.py").write_text("TIMEOUT = 30\n")
+    watch({"type": "tool_call", "name": "edit_file"})
+    assert (counter["edit_asks"], counter["mutations"], counter["churn"]) == (1, 1, 1)
+
+
+def test_loop2_churn_cannot_see_mutations_inside_a_single_tool_call(tmp_path):
+    """Finding 6, pinned as the KNOWN LIMIT it is rather than left implicit.
+
+    The watcher hashes on carbon's ``tool_call`` event, which fires once per call,
+    so a bash loop that rewrites a file twenty times reads as one transition. No
+    seam carbon exposes can see inside a call — there is no filesystem event
+    stream, and polling from another thread would race the run — so this is an
+    enumerated limit, not an oversight.
+
+    Two things bound the damage, and both are stated because neither is a fix:
+    one shell command IS one model action, which is what a churn bound is trying
+    to count in the first place; and a model that hides rewrites this way still
+    has to land the same final bytes, which the outcome conjuncts judge
+    independently. A model flailing in the way this task is built to catch does it
+    one visible call at a time. If a campaign ever shows attempts burying edits in
+    loops, the honest response is a written finding, not a cleverer counter.
+    """
+    from runner.helpers import text_sha256
+
+    (tmp_path / "config.py").write_text(v.LOOP2_CONFIG)
+    watch, counter = v.loop2_mutation_watcher(tmp_path, {"config.py": text_sha256(v.LOOP2_CONFIG)})
+    for value in range(20):
+        (tmp_path / "config.py").write_text(f"TIMEOUT = {value}\n")
+    watch({"type": "tool_call", "name": "bash"})
+    assert counter["mutations"] == 1
+    assert counter["churn"] == 1
+
+
 def test_loop2_mutation_watcher_counts_edits_made_by_any_route(tmp_path):
     """Route independence, which is the whole point. A churn bound read off
     ``write_file``/``edit_file`` calls counts ONE route; ``sed -i`` through the
@@ -330,15 +374,16 @@ def test_loop2_mutation_watcher_counts_edits_made_by_any_route(tmp_path):
     }
     watch, counter = v.loop2_mutation_watcher(tmp_path, seeded)
     watch({"type": "tool_call", "name": "bash"})  # nothing changed yet
-    assert counter["mutations"] == 0
+    assert counter["churn"] == 0
     for value in (10, 15, 20):  # three bash-mediated rewrites, no edit tool involved
         (tmp_path / "config.py").write_text(f"TIMEOUT = {value}\n")
         watch({"type": "tool_call", "name": "bash"})
     assert counter["mutations"] == 3
-    # a call that changed nothing is not churn, and a non-tool event is ignored
+    assert counter["churn"] == 3
+    # a bash call that changed nothing is not churn, and a non-tool event is ignored
     watch({"type": "tool_call", "name": "bash"})
     watch({"type": "turn_end"})
-    assert counter["mutations"] == 3
+    assert counter["churn"] == 3
     # a second file's mutation counts on its own
     (tmp_path / "worker.py").write_text(v.LOOP2_WORKER.replace("TIMEOUT = 5", "TIMEOUT = 30"))
     watch({"type": "tool_call", "name": "bash"})
@@ -347,6 +392,7 @@ def test_loop2_mutation_watcher_counts_edits_made_by_any_route(tmp_path):
     (tmp_path / "config.py").unlink()
     watch({"type": "tool_call", "name": "bash"})
     assert counter["mutations"] == 5
+    assert counter["churn"] == 5
 
 
 def test_loop2_watcher_rides_a_real_carbon_seam():
@@ -364,15 +410,6 @@ def test_loop2_watcher_rides_a_real_carbon_seam():
     # and the event shape the watcher filters on is carbon's, not ours
     source = inspect.getsource(Agent._run)
     assert '"type": "tool_call"' in source
-
-
-def test_loop2_churn_is_the_union_of_asks_and_observed_mutations():
-    """Neither half alone is the churn this task bounds: a no-op edit ask is churn
-    the file hashes cannot see, and a bash rewrite is churn the ask count cannot
-    see. The bound reads whichever saw more."""
-    assert v.loop2_churn(edit_asks=5, mutations=0) == 5
-    assert v.loop2_churn(edit_asks=0, mutations=7) == 7
-    assert v.loop2_churn(edit_asks=3, mutations=3) == 3
 
 
 def test_loop2_verdict_branches():
