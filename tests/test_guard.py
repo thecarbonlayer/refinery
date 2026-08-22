@@ -372,6 +372,77 @@ def test_non_string_base_url_refuses_at_normalizer_and_classifier(bad):
         guard.assert_recorded_base_url_clean(bad, "the baseline results file")
 
 
+class _StrMasquerader:
+    """A non-string that SPOOFS str. ``__class__ = str`` is the whole lie:
+    ``isinstance`` consults ``__class__``, not the real type, so an isinstance
+    test believes it. Every other attribute delegates to a genuine string, so it
+    behaves string-enough to pass every scan — and ``urlsplit``, seeing
+    isinstance True, treats it as text and parses it. ``truthy=False``
+    reproduces the other half of the reach: the normalizer's falsey return
+    handed the OBJECT back unchanged, before any check could refuse it."""
+
+    __class__ = str
+
+    def __init__(self, real="http://localhost:1234/v1", truthy=True):
+        self._real = real
+        self._truthy = truthy
+
+    def __getattr__(self, name):  # lstrip / partition / decode / ... all real
+        return getattr(self._real, name)
+
+    def __iter__(self):
+        return iter(self._real)
+
+    def __bool__(self):
+        return self._truthy
+
+    def __contains__(self, item):
+        return item in self._real
+
+
+def test_falsey_str_masquerader_refuses_instead_of_passing_through():
+    """The retention half. A falsey masquerader satisfied the isinstance-based
+    predicate, so the normalizer's ``if not base_url: return base_url`` handed
+    the OBJECT back unchanged — and a directly built pinned provider then
+    recorded a live proxy object into the fingerprint and its behavior key
+    (observed: base_url recorded as the object, key 2a43fe8cea99). The predicate
+    now reads the real type hierarchy, so the spoof does not survive it."""
+    masq = _StrMasquerader(truthy=False)
+    assert isinstance(masq, str)  # the spoof works on isinstance...
+    assert not issubclass(type(masq), str)  # ...and not on the real type
+    with pytest.raises(guard.MalformedBaseUrl, match="not a string"):
+        guard.normalize_base_url(masq)
+    assert guard.is_local_base_url(masq) is False
+    with pytest.raises(guard.MalformedBaseUrl):
+        guard.assert_recorded_base_url_clean(masq, "the baseline results file")
+
+
+def test_truthy_str_masquerader_never_reaches_urlsplit(monkeypatch):
+    """The parse half, pinned by instrumenting the parser itself. A truthy
+    masquerader reached urlsplit at all three sites — classifier, normalizer,
+    describer — and urlsplit, seeing isinstance True, parsed the delegated text
+    and answered with a real hostname: the classifier read it as LOCAL, which
+    skips the pin gate entirely. Nothing that is not really a string may reach
+    the parser."""
+    reached = []
+    real_urlsplit = guard.urlsplit
+    monkeypatch.setattr(
+        guard,
+        "urlsplit",
+        lambda u: (reached.append(type(u).__name__), real_urlsplit(u))[1],
+    )
+    masq = _StrMasquerader()
+    with pytest.raises(guard.MalformedBaseUrl, match="not a string"):
+        guard.normalize_base_url(masq)
+    assert guard.is_local_base_url(masq) is False  # pre-fix: True — it read LOCAL
+    assert guard._describe_base(masq) == "an unparseable base URL"
+    assert reached == []
+    # the instrument must be able to fire at all, or the assertion above proves
+    # nothing: a genuine string still goes through urlsplit
+    assert guard.is_local_base_url("http://localhost:1234/v1") is True
+    assert reached == ["str"]
+
+
 def test_none_passes_and_a_str_subclass_is_treated_as_a_string():
     """The two deliberate non-refusals, pinned so the type rule cannot swallow
     them: None is a real recorded state (an unset base — carbon_fingerprint
