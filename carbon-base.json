@@ -1,6 +1,6 @@
 {
   "carbon_branch": "self-improvement",
-  "carbon_commit": "704fabd49109e703e6b82167f2f5c10bb6b1553a",
+  "carbon_commit": "ea660003ee55344d7c4416773e29d0906108d1f3",
   "required_symbols": [["harness.session_env", "LOCAL_METADATA"]],
   "note": "The carbon base this refinery is built against. loop/compat.py enforces required_symbols loudly at startup and warns on commit drift. Update when the base moves (e.g. after promotion to main)."
 }
