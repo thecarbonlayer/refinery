@@ -170,3 +170,26 @@ as it stands:
 
 Neither fact makes the 70/70 wrong. Both make the arm unpoolable at a committed
 identity, so round 3 starts from a clean checkout or it does not start.
+
+
+## Provenance of `p3-null-cmp-a` — resolved 2026-08-22
+
+A docs audit reported that this arm's recorded `runner_sha 55485b749e` matched
+no committed tree, and inferred it had been measured against an uncommitted
+working tree. **That inference was wrong, and the arm's provenance is sound.**
+
+The hash is the runner tree of commit `86f1158`, verified by recomputing the
+published algorithm over that tree: it reproduces `55485b749e` exactly. The
+audit's own replication omitted the null-byte separators the real function
+writes between path and bytes, so its scan could not find the match.
+
+What the audit was right about is the risk: `86f1158` sat on the integration
+branch `program/phase3-measurement`, which was retired after the campaign once
+the arm and the judge artifact were cherry-picked onto main. The data survived
+the retirement; the commit it cites did not have a ref, and would have been
+collected. The tag `provenance/p3-null-cmp-a` now pins it, and is pushed.
+
+The lesson generalises: cherry-picking a measurement's DATA onto a branch does
+not carry the CODE IDENTITY that measurement cites. Retiring the branch that
+holds that identity orphans the provenance. Tag the tree before retiring the
+branch.
