@@ -350,6 +350,7 @@ def _model(
     saturate=frozenset(),
     mutate=None,
     gain=None,
+    serving=None,
 ):
     """A round-2 null-model artifact, MEASURED by `loop.calibrate.calibrate_model`
     from the seven fabricated null arms above — nothing here is a hand-written rate.
@@ -371,6 +372,12 @@ def _model(
         "gemma_sha": FP["gemma_sha"] if carbon_sha is None else carbon_sha,
         "dirty_sha": FP["dirty_sha"] if dirty_sha is None else dirty_sha,
     }
+    # `serving` merges the serving-identity fields in; None (the default) builds a
+    # pre-serving fingerprint, which is what every test written before the serving
+    # extension exercises — those arms and their artifacts stay keyed to their own
+    # runner hash, unreinterpreted.
+    if serving is not None:
+        fp.update(serving)
     for arms, subset in ((_FULL_ARMS, False), (_SUBSET_ARMS, True)):
         for label, passes in arms.items():
             tasks = {}
@@ -617,6 +624,162 @@ def test_freshness_is_judged_against_the_measurements_on_every_provenance_field(
         cal, reason = calibration_status("compaction", FP, model_path=_model(tmp_path, **kwargs))
         assert cal is None, f"{field} mismatch must not be judged fresh"
         assert field in reason and "not calibrated" in reason
+
+
+# The serving identity the pinned-base campaign records: provider and quantization
+# pinned, no effort requested, no scripted responder — None values are REAL recorded
+# states here, not absences.
+_PINNED_SERVING = {
+    "base_url": "https://openrouter.example/api/v1",
+    "reasoning_effort": None,
+    "provider_order": "Novita",
+    "quantization": "bf16",
+    "responder": None,
+}
+
+# One genuinely different value per serving field for the mismatch cases below.
+_OTHER_SERVING = {
+    "base_url": "http://localhost:1234/v1",
+    "reasoning_effort": "high",
+    "provider_order": "DeepInfra",
+    "quantization": "fp8",
+    "responder": "runner.fake_responder",
+}
+
+
+def test_an_artifact_measured_under_the_same_serving_pin_is_fresh(tmp_path):
+    """The match case first: arms and measurements agreeing on every serving field —
+    None included, on the fields where None is a real recorded state — install."""
+    from loop.validate import calibration_status
+
+    path = _model(tmp_path, stamped_sha=FP["runner_sha"], serving=_PINNED_SERVING)
+    cal, why = calibration_status("compaction", {**FP, **_PINNED_SERVING}, model_path=path)
+    assert why == "" and cal is not None
+
+
+@pytest.mark.parametrize("field", sorted(_OTHER_SERVING))
+def test_freshness_refuses_an_artifact_measured_under_another_serving_identity(tmp_path, field):
+    """A null model measured on one serving base is not a model for measurements made
+    on another: the same model name served from a different endpoint, provider,
+    quantization, effort level, or scripted responder is different measured behavior,
+    and the refusal names the field so the remedy (re-run the arms on THIS base) is
+    unambiguous."""
+    from loop.validate import calibration_status
+
+    path = _model(
+        tmp_path, stamped_sha=FP["runner_sha"], name=f"{field}.json", serving=_PINNED_SERVING
+    )
+    judged = {**FP, **_PINNED_SERVING, field: _OTHER_SERVING[field]}
+    cal, why = calibration_status("compaction", judged, model_path=path)
+    assert cal is None, f"a {field} mismatch must not be judged fresh"
+    assert field in why and "not calibrated" in why
+
+
+# The real local-serving shape: a RECORDED local endpoint with null ROUTING pins.
+# An all-None dict was the wrong stand-in — carbon's `Provider.base_url` is a required
+# `str`, so a null URL is a shape the runner cannot produce, and it is the field that
+# tells two local endpoints apart.
+_LOCAL_SERVING = {
+    "base_url": "http://localhost:1234/v1",
+    "reasoning_effort": None,
+    "provider_order": None,
+    "quantization": None,
+    "responder": None,
+}
+
+
+def test_an_unpinned_local_serving_identity_matches_itself(tmp_path):
+    """The local-serving case (LM Studio with no provider routing): null pins on both
+    sides are a genuine match, unlike the required provenance fields where None means
+    'this artifact does not say'. Those fields are the dirty_sha kind — None is data —
+    and must not be routed through the None-is-a-mismatch rule. `base_url` is NOT one
+    of them: it is recorded, and it is what distinguishes one local endpoint from
+    another."""
+    from loop.validate import calibration_status
+
+    path = _model(tmp_path, stamped_sha=FP["runner_sha"], serving=_LOCAL_SERVING)
+    cal, why = calibration_status("compaction", {**FP, **_LOCAL_SERVING}, model_path=path)
+    assert why == "" and cal is not None
+
+
+def test_an_unstated_serving_field_is_not_fresh_for_measurements_that_state_it(tmp_path):
+    """The absent-versus-null conflation at the freshness gate. Both sides carry the
+    SAME current `runner_sha`, so nothing upstream refuses them: an artifact whose arms
+    never stated `responder` reads as fresh for measurements that positively recorded
+    `responder: null`, because `.get` renders both as None. Unstated is unknown."""
+    from loop.validate import calibration_status
+
+    unstated = {k: v for k, v in _PINNED_SERVING.items() if k != "responder"}
+    path = _model(tmp_path, stamped_sha=FP["runner_sha"], serving=unstated)
+    cal, why = calibration_status("compaction", {**FP, **_PINNED_SERVING}, model_path=path)
+    assert cal is None, "an unstated field is not evidence of a match"
+    assert "responder" in why
+
+
+def test_measurements_that_never_stated_a_serving_field_are_not_fresh_for_an_artifact_that_did(
+    tmp_path,
+):
+    """The same conflation in the other direction — the artifact states the field and
+    the measurements do not. Neither side's silence is evidence."""
+    from loop.validate import calibration_status
+
+    path = _model(tmp_path, stamped_sha=FP["runner_sha"], serving=_PINNED_SERVING)
+    blind = {k: v for k, v in {**FP, **_PINNED_SERVING}.items() if k != "quantization"}
+    cal, why = calibration_status("compaction", blind, model_path=path)
+    assert cal is None
+    assert "quantization" in why
+
+
+def test_the_writer_will_not_even_build_an_artifact_with_a_null_base_url(tmp_path):
+    """Defense in depth, and the reason the loader test below has to TAMPER: the
+    artifact writer refuses a null base_url on the way in, so this shape cannot be
+    produced by running the protocol — only by editing what it produced."""
+    with pytest.raises(ValueError, match="base_url"):
+        _model(
+            tmp_path,
+            stamped_sha=FP["runner_sha"],
+            name="nullurl.json",
+            serving={**_LOCAL_SERVING, "base_url": None},
+        )
+
+
+def test_a_null_base_url_on_both_sides_is_refused_rather_than_read_as_one_serving_base(tmp_path):
+    """The reviewer's case, on the loader: an artifact on disk whose base_url was
+    stripped to null, judged against measurements stripped the same way. Every other
+    gate passes — same model, same SHA, same null routing pins — and the two agree with
+    each other precisely BECAUSE the field that told their endpoints apart is gone. One
+    could be LM Studio and the other Ollama. The refusal is the dedicated rule's, not a
+    value mismatch: the values here are equal."""
+    from loop.validate import calibration_status
+
+    def strip_the_url(artifact):
+        for row in artifact["provenance"]:
+            row["base_url"] = None
+
+    path = _model(
+        tmp_path, stamped_sha=FP["runner_sha"], serving=_LOCAL_SERVING, mutate=strip_the_url
+    )
+    judged = {**FP, **_LOCAL_SERVING, "base_url": None}
+    cal, why = calibration_status("compaction", judged, model_path=path)
+    assert cal is None
+    assert "base_url" in why
+    assert "STALE" not in why, "the values agree — this is the null-URL rule, not a mismatch"
+
+
+def test_a_pre_serving_artifact_refuses_on_runner_sha_before_any_serving_field(tmp_path):
+    """The no-back-fill default, asserted at the loader: an artifact whose arms never
+    stated a serving identity was measured by a pre-serving runner, and current
+    measurements carry the serving-stamping runner's hash — so the refusal is the
+    runner_sha gate's, reached before any serving field is compared. Old records are
+    refused by the verifier version, never reinterpreted through absent keys."""
+    from loop.validate import calibration_status
+
+    path = _model(tmp_path, stamped_sha="r-pre-serving")
+    judged = {**FP, "runner_sha": "r-serving", **_PINNED_SERVING}
+    cal, why = calibration_status("compaction", judged, model_path=path)
+    assert cal is None
+    assert "runner_sha" in why
+    assert "provider_order" not in why
 
 
 def test_the_loader_refuses_a_supported_set_other_than_the_pinned_four(tmp_path):

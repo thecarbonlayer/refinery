@@ -1874,3 +1874,186 @@ def test_null_rates_cannot_be_mutated_after_construction(tmp_path):
     with pytest.raises(TypeError):
         del cal.null_rates["A1"]
     assert cal.null_rates["A1"] == Fraction(27, 49), "unchanged"
+
+
+# ---------------------------------------------------------------------------
+# Model and serving parity in `_parity` (Phase 3 recalibration; queued at the
+# P2 Task 7 audit). `runner.delta` refused a cross-model or cross-serving pair
+# from the start, but the confirmation path judges filtered pairs through
+# `_parity`, which gated only the verifier — so a confirmation could compare a
+# baseline arm on one model or serving base against a candidate arm on another
+# and call the difference an edit's effect.
+# ---------------------------------------------------------------------------
+
+# A pair fingerprint of the shape the serving-stamping runner writes. The None
+# values are real recorded states (no effort requested, no scripted responder).
+_PAIR_FP = {
+    "runner_sha": "x",
+    "model": "m",
+    "config_version": 1,
+    "dirty_sha": None,
+    "base_url": "https://openrouter.example/api/v1",
+    "reasoning_effort": None,
+    "provider_order": "Novita",
+    "quantization": "bf16",
+    "responder": None,
+}
+
+# One genuinely different value per fingerprinted Provider field.
+_PAIR_OTHER = {
+    "model": "m2",
+    "base_url": "http://localhost:1234/v1",
+    "reasoning_effort": "high",
+    "provider_order": "DeepInfra",
+    "quantization": "fp8",
+    "responder": "runner.fake_responder",
+}
+
+
+def _parity_pair(cand_fp):
+    """A minimal confirmation-shaped pair: one task, both sides measured, only the
+    fingerprints under the caller's control."""
+
+    def res(fp):
+        return {
+            "fingerprint": dict(fp),
+            "tasks": {
+                "C3": {
+                    "split": "held_out",
+                    "passes": 5,
+                    "attempts": 10,
+                    "pass_fraction": 0.5,
+                    "outcomes": ["pass"] * 5 + ["fail"] * 5,
+                }
+            },
+        }
+
+    return res(_PAIR_FP), res(cand_fp)
+
+
+def _first_for_c3():
+    from loop.acceptance import Decision
+
+    return Decision(
+        outcome="CONFIRM",
+        reasons=(),
+        delta_in=0.0,
+        delta_ho=0.05,
+        threshold_in=0.01,
+        threshold_ho=0.01,
+        improved_tasks=("C3",),
+        confirm_tasks=("C3",),
+    )
+
+
+@pytest.mark.parametrize("field", sorted(_PAIR_OTHER))
+def test_a_confirmation_pair_split_across_any_fingerprinted_provider_field_refuses(field):
+    """Every field `runner.carbon_env.PROVIDER_FIELDS_FINGERPRINTED` records is
+    gated here, by sweep rather than by list: a pair split across any of them is
+    measuring the swap, not the edit, and the refusal names the field."""
+    from runner.carbon_env import PROVIDER_FIELDS_FINGERPRINTED
+
+    assert set(_PAIR_OTHER) == set(PROVIDER_FIELDS_FINGERPRINTED), (
+        "this sweep must cover exactly the fingerprinted Provider fields — a field "
+        "added there without a case here would be a field parity does not test"
+    )
+    base, cand = _parity_pair({**_PAIR_FP, field: _PAIR_OTHER[field]})
+    with pytest.raises(ValueError) as exc:
+        confirmed(_first_for_c3(), base, cand)
+    assert field in str(exc.value) or field == "model", "the refusal names the field"
+    assert repr(_PAIR_OTHER[field]) in str(exc.value), "and both disagreeing values"
+    assert repr(_PAIR_FP[field]) in str(exc.value)
+
+
+def test_a_cross_model_confirmation_refusal_names_both_models():
+    base, cand = _parity_pair({**_PAIR_FP, "model": "m2"})
+    with pytest.raises(ValueError, match="model mismatch"):
+        confirmed(_first_for_c3(), base, cand)
+
+
+def test_evaluate_shares_the_same_model_and_serving_gates():
+    """`_parity` guards both stages, so the first decision refuses the same pairs
+    the confirmation does — one gate, not two that can drift."""
+    base, cand = _parity_pair({**_PAIR_FP, "quantization": "fp8"})
+    with pytest.raises(ValueError, match="quantization"):
+        evaluate(base, cand)
+    base, cand = _parity_pair({**_PAIR_FP, "model": "m2"})
+    with pytest.raises(ValueError, match="model mismatch"):
+        evaluate(base, cand)
+
+
+def _moved_pair(fp, base_passes=5, cand_passes=9):
+    """A confirmation pair that MOVES, so a verdict is reached rather than refused."""
+
+    def res(passes):
+        return {
+            "fingerprint": dict(fp),
+            "tasks": {
+                "C3": {
+                    "split": "held_out",
+                    "passes": passes,
+                    "attempts": 10,
+                    "pass_fraction": passes / 10,
+                    "outcomes": ["pass"] * passes + ["fail"] * (10 - passes),
+                }
+            },
+        }
+
+    return res(base_passes), res(cand_passes)
+
+
+# The real local-serving shape: a RECORDED local endpoint with null ROUTING pins.
+# The earlier version of this fixture nulled `base_url` too, which taught the wrong
+# thing — carbon's `Provider.base_url` is a required `str` with no default, so the
+# runner cannot produce that shape, and it is the field that tells two local endpoints
+# apart.
+_LOCAL_PAIR_FP = {
+    **_PAIR_FP,
+    "base_url": "http://localhost:1234/v1",
+    "provider_order": None,
+    "quantization": None,
+}
+
+
+def test_a_shared_unpinned_local_serving_identity_passes_parity():
+    """Null ROUTING pins on both sides is the local-serving case (LM Studio, no
+    provider routing) — a genuine match, never 'could not check'. The pair must reach
+    a verdict."""
+    base, cand = _moved_pair(_LOCAL_PAIR_FP)
+    d = confirmed(_first_for_c3(), base, cand)
+    assert d.outcome in (ACCEPT, REJECT), "judged, not refused"
+
+
+@pytest.mark.parametrize("field", ["responder", "quantization"])
+def test_a_pair_split_on_whether_a_serving_field_was_STATED_refuses(field):
+    """Absent-versus-null in the confirmation pair. Both arms carry the SAME
+    `runner_sha`, so the verifier gate cannot catch it: a baseline that never stated
+    the field reads as equal to a candidate that positively recorded null, because
+    `.get` renders both as None. Unstated is unknown, not a match."""
+    stated = _PAIR_FP if field == "responder" else {**_PAIR_FP, "quantization": None}
+    unstated = {k: v for k, v in stated.items() if k != field}
+    base, cand = _moved_pair(stated)
+    base["fingerprint"] = dict(unstated)
+    with pytest.raises(ValueError, match=field):
+        confirmed(_first_for_c3(), base, cand)
+
+
+@pytest.mark.parametrize("bad", [None, ""])
+def test_a_pair_recording_a_base_url_that_names_no_endpoint_refuses(bad):
+    """A recorded null `base_url` is a postprocessed record with the
+    endpoint-distinguishing field removed. Two of them — one LM Studio, one Ollama —
+    would pass every other gate (same model, same SHA, same null pins) and be judged
+    as one serving base."""
+    base, cand = _moved_pair({**_LOCAL_PAIR_FP, "base_url": bad})
+    with pytest.raises(ValueError, match="base_url"):
+        confirmed(_first_for_c3(), base, cand)
+
+
+def test_a_pair_that_never_stated_any_serving_field_is_judged_not_refused():
+    """The pre-serving pair — no serving keys at all — is untouched by both rules: it
+    states no serving identity to be null, and its two arms share an absent shape. It
+    stays gated by `runner_sha` alone, which is the no-back-fill default."""
+    old = {"runner_sha": "x", "model": "m", "config_version": 1, "dirty_sha": None}
+    base, cand = _moved_pair(old)
+    d = confirmed(_first_for_c3(), base, cand)
+    assert d.outcome in (ACCEPT, REJECT), "judged, not refused"

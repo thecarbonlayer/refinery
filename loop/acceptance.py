@@ -92,7 +92,12 @@ from functools import cache
 from math import comb
 from types import MappingProxyType
 
-from loop.calibrate import null_gain_quantile, null_task_quantile
+from loop.calibrate import (
+    SERVING_PROVENANCE_FIELDS,
+    base_url_refusal,
+    null_gain_quantile,
+    null_task_quantile,
+)
 
 REJECT = "REJECT"
 CONFIRM = "CONFIRM"
@@ -552,7 +557,21 @@ def _parity(baseline: dict, candidate: dict) -> None:
     ``runner.delta`` refuses any result carrying a ``filter`` key, which is right for
     full-suite Δs and fatal for confirmation runs — a confirmation deliberately reruns
     only the selected tasks. What still must hold: same task set, same per-task
-    attempts, same verifier, and attributed measurements on both sides.
+    attempts, same verifier, same model, same serving identity, and attributed
+    measurements on both sides.
+
+    The model and serving gates mirror ``runner.delta``'s (queued at the P2 Task 7
+    audit; the serving fields joined the same item when the fingerprint gained them):
+    this function guards both ``evaluate()`` and ``confirmed()``, and the confirmation
+    path was the hole — a filtered pair never passes through ``delta``, so a
+    confirmation baseline on one model or serving base against a candidate on another
+    would have called the swap an edit's effect. The serving fields are
+    ``loop.calibrate.SERVING_PROVENANCE_FIELDS`` — derived from the runner's own
+    fingerprinted-Provider enumeration, so a field recorded in the fingerprint cannot
+    go ungated here. None == None is a genuine match on them (unpinned local serving,
+    no effort, no responder are real recorded states); a record predating the fields
+    cannot slip past one carrying them, because the runner that stamps them hashes to
+    a different ``runner_sha`` and the verifier gate above refuses that pair first.
     """
     b, c = set(baseline["tasks"]), set(candidate["tasks"])
     if b != c:
@@ -571,6 +590,36 @@ def _parity(baseline: dict, candidate: dict) -> None:
         raise ValueError("results file lacks a fingerprint — refusing unattributed measurements")
     if bf.get("runner_sha") != cf.get("runner_sha"):
         raise ValueError("verifier version mismatch — re-measure")
+    if bf.get("model") != cf.get("model"):
+        raise ValueError(
+            f"model mismatch: baseline ran {bf.get('model')!r}, candidate ran "
+            f"{cf.get('model')!r} — a comparison across models measures the model swap, "
+            f"not the edit"
+        )
+    for serving_field in SERVING_PROVENANCE_FIELDS:
+        # Presence participates, not the value alone: an ABSENT key and an explicitly
+        # recorded None mean different things (unstated versus the positive record of
+        # a network provider / unpinned local routing), and `.get` renders them
+        # identically. Two arms carrying the same current `runner_sha` can still differ
+        # in shape, so the verifier gate above does not cover this.
+        if (serving_field in bf, bf.get(serving_field)) != (
+            serving_field in cf,
+            cf.get(serving_field),
+        ):
+            b_state = repr(bf.get(serving_field)) if serving_field in bf else "<unstated>"
+            c_state = repr(cf.get(serving_field)) if serving_field in cf else "<unstated>"
+            raise ValueError(
+                f"serving mismatch on {serving_field}: baseline {b_state} vs candidate "
+                f"{c_state} — a comparison across serving bases measures the serving "
+                f"swap, not the edit; an unstated field is not a match for a recorded one"
+            )
+    # A stated base_url that names no endpoint, on either arm. Not a comparison: two
+    # arms stripped the same way AGREE, each having lost the field that told their
+    # endpoints apart.
+    for fp, who in ((bf, "baseline"), (cf, "candidate")):
+        refusal = base_url_refusal(fp, who)
+        if refusal:
+            raise ValueError(refusal)
 
 
 def _split_deltas(

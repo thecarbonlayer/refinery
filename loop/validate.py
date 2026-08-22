@@ -46,9 +46,10 @@ from loop.calibrate import CONFIRMATION_GUARDS as _COMPACTION_GUARDS
 from loop.calibrate import COVERAGE_LEVEL as _PINNED_COVERAGE_LEVEL
 from loop.calibrate import MODEL_PATH as COMPACTION_MODEL_PATH
 from loop.calibrate import MODEL_TASKS as _COMPACTION_MODEL_TASKS
+from loop.calibrate import SERVING_PROVENANCE_FIELDS as _SERVING_PROVENANCE
 from loop.calibrate import SUPPORTED as _COMPACTION_SUPPORTED
 from loop.calibrate import _fingerprint_field as _provenance_value
-from loop.calibrate import recompute_model
+from loop.calibrate import base_url_refusal, recompute_model
 from loop.config_edit import CONFIG_REL, apply_candidate
 from loop.observed_coverage import activity_from_rows, partition_deltas, select_attempts
 from loop.surface_sweep import sweep as run_sweep
@@ -356,7 +357,13 @@ _SECTION_SUPPORTED = {"compaction": _COMPACTION_SUPPORTED}
 # The provenance fields whose value must be PRESENT and EQUAL on both sides. `dirty_sha`
 # is deliberately absent from this tuple and checked separately below: None is a real,
 # meaningful value there (a clean tree), where None anywhere here means "this artifact
-# does not say", which is never evidence of a match.
+# does not say", which is never evidence of a match. The SERVING fields
+# (`_SERVING_PROVENANCE`, derived in `loop.calibrate` from the runner's own
+# fingerprinted-Provider enumeration) are absent for the same reason and checked in
+# their own loop below: None is real data on every one of them (unpinned local serving,
+# no effort requested, no scripted responder — `responder` is None on every network
+# provider), so routing them through this tuple's None-is-a-mismatch rule would refuse
+# every legitimate artifact ever measured.
 #
 # `runner_sha` is here as well as in the `computed_at_runner_sha` check, not instead of
 # it: that summary field is ONE arm's value (the first), so checking only it leaves every
@@ -487,6 +494,44 @@ def _provenance_mismatch(model: dict, fingerprint: dict, where: str) -> str:
                 f"{arm['dirty_sha']!r}, the measurements were recorded at "
                 f"{fingerprint['dirty_sha']!r}"
             )
+        # The serving identity: a null model measured on one serving base is not a
+        # model for measurements made on another — the same model name served from a
+        # different endpoint, provider, quantization, effort level, or scripted
+        # responder is different measured behavior.
+        #
+        # PRESENCE participates, alongside the value. None is real data on these
+        # fields (no effort requested, unpinned local routing, a network provider's
+        # `responder: null`), so a stated None on both sides is a genuine match — but
+        # an ABSENT key is not that. `.get` renders the two identically, which would
+        # make an artifact whose arms never stated a field read as fresh for
+        # measurements that positively recorded it as null. A `runner_sha` argument
+        # does not cover this: it says a legitimately produced PRE-serving record
+        # carries an older hash, not that every record bearing the current hash still
+        # has every key. Same absent-is-not-None rule as `dirty_sha` above, applied to
+        # the field-class that gained it later.
+        for field in _SERVING_PROVENANCE:
+            if (field in arm, arm.get(field)) != (field in fingerprint, fingerprint.get(field)):
+                stated = (
+                    "measured at " + repr(arm.get(field)) if field in arm else "never stated it"
+                )
+                theirs = (
+                    "recorded at " + repr(fingerprint.get(field))
+                    if field in fingerprint
+                    else "never stated it"
+                )
+                return (
+                    f"{where} is STALE on {field} — arm {label!r} {stated}, the "
+                    f"measurements {theirs}; an unstated field is not evidence of a match"
+                )
+    # A stated base_url that names no endpoint, on either side. Checked after the
+    # per-arm loop because it is not a comparison: two records nulled the same way
+    # AGREE, having each lost the field that told their endpoints apart.
+    for fp, who in [(fingerprint, "the measurements' fingerprint")] + [
+        (arm, f"arm {arm.get('label')!r} of {where}") for arm in arms
+    ]:
+        refusal = base_url_refusal(fp, who)
+        if refusal:
+            return f"{where} cannot be checked for freshness — {refusal}"
     return ""
 
 

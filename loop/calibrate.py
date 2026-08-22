@@ -77,6 +77,7 @@ from itertools import combinations, product
 from math import comb
 from pathlib import Path
 
+from runner.carbon_env import PROVIDER_FIELDS_FINGERPRINTED
 from runner.suite import RESULTS_DIR
 
 EDITOR_ROOT = Path(__file__).resolve().parents[1]
@@ -161,23 +162,97 @@ END_TO_END_UNIFORM_OFFSETS = (Fraction(3, 10), Fraction(1, 2))
 # never be used again.
 DESIGNATED_BASELINE = "r2-null-full-a"
 
-# The four fields the null-run protocol requires every arm to share (see this
+# The SERVING identity's provenance fields, DERIVED from the one enumeration the
+# runner already declares (`runner.carbon_env.PROVIDER_FIELDS_FINGERPRINTED` --
+# every Provider field the fingerprint records and the behavior key folds), the
+# same way `fingerprint_behavior_key` derives from `_KEY_FIELDS`: a Provider
+# field cannot be fingerprinted yet skip arm homogeneity, and no third
+# hand-written list can drift. `model` is the ONE exclusion, because the
+# provenance tuples below already carry it as a field of their own (with its own
+# position and its own refusal message) -- a test pins that the exclusion hides
+# nothing (this set plus {"model"} must equal the fingerprinted set exactly).
+#
+# None is REAL data on every one of these (unpinned local serving, no effort
+# requested, no scripted responder), read via `.get` like `dirty_sha` -- None
+# across arms is a consistent recorded state, not an absence. An arm whose
+# fingerprint LACKS the keys entirely needs no handling of its own: the fields
+# are stamped by `runner/carbon_env.py`, so a record without them was written by
+# a pre-serving runner whose `runner_sha` (a content hash of `runner/`) differs
+# by construction -- and `runner_sha` is deliberately FIRST in both tuples
+# below, so a mixed-era pool refuses on the verifier version before any serving
+# comparison could see an absent key. Tests assert that unreachability rather
+# than this module handling a case that cannot legitimately fire. All-old pools
+# (the committed p2c arms) stay internally consistent under their own old hash,
+# and stay refused by that same hash against anything current: the no-back-fill
+# default of the 2026-08-21 campaign runbook.
+SERVING_PROVENANCE_FIELDS = tuple(f for f in PROVIDER_FIELDS_FINGERPRINTED if f != "model")
+_SERVING_FIELD_SET = frozenset(SERVING_PROVENANCE_FIELDS)
+
+# The ONE serving field that is never legitimately null, stated once here and imported
+# by every gate that reads a serving identity. The nullable ones are
+# `reasoning_effort` (no effort requested), `provider_order`/`quantization` (local
+# serving with no routing pin) and an explicitly present `responder: null` (a network
+# provider). `base_url` is not among them: carbon's `Provider.base_url` is a required
+# `str` with no default and `from_env` always supplies one (the env var or the built-in
+# default), so no run this suite can perform records a null there -- a null one is a
+# truncated or postprocessed record. It is also the field that DISTINGUISHES two local
+# endpoints, so accepting a null would let a record measured through one local server
+# pool with, or be confirmed against, a record from another: "local unpinned" means a
+# recorded local URL with null ROUTING pins, never a null URL. An empty string is
+# refused for the same reason -- it names no endpoint either.
+_NULL_BASE_URL_REMEDY = (
+    "a recorded base_url must name the endpoint that answered: carbon's Provider "
+    "requires a base_url string, so a null or empty one is a truncated or "
+    "postprocessed record, not a serving state any run produced. Local serving is a "
+    "recorded local URL with null provider_order/quantization, never a null URL. "
+    "Re-record from the run's own fingerprint, or leave it out."
+)
+
+
+def base_url_refusal(fingerprint: dict, who: str) -> str:
+    """The refusal for a fingerprint whose STATED `base_url` names no endpoint, or "".
+
+    Keys on the field being stated, so it can never fire on a pre-serving record (the
+    committed p2c arms state no serving identity at all and stay gated by `runner_sha`
+    -- the no-back-fill default). Returns the message rather than raising, because its
+    three callers refuse in three different ways: `calibrate` raises, `loop.validate`
+    returns a reason string, and `loop.acceptance._parity` raises its own ValueError.
+    """
+    if "base_url" in fingerprint and not fingerprint["base_url"]:
+        return f"{who} records base_url={fingerprint['base_url']!r} -- {_NULL_BASE_URL_REMEDY}"
+    return ""
+
+
+# The fields the null-run protocol requires every arm to share (see this
 # module's docstring for the protocol itself): a Δ across runner versions, config
-# versions, models, or uncommitted carbon
+# versions, models, serving identities, or uncommitted carbon
 # states is not a measurement of noise, it is a measurement of the thing that
 # changed. `dirty_sha` is None for a clean tree -- None==None across arms is a
 # consistent (both clean) digest, not a mismatch; only a genuine difference (two
 # arms dirty in different, unrelated ways, or one dirty and one clean) refuses.
-_FINGERPRINT_FIELDS = ("runner_sha", "config_version", "model", "dirty_sha")
+_FINGERPRINT_FIELDS = (
+    "runner_sha",
+    "config_version",
+    "model",
+    "dirty_sha",
+    *SERVING_PROVENANCE_FIELDS,
+)
 
-# Round-2's provenance record: the same four fields PLUS `carbon_sha` --
+# Round-2's provenance record: the same fields PLUS `carbon_sha` --
 # carbon is the section under test here, not the verifier, so its identity
 # belongs in the record too. There is no literal `carbon_sha` key in a results
 # JSON's fingerprint; the runner already stamps the model/carbon revision it
 # drove under the name `gemma_sha` (checked against a committed result file,
 # e.g. results/null-cmp-a.json), and `_fingerprint_field` is where that mapping
 # lives -- one place, so a future rename of either name only needs one edit.
-_PROVENANCE_FIELDS = ("runner_sha", "config_version", "model", "carbon_sha", "dirty_sha")
+_PROVENANCE_FIELDS = (
+    "runner_sha",
+    "config_version",
+    "model",
+    "carbon_sha",
+    "dirty_sha",
+    *SERVING_PROVENANCE_FIELDS,
+)
 
 
 def _exact_pass_fraction(task: dict) -> Fraction:
@@ -222,16 +297,65 @@ def _check_labels(labels: list[str], who: str) -> None:
         )
 
 
-def _fingerprint_field(fp: dict, field: str):
-    """One provenance field's value from a raw results `fingerprint` dict.
+def _fingerprint_key(field: str) -> str:
+    """The literal fingerprint key a provenance field reads from.
 
-    `carbon_sha` is not a literal key the runner writes -- the round-2 provenance
-    record sources it from `gemma_sha`, the field the runner already stamps with the model/
-    carbon revision under test.
+    `carbon_sha` is not a key the runner writes -- the round-2 provenance record
+    sources it from `gemma_sha`, the field the runner already stamps with the
+    model/carbon revision under test. One mapping, used by both the value read and
+    the PRESENCE read below, so the two can never disagree about which key a field
+    is.
     """
-    if field == "carbon_sha":
-        return fp.get("gemma_sha")
-    return fp.get(field)
+    return "gemma_sha" if field == "carbon_sha" else field
+
+
+def _fingerprint_field(fp: dict, field: str):
+    """One provenance field's value from a raw results `fingerprint` dict."""
+    return fp.get(_fingerprint_key(field))
+
+
+def _fingerprint_state(fp: dict, field: str):
+    """A field's COMPARABLE state -- what "these two arms agree" is decided on.
+
+    For a serving field this is `(stated?, value)`, not the value alone. `.get`
+    renders an ABSENT key and an explicitly recorded None identically, and for these
+    fields the two mean different things: unstated is unknown, while
+    `"responder": null` is the positive record of a network provider and
+    `"quantization": null` the positive record of unpinned local serving. Pooling a
+    truncated or postprocessed arm with one that stated the field would compare a
+    measurement against an assumption -- the same absent-is-not-None failure this
+    module already refuses outright for `dirty_sha`, one field-class over.
+
+    A `runner_sha` argument does NOT cover this: it shows a legitimately produced
+    PRE-serving record carries an older verifier hash, which says nothing about a
+    record bearing the CURRENT hash that lost a key afterwards. Two arms with the
+    same current hash and a mixed serving shape reach here with nothing upstream
+    having refused them.
+
+    Presence participates only for the serving fields, because the rest of the
+    tuple is already covered: `config_version`, `model` and `runner_sha` are
+    required key fields (`runner.guard._REQUIRED_KEY_FIELDS` -- an absent one raises
+    rather than defaulting), and `dirty_sha`'s absence is refused outright by
+    `_check_provenance` before any comparison, which is strictly stronger than
+    participating in one. Round-1 `calibrate()` keeps its documented tolerance for
+    an absent `dirty_sha`; it is history, off the load path, and unchanged here.
+    """
+    value = _fingerprint_field(fp, field)
+    if field in _SERVING_FIELD_SET:
+        return (_fingerprint_key(field) in fp, value)
+    return value
+
+
+def _describe_field(fp: dict, field: str) -> str:
+    """One arm's value for a refusal message, with an unstated serving field SAID.
+
+    `arm-a=None, arm-b=None` in a mismatch message reads as a bug in the checker.
+    The fact that matters is that one arm never stated the field, so the message
+    says so instead of printing a None the arm never recorded.
+    """
+    if field in _SERVING_FIELD_SET and _fingerprint_key(field) not in fp:
+        return f"{field}=<unstated>"
+    return f"{field}={_fingerprint_field(fp, field)!r}"
 
 
 def _check_fingerprint_fields(
@@ -240,30 +364,38 @@ def _check_fingerprint_fields(
     """Core of both fingerprint/provenance checks below: every named field must
     be identical across arms, or refuse loudly, naming the first field that
     differs and every arm's disagreeing value, rather than silently comparing
-    unattributed or mismatched measurements."""
+    unattributed or mismatched measurements.
+
+    "Identical" means `_fingerprint_state`: for a serving field, agreeing on whether
+    the field was STATED as well as on its value.
+    """
     first_fp = arm_results[labels[0]]["fingerprint"]
     shared: dict = {}
     for field in fields:
-        values = {
-            label: _fingerprint_field(arm_results[label]["fingerprint"], field) for label in labels
+        states = {
+            label: _fingerprint_state(arm_results[label]["fingerprint"], field) for label in labels
         }
-        if len(set(values.values())) > 1:
-            detail = ", ".join(f"{label}={v!r}" for label, v in values.items())
+        if len(set(states.values())) > 1:
+            detail = ", ".join(
+                f"{label}: {_describe_field(arm_results[label]['fingerprint'], field)}"
+                for label in labels
+            )
             raise ValueError(f"fingerprint mismatch on {field!r} across arms: {detail}")
         shared[field] = _fingerprint_field(first_fp, field)
     return shared
 
 
 def _check_fingerprints(arm_results: dict[str, dict], labels: list[str]) -> dict:
-    """The round-1 four-field fingerprint check, unchanged: reuse/extend point for
-    `_check_fingerprint_fields` below, which `_check_provenance` (round-2)
+    """The round-1 fingerprint check over `_FINGERPRINT_FIELDS` (its original four
+    fields plus, from the Phase 3 recalibration on, the serving identity): reuse/extend
+    point for `_check_fingerprint_fields` below, which `_check_provenance` (round-2)
     shares the same core with."""
     return _check_fingerprint_fields(arm_results, labels, _FINGERPRINT_FIELDS)
 
 
 def _check_provenance(arm_results: dict[str, dict], labels: list[str]) -> dict:
-    """The round-2 five-field provenance check: round-1's 4 fields plus
-    `carbon_sha`, extending `_check_fingerprints` rather than duplicating it.
+    """The round-2 provenance check over `_PROVENANCE_FIELDS`: the fingerprint fields
+    plus `carbon_sha`, extending `_check_fingerprints` rather than duplicating it.
 
     Plus one thing round-1's check could not do, because round-1 read every field
     through `dict.get`: an arm whose fingerprint LACKS the `dirty_sha` key is
@@ -276,7 +408,8 @@ def _check_provenance(arm_results: dict[str, dict], labels: list[str]) -> dict:
     rather than passing silently into the pool.
     """
     for label in labels:
-        if "dirty_sha" not in arm_results[label].get("fingerprint", {}):
+        fp = arm_results[label].get("fingerprint", {})
+        if "dirty_sha" not in fp:
             raise ValueError(
                 f"arm {label!r} records no dirty_sha key in its fingerprint -- an absent "
                 "key is not a clean tree. A clean checkout records dirty_sha=None, so an "
@@ -284,17 +417,43 @@ def _check_provenance(arm_results: dict[str, dict], labels: list[str]) -> dict:
                 "pool as if the two arms provably matched. Re-record the arm with a "
                 "runner that stamps tree state, or leave it out of the pool."
             )
+        # The same family, one field over: a STATED base_url that names no endpoint.
+        # Checked per arm rather than across arms, because two arms nulled the same
+        # way agree with each other while having lost the field that told their
+        # endpoints apart -- a cross-arm comparison could never catch it.
+        refusal = base_url_refusal(fp, f"arm {label!r}")
+        if refusal:
+            raise ValueError(refusal)
     return _check_fingerprint_fields(arm_results, labels, _PROVENANCE_FIELDS)
+
+
+def _stated_fields(fp: dict, fields: tuple[str, ...]) -> dict:
+    """One arm's values for `fields`, with a serving field emitted ONLY when the
+    fingerprint actually states it.
+
+    The writer records what an arm stated, never a manufactured value: a
+    pre-serving arm (the committed p2c ten) never said "provider_order: None",
+    and writing that None would make the record claim "measured unpinned" where
+    the truth is "never stated" -- the same absent-is-not-None lesson
+    `_check_provenance`'s dirty_sha refusal already carries. Every arm the
+    CURRENT runner stamps carries all the serving keys, so only pre-serving
+    records take the narrower shape -- which also keeps the committed
+    `model-r2.json` byte-reproducible from its own arms (pinned in
+    tests/test_p2b_closing.py) without back-filling either the arms or the
+    artifact. The non-serving fields keep their unconditional `.get` read,
+    exactly as before.
+    """
+    serving = frozenset(SERVING_PROVENANCE_FIELDS)
+    return {
+        field: _fingerprint_field(fp, field)
+        for field in fields
+        if field not in serving or field in fp
+    }
 
 
 def _build_arms(arm_results: dict[str, dict], labels: list[str]) -> list[dict]:
     return [
-        {
-            "label": label,
-            **{
-                field: arm_results[label]["fingerprint"].get(field) for field in _FINGERPRINT_FIELDS
-            },
-        }
+        {"label": label, **_stated_fields(arm_results[label]["fingerprint"], _FINGERPRINT_FIELDS)}
         for label in labels
     ]
 
@@ -305,13 +464,7 @@ def _build_provenance(arm_results: dict[str, dict], labels: list[str]) -> list[d
     `_check_provenance` already ran: every arm's own values are recorded even
     though they are required to already agree."""
     return [
-        {
-            "label": label,
-            **{
-                field: _fingerprint_field(arm_results[label]["fingerprint"], field)
-                for field in _PROVENANCE_FIELDS
-            },
-        }
+        {"label": label, **_stated_fields(arm_results[label]["fingerprint"], _PROVENANCE_FIELDS)}
         for label in labels
     ]
 
@@ -2006,7 +2159,8 @@ def calibrate_model(
 
     Refuses (`ValueError`, naming what's wrong) on: no labels; a duplicate
     label; a provenance mismatch across arms (the round-1 4 fields plus
-    `carbon_sha`); a subset (`--only`) arm carrying a task outside the pinned
+    `carbon_sha` and the serving identity); a subset (`--only`) arm carrying
+    a task outside the pinned
     {A1, G2, G4, G5} supported set; any arm missing a supported task; two arms
     disagreeing on a task's split or standard attempt count (a property of
     the SUITE, not of one arm's run); a non-positive recorded attempt count;
