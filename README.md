@@ -1,20 +1,73 @@
-# refinery — task-suite runner + Δ measurement + the self-improvement loop
+# refinery — measuring whether a change to an agent actually helped
 
 > Refining improves the material without replacing it. The weights never move;
 > only the harness around them does. The pipeline proposes, validates, and
-> opens a PR — it never merges.
+> opens a PR. It never merges.
 
-The measurement half of the self-evolving-harness project: runs a fixed task
-suite (`runner/tasks/`) against a live Carbon agent driven by the
-[carbon](https://github.com/thecarbonlayer/carbon) harness, repeatedly per task
-(held-out gets more samples than held-in), aggregates pass fractions
-(averaged, never majority-voted), and computes Δ_in/Δ_ho between two harness
-states. `runner delta` reports those Δs against the original Self-Harness rule
-`Δ_in ≥ 0, Δ_ho ≥ 0, max(Δ_in, Δ_ho) > 0`. That rule is a report, not the
-promotion decision: the loop measured it against six no-change runs and it
-wrongly accepted 6 of 12 pairs, so promotion now runs through the three-outcome
-rule in [Deciding](#deciding).
+This is the measurement half of a two-repo project. The other half is
+[carbon](https://github.com/thecarbonlayer/carbon), a coding agent built one
+harness primitive at a time. Refinery's job is to answer a question that sounds
+easy and is not: **did that change make the agent better, or did we get lucky?**
 
+## The problem this exists to solve
+
+Run an agent on a task twice and you may get two different answers. So when you
+change something in the harness and the pass rate goes from 6/10 to 8/10, you
+have learned almost nothing. That gap is well inside what the same code produces
+on a quiet day.
+
+The naive fix is to run more attempts, and it is not enough on its own. You also
+need to know what *no change at all* looks like, measured on the same tasks
+against the same model. Only then can you say whether a result sits outside the
+noise.
+
+So most of this repo is not about running tasks. It is machinery for not fooling
+yourself:
+
+- A fixed suite of tasks, each with a mechanical verifier. No model grades
+  another model's work except at one carefully bounded seam.
+- Repeated attempts per task, scored as pass **fractions** and averaged. A
+  majority vote would throw away exactly the information that matters.
+- A **null model**: recorded runs where nothing changed, used to learn how much
+  a rate moves on its own. Thresholds come from that, not from a round number
+  someone liked.
+- A **three-outcome decision**: reject, ask for confirmation, or accept. A single
+  run can never accept a change. Only a fresh, independent confirmation can.
+- **Fail-closed everywhere.** If the calibration is missing, stale, or does not
+  pass its own fitness checks, the rule refuses to judge rather than falling back
+  to a weaker one.
+
+That last point has teeth. The compaction suite is currently uncalibrated on
+purpose, because its tasks now pass every attempt and a rate pinned at 1.0 has
+no variation to model. The machinery refuses to install a gate that would gate
+nothing.
+
+## Who this is for
+
+Engineers evaluating changes to an LLM system who have hit the same wall: the
+numbers move, and you cannot tell whether you improved anything. The specific
+tasks here are about coding-agent harnesses, but the calibration and
+decision-rule ideas transfer to any evaluation where the thing you measure is
+noisy and the change you are testing is small.
+
+## Vocabulary
+
+Three terms appear throughout and are worth having up front:
+
+- **held-in / held-out** — the task split. Held-in tasks are the ones a change is
+  allowed to target; held-out tasks watch for collateral damage. Held-out gets
+  more attempts, because it is guarding rather than measuring.
+- **Δ_in / Δ_ho** — the change in average pass fraction on each split between two
+  harness states.
+- **baseline / arm** — a recorded run. An *arm* where nothing was changed is a
+  null arm, and null arms are what the calibration is built from.
+
+`runner delta` reports Δ_in/Δ_ho against the original two-sided rule
+(`Δ_in ≥ 0, Δ_ho ≥ 0, max > 0`). Treat that as a report, never a decision. This
+loop measured that rule against six runs with nothing changed between them: of
+the twelve pairs, it wrongly accepted 6 and reported a false regression on 3
+more. It failed in both directions, which is why the real gate in
+[Deciding](#deciding) looks the way it does.
 ## Carbon base
 
 This repo is built against the carbon base named in
