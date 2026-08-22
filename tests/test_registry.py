@@ -3390,3 +3390,60 @@ def test_cmp6_records_the_judges_own_token_cost():
     judged = judged_equivalent("e", "an answer containing x", provider)
     assert judged.verdict is True
     assert judged.tokens == 312
+
+
+def test_judge_delivery_reports_what_the_transport_did():
+    """Review finding (2026-08-22): a retried judge call left NO trace in an arm's
+    record. CMP-5/CMP-6 recorded the judge's verdict, quote and token cost but
+    nothing about its DELIVERY, so a record could not answer "did this attempt's
+    judge call have to be retried, and did anything fail on the way?" — which is
+    exactly the question the transport fix made worth asking.
+
+    Built as one function returning both halves so a record can never carry the
+    detail without the metric or the metric without the detail."""
+    from runner.judge import Judgment
+    from runner.tasks.cluster_g import judge_delivery
+
+    clean = Judgment(True, "q", "VERDICT: YES\nQUOTE: q")
+    assert clean.attempts == 1 and clean.faults == ()
+    detail, metrics = judge_delivery((clean,))
+    # Always stated, even when nothing went wrong: a reader must be able to tell
+    # "one clean try" from "this record does not say", which is the whole defect.
+    assert detail == "judge_attempts=1 "
+    assert metrics == {"judge_attempts": 1.0, "judge_faults": 0.0}
+
+    retried = Judgment(
+        True, "q", "VERDICT: YES\nQUOTE: q", attempts=3, faults=("http_429", "timeout")
+    )
+    detail, metrics = judge_delivery((retried,))
+    assert "judge_attempts=3 " in detail
+    assert "judge_faults=['http_429', 'timeout'] " in detail
+    assert metrics == {"judge_attempts": 3.0, "judge_faults": 2.0}
+
+    # CMP-5 makes TWO judge calls per attempt; both are summed into one record.
+    detail, metrics = judge_delivery((clean, retried))
+    assert "judge_attempts=4 " in detail
+    assert metrics == {"judge_attempts": 4.0, "judge_faults": 2.0}
+
+    # Nothing to say when the judge lane never opened (CMP-5's mechanical path).
+    assert judge_delivery(()) == ("", {})
+
+
+def test_cmp5_and_cmp6_record_the_judges_delivery():
+    """The plumbing itself, pinned where it lands — the same source-pin idiom as
+    `test_cmp5_publishes_its_classification_and_keeps_the_reply_last`.
+
+    On the arm running when this was found, every CMP-5 attempt took the mechanical
+    lane (no judge call at all) and every CMP-6 attempt recorded a delivered verdict
+    — but neither record could have SHOWN a retry had one happened. Both run
+    functions now publish the delivery fragment and merge its metric, and `reply=`
+    still lands last."""
+    import inspect
+
+    from runner.tasks import cluster_g
+
+    for run in (cluster_g.run_cmp5, cluster_g.run_cmp6):
+        source = inspect.getsource(run)
+        assert "judge_delivery(verdict.judgments)" in source, run.__name__
+        assert "metrics.update(" in source, run.__name__
+        assert source.index("judge_delivery") < source.index("reply={reply[:240]!r}"), run.__name__

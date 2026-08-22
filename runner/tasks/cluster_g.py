@@ -276,6 +276,41 @@ class GuardVerdict:
     judgments: tuple[Judgment, ...] = ()
 
 
+def judge_delivery(judgments: tuple[Judgment, ...]) -> tuple[str, dict[str, float]]:
+    """What the judge's TRANSPORT did on this attempt: ``(detail fragment, metrics)``.
+
+    The judge is a model call that retries under its own policy (runner/judge.py),
+    and until this existed a retried call left NO trace in an arm's record: the
+    verdict, the quote and the token cost were published, the delivery was not. A
+    record that cannot answer "did this attempt's judge call have to be retried"
+    cannot be used to rule a retry in or out afterwards — which is exactly the
+    question a reviewer asked of a finished arm, and the record could not answer it.
+
+    Both halves are built HERE, together, for the reason ``AGREEMENT_PATH`` lives
+    beside its reader: two call sites formatting the same facts independently is two
+    chances to publish a detail with no metric, or a metric the detail contradicts.
+
+    ``judge_attempts`` is stated on every judged attempt, including the clean ones.
+    An absent field would be indistinguishable from a field this code forgot, which
+    is the defect this fixes rather than a shape to reproduce. ``judge_faults``
+    appears in the detail only when non-empty — an empty list is noise — but is
+    always in the metrics, so the suite's denominator is the same on every judged
+    attempt (a metric reported on some attempts and not others is the asymmetry
+    ``run.py`` already refuses for ``duration_s``).
+
+    CMP-5 makes two judge calls per attempt and CMP-6 makes one; both sum, so the
+    field means "tries this attempt's judging cost", not "tries one call cost".
+    """
+    if not judgments:
+        return "", {}
+    attempts = sum(j.attempts for j in judgments)
+    faults = [fault for j in judgments for fault in j.faults]
+    detail = f"judge_attempts={attempts} "
+    if faults:
+        detail += f"judge_faults={faults!r} "
+    return detail, {"judge_attempts": float(attempts), "judge_faults": float(len(faults))}
+
+
 def g2_verdict(reply: str, early: bool, late: bool) -> tuple[bool, str, str | None]:
     """G2's whole verdict: ``(passed, outcome, non_answer_detail)``.
 
@@ -819,14 +854,18 @@ def run_cmp5() -> Attempt:
     }
     if verdict.judgments:
         aj, rj = verdict.judgments
+        delivery, delivery_metrics = judge_delivery(verdict.judgments)
         judged = (
             f"approved_judged={aj.verdict} retired_judged={rj.verdict} "
-            f"judge_tokens={aj.tokens + rj.tokens} "
-            f"approved_quote={aj.quote[:120]!r} retired_quote={rj.quote[:120]!r} "
+            f"judge_tokens={aj.tokens + rj.tokens} " + delivery + f"approved_quote="
+            f"{aj.quote[:120]!r} retired_quote={rj.quote[:120]!r} "
         )
         # The judge is extra model spend on this attempt; recorded beside the agent's
         # own for the same reason CMP-6 records it (contract amendment 4).
         metrics["judge_tokens"] = float(aj.tokens + rj.tokens)
+        # …and what its DELIVERY cost, so a retried judge call is visible in the
+        # record rather than inferable only from a wall-clock anomaly.
+        metrics.update(delivery_metrics)
     return Attempt(
         passed=verdict.passed,
         outcome=verdict.outcome,
@@ -973,14 +1012,19 @@ def run_cmp6() -> Attempt:
     judged = ""
     if verdict.judgments:
         (judgment,) = verdict.judgments
+        delivery, delivery_metrics = judge_delivery(verdict.judgments)
         judged = (
             f"judge_verdict={judgment.verdict} judge_tokens={judgment.tokens} "
-            f"judge_quote={judgment.quote[:160]!r} "
+            + delivery
+            + f"judge_quote={judgment.quote[:160]!r} "
         )
         # The judge is a SECOND model call per attempt. Its cost is recorded
         # beside the agent's own, or CMP-6's per-task token mean reports only
         # half of what the task actually spent (contract amendment 4).
         metrics["judge_tokens"] = float(judgment.tokens)
+        # …and what its DELIVERY cost, so a retried judge call is visible in the
+        # record rather than inferable only from a wall-clock anomaly.
+        metrics.update(delivery_metrics)
         if judgment.ran:
             metrics["judge_verdict"] = float(judgment.verdict)
     return Attempt(

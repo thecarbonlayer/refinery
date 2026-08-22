@@ -43,6 +43,8 @@ import json
 import re
 import time
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 JUDGE_PROMPT = """You judge whether an ANSWER conveys the same meaning as an EXPECTED FACT.
@@ -116,15 +118,25 @@ class RetryPolicy:
 
     ``max_attempts`` bounds TOTAL tries, not retries — 5 means four waits (2s, 4s,
     8s, 16s at the shipped base) and then a give-up, which is carbon's reading of the
-    same field name. ``max_delay_s`` caps a single wait; carbon has no such cap
-    because its computed backoff never reaches one, and neither does this one (16 <
-    30). It exists for the server-supplied ``Retry-After``, which is not ours to
-    bound by construction: an endpoint asking for an hour must not stall the run.
+    same field name.
+
+    ``max_delay_s`` is the longest SINGLE wait this policy will spend on one pair. It
+    never binds on the computed backoff (16 < 60); it exists for the server-supplied
+    ``Retry-After``, which is not ours to bound by construction. Its rule is a
+    refusal, not a clamp: an instruction we are willing to wait for is honored
+    EXACTLY, and one longer than this stops the retry and records the pair
+    undelivered. Clamping — the first version of this code — retried at 60s against a
+    server that said 120, i.e. asked again BEFORE it was allowed to, near-certainly
+    burning the try and adding load to a limiter that had just said no. Waiting the
+    full amount instead would let one endpoint stall the run without limit. Refusing
+    is the only one of the three that is both honest and bounded: four such waits
+    bound a single pair at 4 x max_delay_s, and the undelivered pair is visible to
+    the gate rather than silently under-honored.
     """
 
     max_attempts: int = 5
     base_delay_ms: int = 2000
-    max_delay_s: float = 30.0
+    max_delay_s: float = 60.0
 
 
 # Refinery's own values, deliberately equal to the ones carbon ships today
@@ -171,49 +183,104 @@ def fault_class(exc: Exception) -> str:
     return type(exc).__name__
 
 
-def _retry_after_seconds(exc: Exception) -> float | None:
-    """The server's own ``Retry-After``, in seconds, when the exception carries one.
+def _header(exc: Exception, name: str) -> str | None:
+    """One header off an exception's response, matched case-INSENSITIVELY.
 
     Duck-typed through ``exc.response.headers`` rather than typed against httpx: the
     provider seam is carbon's, refinery does not depend on its HTTP client, and a
-    provider that raises something else simply has no header to offer. The delta-
-    seconds form is honored; the HTTP-date form returns None and the computed backoff
-    stands, because parsing a date against a possibly-skewed local clock to decide a
-    2-vs-4-second wait buys nothing.
+    provider that raises something else simply has no header to offer.
 
-    A 429 that names its own window is the one authoritative number in this whole
-    policy — ours are guesses about an undocumented ceiling, and continuing to guess
-    over an explicit instruction is how a client keeps hammering a closed window.
+    ``httpx.Headers`` is already case-insensitive, so the direct ``get`` covers the
+    live path — but this accepts ANY mapping, and a plain dict is not. HTTP header
+    names are case-insensitive and servers send ``Retry-After`` canonically, so a
+    lowercase-only lookup silently drops the one authoritative number in this whole
+    policy. The fallback scan is what makes the promise true for every mapping,
+    rather than for the one client that happens to be underneath today.
     """
     headers = getattr(getattr(exc, "response", None), "headers", None)
     if headers is None:
         return None
     try:
-        raw = headers.get("retry-after")
+        value = headers.get(name)
     except (AttributeError, TypeError):
         return None
-    if raw is None:  # a response that carries headers but not this one
-        return None
+    if value is not None:
+        return value
     try:
-        seconds = float(str(raw).strip())
+        items = list(headers.items())
+    except (AttributeError, TypeError):
+        return None
+    for key, value in items:
+        if str(key).lower() == name:
+            return value
+    return None
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
+    """The server's own ``Retry-After`` as a wait in seconds, or None to fall back.
+
+    A 429 that names its own window is the one authoritative number in this policy —
+    ours are guesses about an undocumented ceiling, and continuing to guess over an
+    explicit instruction is how a client keeps hammering a closed window.
+
+    BOTH RFC 7231 forms are honored. The delta-seconds form is read directly. The
+    HTTP-date form is parsed and turned into a wait; an earlier version ignored it
+    on the grounds that a skewed local clock makes the arithmetic untrustworthy, and
+    that argument does not survive its own safeguard — the caller clamps every wait
+    into ``[0, max_delay_s]``, so skew can move the wait only inside a range we were
+    already willing to spend. Silently dropping a server instruction is the larger
+    error. A date already in the past means "you may retry now" (0), not "wait
+    forever".
+
+    None means FALL BACK to the computed backoff, and it is returned only for
+    genuine absence or malformation: no such header, an unparseable value, or a
+    negative delta-seconds (which the RFC does not permit and which no clock
+    explains, unlike a past date).
+    """
+    raw = _header(exc, "retry-after")
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    try:
+        return seconds if (seconds := float(text)) >= 0 else None
+    except (TypeError, ValueError):
+        pass
+    try:
+        target = parsedate_to_datetime(text)
     except (TypeError, ValueError):
         return None
-    return seconds if seconds >= 0 else None
+    if target is None:
+        return None
+    if target.tzinfo is None:  # RFC 7231: an HTTP-date with no zone is GMT
+        target = target.replace(tzinfo=UTC)
+    return max((target - datetime.now(UTC)).total_seconds(), 0.0)
 
 
-def _next_delay(attempt: int, exc: Exception, policy: RetryPolicy) -> float | None:
-    """Seconds to wait before the NEXT try, or None when there is no next try.
+def _next_delay(attempt: int, exc: Exception, policy: RetryPolicy) -> tuple[float | None, str]:
+    """``(seconds to wait before the NEXT try, why there is none)``.
 
     ``attempt`` is 1-indexed and already incremented, so ``max_attempts`` bounds
     total tries: at max_attempts=5 a delay is offered after tries 1-4 and refused
     after try 5.
+
+    The reason string is non-empty only where a reader would otherwise be left
+    guessing — today, a ``Retry-After`` longer than ``max_delay_s``, which stops the
+    retry rather than under-honoring it (see ``RetryPolicy``). A budget that simply
+    ran out, or a fault that was never transient, needs no note: the fault itself is
+    already in ``raw`` and the counts say the rest.
     """
     if attempt >= policy.max_attempts or not transient_fault(exc):
-        return None
+        return None, ""
     server_hint = _retry_after_seconds(exc)
-    if server_hint is not None:
-        return min(server_hint, policy.max_delay_s)
-    return min(policy.base_delay_ms * (2 ** (attempt - 1)) / 1000, policy.max_delay_s)
+    if server_hint is None:
+        return min(policy.base_delay_ms * (2 ** (attempt - 1)) / 1000, policy.max_delay_s), ""
+    if server_hint > policy.max_delay_s:
+        return None, (
+            f"the server's Retry-After asked for {server_hint:g}s, longer than the "
+            f"{policy.max_delay_s:g}s this policy will wait; retrying sooner would "
+            f"ask again before it allowed"
+        )
+    return server_hint, ""
 
 
 # The validation artifact (contract §4) and, with it, the judge's ACTIVATION
@@ -472,6 +539,51 @@ def _parse_judgment(raw: str, answer: str) -> Judgment:
     return Judgment(True, quote, raw)
 
 
+def _judgment_from(response, answer: str, attempts: int, faults: tuple[str, ...]) -> Judgment:
+    """A DELIVERED reply, turned into a Judgment. Runs OUTSIDE the retried region.
+
+    Everything here happens exactly once, whatever it does, because a reply is
+    already in hand. That placement is the safety property, not the code below it:
+    no failure in reading a reply can ask for a different one.
+
+    Two failures are possible and they resolve differently, deliberately.
+
+    A reply that cannot be READ AT ALL fails closed — ``ran=False``, no verdict —
+    the same as one that parses into nothing. That is the existing contract for "no
+    decision came back", and it is right here too: the judge produced something this
+    code cannot interpret, so there is no decision to record. It is NOT retried.
+
+    Telemetry that cannot be read is not a failure of the judgment at all. The
+    verdict stands and ``tokens`` falls back to 0, which is precisely what that
+    field already means everywhere else in this module: unmeasured, never an
+    estimate. The reason is appended beneath the judge's own output in ``raw``, the
+    same idiom the grounding refusal uses, so the loss is recorded rather than
+    silent — but it costs the number, never the verdict.
+    """
+    try:
+        judgment = _parse_judgment(response.content or "", answer)
+    except Exception as exc:
+        return Judgment(
+            False,
+            "",
+            f"<unreadable judge reply: {exc}>",
+            ran=False,
+            attempts=attempts,
+            faults=faults,
+        )
+    try:
+        tokens = _usage_tokens(response.usage)
+    except Exception as exc:
+        return replace(
+            judgment,
+            tokens=0,
+            attempts=attempts,
+            faults=faults,
+            raw=f"{judgment.raw}\n<usage unreadable: {exc}>",
+        )
+    return replace(judgment, tokens=tokens, attempts=attempts, faults=faults)
+
+
 def judged_equivalent(
     expected: str, answer: str, provider, *, retry: RetryPolicy = JUDGE_RETRY
 ) -> Judgment:
@@ -493,7 +605,7 @@ def judged_equivalent(
     pair rather than crashing the validation or passing a task. The runner's own
     catch-all remains the outer net.
 
-    A TRANSIENT provider fault is now tried again first, under ``retry`` (see
+    A TRANSIENT provider fault is tried again first, under ``retry`` (see
     ``RetryPolicy``): 429/502/503/504 and the timeout/rate-limit/connection markers,
     with exponential backoff and the server's own ``Retry-After`` when it sends one.
     The bound is hard, and exhausting it changes nothing about the outcome — a
@@ -501,13 +613,23 @@ def judged_equivalent(
     throttled judge degrades the pair exactly as before rather than quietly becoming
     a verdict.
 
-    What is NOT retried is the line this fix must not cross: a reply that ARRIVED and
-    did not parse returns immediately. That is a fact about the judge's behavior, not
-    about the transport, and re-rolling it would hand a free-forming judge extra
-    chances at the pinned format — changing what the validation artifact measures.
-    Only a call that produced no output at all is repeated, so the same raw output
-    still parses and scores identically; the retry can turn a NON-verdict into a
-    verdict, never one verdict into another.
+    THE RETRY IS SCOPED TO THE CALL, and that scope is the whole safety property.
+    Only ``chat()`` sits inside the retried region; everything downstream of a reply
+    that ARRIVED — parsing, grounding, usage extraction — runs in ``_judgment_from``,
+    outside it, exactly once. The first version of this fix guarded the whole
+    original try block, and a review found what that costs: an exception raised
+    AFTER a reply arrived (a usage accessor failing with a message containing "429")
+    was classified transient, retried, and the SECOND call's verdict replaced a
+    delivered one. The same exception when it did not look transient discarded a
+    valid verdict as undelivered — a phantom judge outage. Both were reproduced.
+
+    So the boundary is structural now rather than argued: nothing after delivery can
+    re-roll a reply or unmake it. A reply that did not parse fails closed without a
+    second call (re-rolling it would put a different question to the judge, and hand
+    a free-forming judge extra chances at the pinned format). Telemetry that cannot
+    be read costs the telemetry NUMBER, never the verdict. The retry can turn a
+    NON-verdict into a verdict — that is its whole job — and can turn nothing else
+    into anything.
 
     ``answer`` therefore reaches the parser as well as the payload. It is the same
     string in both places, by construction: there is one ``answer`` in this
@@ -525,23 +647,20 @@ def judged_equivalent(
     while True:
         attempt += 1
         try:
-            # The guarded region is the whole original one — call, parse, and usage —
-            # so nothing that used to fail closed now escapes into the caller.
+            # The retried region, and nothing else. A fault here means no reply
+            # arrived, which is the only state a second call can honestly improve.
             response = chat(messages, provider=provider, temperature=0.0, max_tokens=512)
-            judgment = _parse_judgment(response.content or "", answer)
-            return replace(
-                judgment,
-                tokens=_usage_tokens(response.usage),
-                attempts=attempt,
-                faults=tuple(faults),
-            )
         except Exception as exc:
             faults.append(fault_class(exc))
-            delay = _next_delay(attempt, exc, retry)
+            delay, refusal = _next_delay(attempt, exc, retry)
             if delay is None:
                 error_msg = f"<provider error: {exc}>"
+                if refusal:
+                    error_msg += f"\n<not retried: {refusal}>"
                 return Judgment(
                     False, "", error_msg, ran=False, attempts=attempt, faults=tuple(faults)
                 )
             if delay:
                 _sleep(delay)
+            continue
+        return _judgment_from(response, answer, attempt, tuple(faults))

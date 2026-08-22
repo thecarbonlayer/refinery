@@ -7,10 +7,13 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from model.fake import fake
+from model.provider import LLMResponse, Provider
 
 from loop import judge_validate
 from runner.judge import JUDGE_PROMPT, JUDGE_PROMPT_SHA, Judgment, judged_equivalent
@@ -1021,42 +1024,28 @@ def test_an_unparseable_reply_is_never_retried(slept):
 def test_the_servers_own_retry_after_beats_the_computed_backoff(slept):
     """When the 429 carries a Retry-After, the server has told us how long it wants;
     guessing over that is how a client keeps hammering a window it was asked to skip.
-    Clamped to ``max_delay_s`` so a hostile or absurd value cannot stall the run."""
-    from runner.judge import JUDGE_RETRY
 
-    class _Response:
-        def __init__(self, value):
-            self.headers = {"retry-after": value}
+    The three DECISIONS about awkward values — an HTTP-date, a value longer than we
+    will wait, a canonically-cased header name — have their own tests below. This one
+    keeps the two plain cases: an ordinary value is honored exactly, and a response
+    with no such header falls back to the computed backoff."""
 
     class _Throttled(RuntimeError):
-        def __init__(self, value):
+        def __init__(self, headers):
             super().__init__(_HTTP_429)
-            self.response = _Response(value)
+            self.response = SimpleNamespace(headers=headers)
 
-    honored = judged_equivalent("E", "a", fake(scripted=_flaky([_Throttled("7")])))
+    honored = judged_equivalent("E", "a", fake(scripted=_flaky([_Throttled({"retry-after": "7"})])))
     assert honored.ran is True
     assert slept == [7.0]  # not the computed 2.0
 
     slept.clear()
-    clamped = judged_equivalent("E", "a", fake(scripted=_flaky([_Throttled("86400")])))
-    assert clamped.ran is True
-    assert slept == [JUDGE_RETRY.max_delay_s]
-
-    slept.clear()
-    # An HTTP-date Retry-After is not parsed; the computed backoff stands.
-    http_date = _Throttled("Wed, 21 Oct 2026 07:28:00 GMT")
-    dated = judged_equivalent("E", "a", fake(scripted=_flaky([http_date])))
-    assert dated.ran is True
-    assert slept == [2.0]
-
-    slept.clear()
-    # And a response that carries headers but not this one, which is the shape the
-    # 2026-08-21 429s may well have had — str(exc) captured no headers, so the
-    # evidence cannot say. Either way the computed backoff stands.
-    silent = _Throttled("7")
-    silent.response.headers = {}
-    quiet = judged_equivalent("E", "a", fake(scripted=_flaky([silent])))
+    # A response that carries headers but not this one — the shape the 2026-08-21
+    # 429s may well have had, since str(exc) captured no headers and the evidence
+    # cannot say. The computed backoff stands.
+    quiet = judged_equivalent("E", "a", fake(scripted=_flaky([_Throttled({})])))
     assert quiet.ran is True
+    assert slept == [2.0]
     assert slept == [2.0]
 
 
@@ -1155,3 +1144,218 @@ def test_the_judges_transient_rule_agrees_with_carbons():
     theirs = [Agent._transient_error(RuntimeError(p)) for p in probes]
     assert mine == theirs
     assert mine[-2] is False  # the token-count substring trap, still shut
+
+
+# --- The retry is scoped to the CALL, not to everything around it ----------------
+#
+# Review of the first transport fix (Codex, 2026-08-22) found the boundary it
+# documented — "a retry converts a non-verdict into a verdict, never one verdict
+# into another" — did not actually hold. The guarded region was the whole original
+# try block: call, parse, AND usage extraction. So an exception raised AFTER a reply
+# had already arrived could be classified transient and re-roll a delivered verdict
+# (HIGH), or, when it was not transient, discard a delivered verdict as undelivered
+# (MEDIUM). Both were reproduced. They are one defect: the retry decision was scoped
+# to everything that can raise instead of to the CALL.
+#
+# The rule these pin: once a reply has been delivered, nothing that happens
+# afterwards may re-roll it or mark it undelivered. Failing to read telemetry costs
+# the telemetry number, not the verdict.
+
+
+class _DeliveredThenRaises(LLMResponse):
+    """A reply that ARRIVED, whose usage accessor then raises.
+
+    The live transport cannot produce this today — httpx raises status errors before
+    ``LLMResponse`` is ever constructed (carbon model/openai_compatible.py) — which
+    is why the defect never fired in the field. "Cannot fire on today's transport"
+    is not the same guarantee as "cannot fire", and CMP-5/CMP-6 call this same
+    function live against whatever provider they are handed.
+    """
+
+    def __init__(self, content: str, exc: Exception):
+        super().__init__(content=content, finish_reason="stop")
+        self._exc = exc
+
+    @property
+    def usage(self):
+        raise self._exc
+
+    @usage.setter
+    def usage(self, value):  # LLMResponse.__init__ assigns the field
+        pass
+
+
+def _responses(*items):
+    """A provider that returns ``items`` in order, counting its calls."""
+    calls = []
+
+    def responder(messages, **_kw):
+        calls.append(1)
+        return items[min(len(calls) - 1, len(items) - 1)]
+
+    provider = Provider(base_url="fake://local", model="probe", api_key="x", responder=responder)
+    return provider, calls
+
+
+def test_a_delivered_verdict_is_never_re_rolled_by_a_later_failure(slept):
+    """HIGH. Reproduced against the previous fix: the first call returns a grounded
+    YES, its usage accessor then raises RuntimeError("429 while reading usage"), the
+    transient matcher sees 429, retries — and the SECOND call's NO becomes the
+    answer. calls=2, attempts=2, verdict=False. A verdict was replaced by another
+    verdict, which is exactly what the retry must never do."""
+    provider, calls = _responses(
+        _DeliveredThenRaises("VERDICT: YES\nQUOTE: a", RuntimeError("429 while reading usage")),
+        LLMResponse(content="VERDICT: NO\nQUOTE: a", finish_reason="stop"),
+    )
+
+    judgment = judged_equivalent("E", "a", provider)
+
+    assert len(calls) == 1, "a delivered reply must not be asked for again"
+    assert judgment.attempts == 1
+    assert judgment.ran is True and judgment.verdict is True  # the YES that arrived
+    assert judgment.faults == ()
+    assert slept == []
+
+
+def test_unreadable_usage_costs_the_number_not_the_verdict():
+    """MEDIUM. Same defect, non-transient half: a valid delivered YES was discarded
+    as undelivered because reading its telemetry raised. Live that is a phantom
+    'judge unavailable' — CMP-6 errors, CMP-5 can error when no other delivered
+    verdict decides — and in the artifact it lowers delivered_count and turns the
+    pair into a disagreement despite a verdict having arrived.
+
+    The verdict now stands and ``tokens`` falls back to 0, which is the field's
+    existing meaning: unmeasured, never an estimate."""
+    provider, calls = _responses(
+        _DeliveredThenRaises("VERDICT: YES\nQUOTE: a", ValueError("telemetry decode failed"))
+    )
+
+    judgment = judged_equivalent("E", "a", provider)
+
+    assert len(calls) == 1
+    assert judgment.ran is True and judgment.verdict is True
+    assert judgment.tokens == 0
+    assert "usage unreadable" in judgment.raw  # the loss is recorded, not hidden
+    assert "VERDICT: YES" in judgment.raw  # beneath the judge's own output, intact
+
+
+def test_an_unreadable_reply_fails_closed_without_a_re_roll(slept):
+    """The third face of the same class. A reply that arrived but cannot be READ at
+    all is not a transport fault — the reply is already in hand, and asking again
+    would put a different question to the judge. It fails closed (ran=False, no
+    verdict) exactly like an unparseable one, and it is NOT retried."""
+    # `content or ""` already absorbs None, so the unreadable case is a content the
+    # parser cannot read at all.
+    broken = LLMResponse(content="VERDICT: YES\nQUOTE: a", finish_reason="stop")
+    broken.content = object()
+    provider, calls = _responses(broken, LLMResponse(content="VERDICT: NO\nQUOTE: a"))
+
+    judgment = judged_equivalent("E", "a", provider)
+
+    assert len(calls) == 1
+    assert judgment.attempts == 1
+    assert judgment.ran is False and judgment.verdict is False
+    assert slept == []
+
+
+def test_a_transport_fault_is_still_retried_after_the_scoping(slept):
+    """And the fix must not have thrown the baby out: a fault from the CALL — where
+    no reply ever arrived — is still retried and can still deliver."""
+    calls = []
+
+    def responder(messages, **_kw):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError(_HTTP_429)
+        return LLMResponse(content="VERDICT: YES\nQUOTE: a", finish_reason="stop")
+
+    provider = Provider(base_url="fake://local", model="probe", api_key="x", responder=responder)
+    judgment = judged_equivalent("E", "a", provider)
+
+    assert judgment.ran is True and judgment.verdict is True
+    assert judgment.attempts == 2 and judgment.faults == ("http_429",)
+    assert slept == [2.0]
+
+
+# --- Retry-After: three decisions, made rather than inherited -------------------
+
+
+def _throttled(headers: dict) -> RuntimeError:
+    exc = RuntimeError(_HTTP_429)
+    exc.response = SimpleNamespace(headers=headers)
+    return exc
+
+
+def test_retry_after_is_read_case_insensitively():
+    """HTTP header names are case-insensitive and servers send ``Retry-After``
+    canonically. httpx's own Headers mapping hides that; a plain dict does not, and
+    this code accepts any mapping. Missing it silently discards the one authoritative
+    number in the whole policy."""
+    from runner.judge import _retry_after_seconds
+
+    assert _retry_after_seconds(_throttled({"Retry-After": "7"})) == 7.0
+    assert _retry_after_seconds(_throttled({"retry-after": "7"})) == 7.0
+    assert _retry_after_seconds(_throttled({"RETRY-AFTER": "7"})) == 7.0
+    assert _retry_after_seconds(_throttled({"x-other": "7"})) is None
+
+
+def test_retry_after_http_date_is_honored():
+    """DECIDED, not inherited. RFC 7231 allows an HTTP-date and the previous fix
+    silently ignored it — a server instruction dropped on the floor with no trace.
+    It is parsed and converted to a wait. Clock skew was the argument for ignoring
+    it; the clamp already bounds skew to [0, max_delay_s], so the argument does not
+    survive its own safeguard."""
+    from email.utils import format_datetime
+
+    from runner.judge import _retry_after_seconds
+
+    soon = datetime.now(UTC) + timedelta(seconds=8)
+    seconds = _retry_after_seconds(_throttled({"Retry-After": format_datetime(soon)}))
+    assert seconds is not None and 6.0 <= seconds <= 9.0
+
+    # A date already past means "you may retry now", not "wait forever".
+    past = datetime.now(UTC) - timedelta(seconds=120)
+    assert _retry_after_seconds(_throttled({"Retry-After": format_datetime(past)})) == 0.0
+
+    # Unparseable stays a fallback to the computed backoff, explicitly.
+    assert _retry_after_seconds(_throttled({"Retry-After": "next tuesday"})) is None
+
+
+def test_a_retry_after_we_will_not_wait_for_stops_the_retry(slept):
+    """DECIDED. The previous fix clamped a large Retry-After down to max_delay_s and
+    retried anyway — i.e. it asked again BEFORE the server said it could, silently
+    under-honoring the instruction and near-certainly burning the try. Refusing is
+    the honest reading: the pair records undelivered, which the gate can see, rather
+    than a retry we know is early."""
+    from runner.judge import JUDGE_RETRY
+
+    too_long = str(int(JUDGE_RETRY.max_delay_s) + 60)
+    calls = []
+
+    def responder(messages, **_kw):
+        calls.append(1)
+        raise _throttled({"Retry-After": too_long})
+
+    provider = Provider(base_url="fake://local", model="probe", api_key="x", responder=responder)
+    judgment = judged_equivalent("E", "a", provider)
+
+    assert len(calls) == 1, "no early retry against an explicit instruction"
+    assert judgment.ran is False and judgment.attempts == 1
+    assert judgment.faults == ("http_429",)
+    assert slept == []
+    assert "Retry-After" in judgment.raw  # the reason is recorded, not silent
+
+    # And a value we WILL wait for is honored exactly, not clamped away.
+    slept.clear()
+    at_the_limit = str(int(JUDGE_RETRY.max_delay_s))
+    calls2 = []
+
+    def responder2(messages, **_kw):
+        calls2.append(1)
+        if len(calls2) == 1:
+            raise _throttled({"Retry-After": at_the_limit})
+        return LLMResponse(content="VERDICT: YES\nQUOTE: a", finish_reason="stop")
+
+    provider2 = Provider(base_url="fake://local", model="probe", api_key="x", responder=responder2)
+    assert judged_equivalent("E", "a", provider2).ran is True
+    assert slept == [JUDGE_RETRY.max_delay_s]
